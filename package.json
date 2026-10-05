@@ -1,0 +1,35 @@
+{
+  "name": "jarvis",
+  "version": "0.14.1",
+  "scripts": {
+    "start": "tsx src/server.ts",
+    "whoop:auth": "tsx scripts/whoop-auth.ts",
+    "try:cardio": "tsx scripts/try.ts cardio",
+    "try:briefing": "tsx scripts/try.ts briefing",
+    "typecheck": "tsc -p tsconfig.json",
+    "google:auth": "tsx scripts/google-auth.ts",
+    "check": "tsx scripts/check.ts"
+  },
+  "type": "module",
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.131.0",
+    "ask-sdk-core": "^2.14.0",
+    "ask-sdk-express-adapter": "^2.14.0",
+    "ask-sdk-model": "^1.86.0",
+    "express": "^5.2.1",
+    "googleapis": "^183.0.0",
+    "ical.js": "^2.2.1",
+    "mqtt": "^5.16.0",
+    "playwright-core": "^1.63.0"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "@types/node": "^26.6.4",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2"
+  },
+  "private": true,
+  "engines": {
+    "node": ">=22"
+  }
+}

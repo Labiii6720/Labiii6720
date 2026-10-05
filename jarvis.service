@@ -1,0 +1,38 @@
+# systemd-Dienst, gehärtet. Einrichten:
+#   sudo useradd -r -m -s /usr/sbin/nologin jarvis      # eigener Benutzer ohne Login
+#   sudo cp -r ~/jarvis /home/jarvis/jarvis && sudo chown -R jarvis:jarvis /home/jarvis/jarvis
+#   sudo cp /home/jarvis/jarvis/jarvis.service /etc/systemd/system/ && sudo systemctl enable --now jarvis
+[Unit]
+Description=Jarvis (Assistent, Alexa-Skill, Telegram, Kameras)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=jarvis
+Group=jarvis
+WorkingDirectory=/home/jarvis/jarvis
+ExecStart=/usr/bin/npm start
+Restart=on-failure
+RestartSec=10
+UMask=0077
+
+# Härtung: nur data/ und workspace/ beschreibbar, kein Zugriff auf andere Home-Verzeichnisse, keine Rechteausweitung
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=tmpfs
+BindPaths=/home/jarvis/jarvis
+ReadWritePaths=/home/jarvis/jarvis/data /home/jarvis/jarvis/workspace /home/jarvis/.cache /home/jarvis/.npm
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,130 @@
+# JARVIS Node 1 – erstes eigenes Gerät
+# ESP32 DevKit + BME280 (Temperatur, Luftfeuchte, Luftdruck) + Relais + Taster + Status-LED
+#
+#   esphome run jarvis-node-1.yaml      (erstes Mal per USB, danach per WLAN/OTA)
+#
+# Schwellwerte für die Dusch-Erkennung unten anpassen (Luftfeuchte im Bad).
+
+substitutions:
+  name: jarvis-node-1
+  friendly_name: Jarvis Node 1
+  dusche_an: "72"      # ab dieser Luftfeuchte (%) gilt: Dusche läuft
+  dusche_aus: "62"     # darunter ist sie vorbei
+  pin_sda: GPIO21
+  pin_scl: GPIO22
+  pin_relais: GPIO26
+  pin_taster: GPIO27
+  pin_led: GPIO2
+
+esphome:
+  name: ${name}
+  friendly_name: ${friendly_name}
+
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
+
+logger:
+
+# Verschlüsselte Verbindung zu Home Assistant
+api:
+  encryption:
+    key: !secret api_key
+
+ota:
+  - platform: esphome
+    encryption: {}            # nutzt den API-Schlüssel, kein separates Passwort nötig
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  # Notfall-Hotspot, falls das WLAN nicht erreichbar ist
+  ap:
+    ssid: "${friendly_name} Setup"
+    password: !secret ap_password
+
+captive_portal:
+
+i2c:
+  sda: ${pin_sda}
+  scl: ${pin_scl}
+  scan: true
+
+sensor:
+  - platform: bme280_i2c
+    address: 0x76          # manche Boards: 0x77 (steht im Log beim I2C-Scan)
+    update_interval: 30s
+    temperature:
+      name: Temperatur
+      id: temperatur
+    humidity:
+      name: Luftfeuchte
+      id: feuchte
+    pressure:
+      name: Luftdruck
+  - platform: wifi_signal
+    name: WLAN-Signal
+    update_interval: 60s
+  - platform: uptime
+    name: Laufzeit
+
+switch:
+  - platform: gpio
+    name: Relais
+    id: relais
+    pin: ${pin_relais}
+    inverted: true            # die meisten Relais-Module schalten bei LOW; sonst auf false
+    restore_mode: RESTORE_DEFAULT_OFF
+
+binary_sensor:
+  # Taster: kurz = Relais lokal umschalten (geht auch ohne WLAN), lang = Ereignis an Home Assistant
+  - platform: gpio
+    name: Taster
+    pin:
+      number: ${pin_taster}
+      mode:
+        input: true
+        pullup: true
+      inverted: true
+    filters:
+      - delayed_on_off: 50ms
+    on_multi_click:
+      - timing:
+          - ON for at most 1s
+          - OFF for at least 0.2s
+        then:
+          - switch.toggle: relais
+      - timing:
+          - ON for at least 2s
+        then:
+          - homeassistant.event:
+              event: esphome.jarvis_taster
+              data:
+                node: ${name}
+                aktion: lang
+
+  # Dusch-Erkennung über die Luftfeuchte, mit Hysterese; "aus" erst 5 Minuten nach dem Abfall
+  - platform: template
+    name: Dusche
+    id: dusche
+    device_class: moisture
+    lambda: |-
+      if (isnan(id(feuchte).state)) return {};
+      if (id(feuchte).state >= ${dusche_an}) return true;
+      if (id(feuchte).state <= ${dusche_aus}) return false;
+      return {};
+    filters:
+      - delayed_off: 5min
+
+light:
+  - platform: status_led
+    name: Status-LED
+    pin:
+      number: ${pin_led}
+      ignore_strapping_warning: true   # Onboard-LED der meisten DevKits
+    internal: true
+
+button:
+  - platform: restart
+    name: Neustart

@@ -1,0 +1,79 @@
+{
+  "interactionModel": {
+    "languageModel": {
+      "invocationName": "butler jarvis",
+      "intents": [
+        {
+          "name": "AMAZON.CancelIntent",
+          "samples": []
+        },
+        {
+          "name": "AMAZON.HelpIntent",
+          "samples": []
+        },
+        {
+          "name": "AMAZON.StopIntent",
+          "samples": []
+        },
+        {
+          "name": "AMAZON.NavigateHomeIntent",
+          "samples": []
+        },
+        {
+          "name": "AMAZON.FallbackIntent",
+          "samples": []
+        },
+        {
+          "name": "CardioIntent",
+          "slots": [],
+          "samples": [
+            "cardio",
+            "nach meinem cardio",
+            "nach meiner recovery",
+            "mein training",
+            "wie soll ich heute trainieren",
+            "was für cardio mache ich heute"
+          ]
+        },
+        {
+          "name": "BriefingIntent",
+          "slots": [],
+          "samples": [
+            "mein tag",
+            "nach meinem tag",
+            "briefing",
+            "tagesbriefing",
+            "was steht heute an",
+            "was ist heute wichtig",
+            "ich bin bereit",
+            "ich bin fertig"
+          ]
+        },
+        {
+          "name": "FrageIntent",
+          "slots": [
+            {
+              "name": "frage",
+              "type": "AMAZON.SearchQuery"
+            }
+          ],
+          "samples": [
+            "frage {frage}",
+            "frag {frage}",
+            "sag mir {frage}",
+            "such mir {frage}",
+            "finde heraus {frage}",
+            "was {frage}",
+            "wie {frage}",
+            "wer {frage}",
+            "wo {frage}",
+            "wann {frage}",
+            "ob {frage}",
+            "{frage} bitte"
+          ]
+        }
+      ],
+      "types": []
+    }
+  }
+}

@@ -1,0 +1,206 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>JARVIS // COMMAND CENTER</title>
+<style>
+  :root { --bg:#06070b; --panel:#0c0f16; --panel2:#11151f; --line:#1c2230; --text:#dce0e8; --dim:#6b7484; --accent:#ff8a3d; --ok:#7ee787; --warn:#ff6b6b; --blue:#58a6ff; }
+  * { box-sizing:border-box; }
+  html,body { margin:0; height:100%; background:var(--bg); color:var(--text); font:13px/1.45 "SF Mono",Menlo,Consolas,monospace; }
+  a { color:var(--blue); }
+  .top { display:flex; align-items:center; gap:16px; padding:12px 18px; border-bottom:1px solid var(--line); position:sticky; top:0; background:var(--bg); z-index:5; flex-wrap:wrap; }
+  .top h1 { font-size:14px; letter-spacing:.18em; margin:0; }
+  .badge { font-size:11px; padding:3px 9px; border:1px solid var(--line); border-radius:999px; color:var(--dim); }
+  .badge.on { color:var(--ok); border-color:#214a2b; }
+  .badge.warn { color:var(--warn); border-color:#4a2121; }
+  .badge.alarm { color:#fff; background:var(--warn); border-color:var(--warn); }
+  .top .modes { margin-left:auto; display:flex; gap:6px; }
+  .top button { background:#141926; border:1px solid #2a3140; color:var(--text); border-radius:6px; padding:5px 10px; font:inherit; cursor:pointer; }
+  .top button.sel { border-color:var(--accent); color:var(--accent); }
+  .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(320px,1fr)); gap:14px; padding:16px; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:14px; }
+  .card h2 { margin:0 0 10px; font-size:11px; letter-spacing:.14em; color:var(--dim); font-weight:600; }
+  .row { padding:8px 0; border-top:1px solid var(--line); }
+  .row:first-of-type { border-top:none; }
+  .muted { color:var(--dim); }
+  .btns { display:flex; gap:6px; margin-top:8px; flex-wrap:wrap; }
+  button.act { background:#161b27; border:1px solid #2a3140; color:var(--text); border-radius:6px; padding:6px 10px; font:inherit; cursor:pointer; }
+  button.ok { border-color:#2f6b3a; color:var(--ok); }
+  button.no { border-color:#6b2f2f; color:var(--warn); }
+  input, .chatbox textarea { background:#0a0d14; border:1px solid var(--line); color:var(--text); border-radius:6px; padding:7px 9px; font:inherit; width:100%; }
+  .cams { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+  .cams figure { margin:0; }
+  .cams img { width:100%; border-radius:8px; border:1px solid var(--line); background:#000; aspect-ratio:4/3; object-fit:cover; }
+  .cams figcaption { font-size:11px; color:var(--dim); margin-top:3px; }
+  .chat { grid-column:1/-1; }
+  .chatlog { max-height:260px; overflow:auto; display:flex; flex-direction:column; gap:8px; margin-bottom:10px; }
+  .msg { padding:8px 10px; border-radius:8px; white-space:pre-wrap; }
+  .msg.me { background:#13202e; align-self:flex-end; max-width:80%; }
+  .msg.jv { background:var(--panel2); border:1px solid var(--line); max-width:90%; }
+  .chatbox { display:flex; gap:8px; }
+  .chatbox button { background:var(--accent); color:#111; border:none; border-radius:6px; padding:0 16px; font:inherit; font-weight:600; cursor:pointer; }
+  pre.audit { max-height:220px; overflow:auto; margin:0; color:var(--dim); font-size:11px; white-space:pre-wrap; }
+  .pill { font-size:10px; padding:2px 7px; border-radius:999px; border:1px solid var(--line); color:var(--dim); }
+  .pill.sens { color:var(--warn); border-color:#4a2121; }
+  .pill.ext { color:var(--accent); border-color:#4a3321; }
+  #gate { position:fixed; inset:0; background:var(--bg); display:flex; align-items:center; justify-content:center; z-index:10; }
+  #gate .box { width:min(360px,90%); background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:20px; }
+  .danger { background:#1a0e0e; border-color:#4a2121; }
+  .danger button { border-color:#6b2f2f; color:var(--warn); }
+</style>
+</head>
+<body>
+<div id="gate"><div class="box">
+  <h2 style="letter-spacing:.14em;color:var(--dim)">JARVIS // COMMAND CENTER</h2>
+  <p class="muted">Token eingeben (JARVIS_EVENT_TOKEN). Wird nur in diesem Browser gespeichert.</p>
+  <input id="token" type="password" placeholder="Token" autofocus>
+  <div class="btns"><button class="act ok" id="enter" style="flex:1">Verbinden</button></div>
+  <p class="muted" id="gateErr"></p>
+</div></div>
+
+<div class="top">
+  <h1>JARVIS</h1>
+  <span class="badge" id="bModus">–</span>
+  <span class="badge" id="bState"></span>
+  <span class="muted" id="clock"></span>
+  <div class="modes">
+    <button data-m="normal">Normal</button>
+    <button data-m="fokus">Fokus</button>
+    <button data-m="nacht">Nacht</button>
+  </div>
+</div>
+
+<div class="grid" id="grid" hidden>
+  <div class="card"><h2>AUFTRÄGE <span id="qn" class="pill"></span></h2><div id="queue"></div></div>
+  <div class="card"><h2>RECHNUNGEN</h2><div id="bills"></div></div>
+  <div class="card"><h2>PROTOKOLLE</h2><div id="protos"></div></div>
+  <div class="card"><h2>ZIELE</h2><div id="goals"></div></div>
+  <div class="card"><h2>VORGÄNGE &amp; ZEITPLÄNE</h2><div id="ops"></div></div>
+  <div class="card"><h2>KAMERAS</h2><div class="cams" id="cams"></div></div>
+  <div class="card chat"><h2>GESPRÄCH</h2>
+    <div class="chatlog" id="chatlog"></div>
+    <div class="chatbox"><input id="chatin" placeholder="Sag etwas zu Jarvis …"><button id="send">Senden</button></div>
+  </div>
+  <div class="card"><h2>PROTOKOLL (AUDIT)</h2><pre class="audit" id="audit"></pre></div>
+  <div class="card danger"><h2>NOTFALL</h2>
+    <p class="muted">Löst den Angriffs-Notfall aus: alles sperren, alarmieren. Nur im Ernstfall.</p>
+    <div class="btns"><button class="act no" id="panic">🚨 Notfall auslösen</button></div>
+  </div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let TOKEN = "";
+try { TOKEN = localStorage.getItem("jarvis.dash") || ""; } catch {}
+
+async function api(path, opts = {}) {
+  const res = await fetch(path, { ...opts, headers: { Authorization: "Bearer " + TOKEN, "Content-Type": "application/json", ...(opts.headers || {}) } });
+  if (res.status === 401) throw new Error("unauthorized");
+  return res.json();
+}
+
+async function connect(token) {
+  TOKEN = token;
+  try {
+    await api("/status.json");
+    try { localStorage.setItem("jarvis.dash", token); } catch {}
+    $("gate").hidden = true; $("grid").hidden = false;
+    tick(); setInterval(tick, 5000);
+  } catch (e) {
+    $("gateErr").textContent = e.message === "unauthorized" ? "Token stimmt nicht." : e.message;
+  }
+}
+$("enter").onclick = () => connect($("token").value.trim());
+$("token").onkeydown = (e) => { if (e.key === "Enter") $("enter").click(); };
+
+const esc = (s) => String(s ?? "").replace(/[<>&]/g, (c) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;" }[c]));
+
+function render(d) {
+  $("clock").textContent = new Date(d.zeit).toLocaleTimeString("de-CH");
+  $("bModus").textContent = "Modus: " + d.modus;
+  const st = $("bState");
+  st.className = "badge " + (d.notfall ? "alarm" : d.pausiert ? "warn" : "on");
+  st.textContent = d.notfall ? "NOTFALL" : d.pausiert ? "pausiert" : "bereit";
+  document.querySelectorAll(".modes button").forEach((b) => b.classList.toggle("sel", b.dataset.m === d.modus));
+
+  $("qn").textContent = d.auftraege.length;
+  $("queue").innerHTML = d.auftraege.length ? d.auftraege.map((a) => `
+    <div class="row"><span class="pill ${a.stufe === "sensibel" ? "sens" : "ext"}">${a.stufe}</span> #${a.id}
+      <div>${esc(a.summary)}</div>
+      <div class="btns">
+        <button class="act ok" onclick="freigeben(${a.id}, '${a.stufe}')">Freigeben</button>
+        <button class="act no" onclick="ablehnen(${a.id})">Ablehnen</button>
+      </div></div>`).join("") : '<div class="muted">Keine offenen Aufträge.</div>';
+
+  $("bills").innerHTML = d.rechnungen.length ? d.rechnungen.map((r) => `
+    <div class="row">#${r.id} ${esc(r.empfaenger)} · ${r.betrag != null ? r.betrag.toFixed(2) + " " + r.waehrung : "Betrag unklar"}
+      <div class="muted">${r.faellig ? "fällig " + r.faellig : ""}</div></div>`).join("") : '<div class="muted">Keine offenen Rechnungen.</div>';
+
+  $("protos").innerHTML = d.protokolle.length ? d.protokolle.map((p) => `
+    <div class="row"><b>${esc(p.name)}</b> <span class="pill ${p.stufe === "sensibel" ? "sens" : p.stufe === "extern" ? "ext" : ""}">${p.stufe}</span>
+      <div class="muted">${esc(p.beschreibung)}</div>
+      <div class="btns"><button class="act" onclick="protokoll('${esc(p.name)}')">Ausführen</button></div></div>`).join("") : '<div class="muted">Keine Protokolle.</div>';
+
+  $("goals").innerHTML = d.ziele.length ? d.ziele.map((z) => `<div class="row">#${z.id} ${esc(z.text)}${z.frist ? ` <span class="muted">(bis ${z.frist})</span>` : ""}</div>`).join("") : '<div class="muted">Noch keine Ziele.</div>';
+
+  const ops = [...d.vorgaenge.map((v) => `<div class="row">🧠 #${v.id} ${v.status} · ${v.steps} Schr. · ${esc(v.auftrag)}</div>`),
+               ...d.zeitplaene.map((z) => `<div class="row">🕒 ${esc(z.name)} · ${z.tage} ${z.zeit}</div>`),
+               ...d.wachen.map((w) => `<div class="row">👁 ${esc(w.kamera)} · alle ${w.alle_minuten} min · ${esc(w.frage)}</div>`)];
+  $("ops").innerHTML = ops.join("") || '<div class="muted">Nichts geplant.</div>';
+
+  if ($("cams").dataset.done !== "1" && d.kameras.length) {
+    $("cams").innerHTML = d.kameras.map((c) => `<figure><img alt="${esc(c.name)}" data-cam="${esc(c.name)}"><figcaption>${esc(c.beschreibung)}</figcaption></figure>`).join("");
+    $("cams").dataset.done = "1";
+    refreshCams();
+  }
+  if (!d.kameras.length) $("cams").innerHTML = '<div class="muted">Keine Kameras.</div>';
+}
+
+function refreshCams() {
+  document.querySelectorAll("#cams img[data-cam]").forEach((img) => {
+    fetch(`/api/kamera/${encodeURIComponent(img.dataset.cam)}`, { headers: { Authorization: "Bearer " + TOKEN } })
+      .then((r) => (r.ok ? r.blob() : null)).then((b) => { if (b) img.src = URL.createObjectURL(b); }).catch(() => {});
+  });
+}
+setInterval(() => { if (!$("grid").hidden) refreshCams(); }, 15000);
+
+async function tick() {
+  try {
+    const d = await api("/status.json"); render(d);
+    const a = await api("/api/audit"); $("audit").textContent = a.lines.join("\n");
+  } catch (e) { if (e.message === "unauthorized") location.reload(); }
+}
+
+window.freigeben = async (id, stufe) => {
+  let pin;
+  if (stufe === "sensibel") { pin = prompt("PIN für diesen sensiblen Auftrag:"); if (pin == null) return; }
+  const r = await api("/api/auftrag", { method: "POST", body: JSON.stringify({ id, aktion: "ok", pin }) });
+  if (r.text) addChat("jv", r.text); tick();
+};
+window.ablehnen = async (id) => { const r = await api("/api/auftrag", { method: "POST", body: JSON.stringify({ id, aktion: "nein" }) }); if (r.text) addChat("jv", r.text); tick(); };
+window.protokoll = async (name) => { const r = await api("/api/protokoll", { method: "POST", body: JSON.stringify({ name }) }); addChat("jv", r.text || r.error || ""); tick(); };
+
+document.querySelectorAll(".modes button").forEach((b) => b.onclick = () => api("/api/modus", { method: "POST", body: JSON.stringify({ modus: b.dataset.m }) }).then(tick));
+
+function addChat(who, text) { const d = document.createElement("div"); d.className = "msg " + who; d.textContent = text; $("chatlog").appendChild(d); $("chatlog").scrollTop = 1e9; }
+async function send() {
+  const t = $("chatin").value.trim(); if (!t) return;
+  $("chatin").value = ""; addChat("me", t);
+  try { const r = await api("/api/chat", { method: "POST", body: JSON.stringify({ text: t }) }); addChat("jv", r.reply); tick(); }
+  catch (e) { addChat("jv", "Fehler: " + e.message); }
+}
+$("send").onclick = send;
+$("chatin").onkeydown = (e) => { if (e.key === "Enter") send(); };
+
+$("panic").onclick = async () => {
+  if (!confirm("Notfall auslösen? Jarvis sperrt alles und alarmiert dich. Nur im Ernstfall.")) return;
+  await api("/api/chat", { method: "POST", body: JSON.stringify({ text: "/notfall" }) }).catch(() => {});
+  addChat("jv", "🚨 Notfall ausgelöst. Prüfe Telegram für die Checkliste.");
+  setTimeout(tick, 500);
+};
+
+if (TOKEN) connect(TOKEN); else $("token").focus();
+</script>
+</body>
+</html>

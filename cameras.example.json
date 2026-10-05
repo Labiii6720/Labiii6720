@@ -1,0 +1,15 @@
+{
+  "arbeitsplatz": {
+    "frigate": "arbeitsplatz",
+    "beschreibung": "Schreibtisch, Monitore und Werkbank",
+    "melden": { "labels": ["person"], "nur_wenn": "abwesend", "ruhe_minuten": 10 },
+    "wachen": [
+      { "frage": "Liegt ein Lötkolben oder ein anderes Gerät eingeschaltet auf dem Tisch, obwohl niemand da ist?", "alle_minuten": 30, "nur_wenn": "abwesend", "ruhe_minuten": 120 }
+    ]
+  },
+  "raum": {
+    "frigate": "raum",
+    "beschreibung": "Wohnbereich mit Sofa und Eingang",
+    "melden": { "labels": ["person"], "zonen": ["eingang"], "nur_wenn": "abwesend", "ruhe_minuten": 5, "beschreiben": true }
+  }
+}

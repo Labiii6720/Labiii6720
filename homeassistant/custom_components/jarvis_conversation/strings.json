@@ -1,0 +1,11 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Jarvis verbinden",
+        "data": { "url": "Adresse von Jarvis", "token": "JARVIS_EVENT_TOKEN", "budget": "Antwortbudget in ms" }
+      }
+    },
+    "error": { "cannot_connect": "Jarvis antwortet nicht auf /health. Adresse, LISTEN_HOST und Firewall prüfen." }
+  }
+}

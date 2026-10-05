@@ -1,0 +1,70 @@
+# Home-Assistant-Paket für Jarvis.
+# Einbinden in configuration.yaml:
+#   homeassistant:
+#     packages:
+#       jarvis: !include jarvis.yaml
+# In der secrets.yaml von Home Assistant:
+#   jarvis_auth: "Bearer DEIN_JARVIS_EVENT_TOKEN"
+# JARVIS-IP unten durch die Adresse des Pi ersetzen (Jarvis mit LISTEN_HOST=0.0.0.0 starten).
+
+rest_command:
+  jarvis_event:
+    url: "http://JARVIS-IP:3000/events"
+    method: POST
+    timeout: 20
+    headers:
+      Authorization: !secret jarvis_auth
+      Content-Type: application/json
+    payload: '{"event": "{{ event }}", "text": {{ text | default("") | to_json }}}'
+  jarvis_kamera:
+    url: "http://JARVIS-IP:3000/events"
+    method: POST
+    timeout: 20
+    headers:
+      Authorization: !secret jarvis_auth
+      Content-Type: application/json
+    payload: '{"event": "kamera", "kamera": "{{ kamera }}", "label": "{{ label }}", "zonen": {{ zonen | default([]) | to_json }}}'
+
+automation:
+  - alias: "Jarvis: Briefing nach der Dusche"
+    description: "Fünf Minuten nachdem die Luftfeuchte im Bad wieder gesunken ist, schickt Jarvis das Tagesbriefing."
+    triggers:
+      - trigger: state
+        entity_id: binary_sensor.jarvis_node_1_dusche
+        from: "on"
+        to: "off"
+    conditions:
+      - condition: time
+        after: "05:00:00"
+        before: "10:00:00"
+    actions:
+      - action: rest_command.jarvis_event
+        data:
+          event: briefing
+
+  - alias: "Jarvis: Taster lang gedrückt"
+    description: "Langer Druck auf den Taster von Node 1 fragt Jarvis nach dem Zustand des Raums."
+    triggers:
+      - trigger: event
+        event_type: esphome.jarvis_taster
+        event_data:
+          aktion: lang
+    actions:
+      - action: rest_command.jarvis_event
+        data:
+          event: frage
+          text: "Der Taster an Jarvis Node 1 wurde lange gedrückt. Sag mir kurz Temperatur und Luftfeuchte dort und ob das Relais an ist."
+
+  # Ohne MQTT: Kamera-Meldungen über die Frigate-Integration von Home Assistant an Jarvis weiterreichen.
+  # Jarvis wendet dann die Regeln aus cameras.json an (Labels, Zonen, nur wenn abwesend, Ruhezeit).
+  - alias: "Jarvis: Person im Raum (Frigate über Home Assistant)"
+    triggers:
+      - trigger: state
+        entity_id: binary_sensor.raum_person_occupancy
+        to: "on"
+    actions:
+      - action: rest_command.jarvis_kamera
+        data:
+          kamera: raum
+          label: person
+

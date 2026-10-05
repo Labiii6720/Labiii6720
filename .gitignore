@@ -1,0 +1,12 @@
+node_modules/
+.env
+data/
+service-account.json
+*.log
+workspace/
+esphome/secrets.yaml
+esphome/.esphome/
+frigate/config.yml
+protokolle.json
+cameras.json
+__pycache__/

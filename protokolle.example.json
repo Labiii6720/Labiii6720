@@ -1,0 +1,41 @@
+{
+  "nacht": {
+    "beschreibung": "Abschliessen, Licht aus, Alarm scharf, Modus Nacht",
+    "stufe": "sensibel",
+    "schritte": [
+      { "tool": "geraet_schalten", "input": { "entity_id": "lock.haustuer", "dienst": "lock" } },
+      { "tool": "geraet_schalten", "input": { "entity_id": "alarm_control_panel.haus", "dienst": "alarm_arm_home" } },
+      { "tool": "geraet_schalten", "input": { "entity_id": "light.wohnzimmer", "dienst": "turn_off" } },
+      { "modus": "nacht" },
+      { "nachricht": "Gute Nacht, Sir." }
+    ]
+  },
+  "abwesend": {
+    "beschreibung": "Alles aus, Alarm scharf, Kameras melden",
+    "stufe": "extern",
+    "schritte": [
+      { "tool": "geraet_schalten", "input": { "entity_id": "light.wohnzimmer", "dienst": "turn_off" } },
+      { "tool": "geraet_schalten", "input": { "entity_id": "switch.jarvis_node_1_relais", "dienst": "turn_off" } },
+      { "tool": "geraet_schalten", "input": { "entity_id": "alarm_control_panel.haus", "dienst": "alarm_arm_away" } },
+      { "modus": "fokus" }
+    ]
+  },
+  "werkstatt": {
+    "beschreibung": "Licht und Werkbank an, Fokus",
+    "stufe": "auto",
+    "schritte": [
+      { "tool": "geraet_schalten", "input": { "entity_id": "light.werkstatt", "dienst": "turn_on", "daten": { "brightness_pct": 100 } } },
+      { "tool": "geraet_schalten", "input": { "entity_id": "switch.jarvis_node_1_relais", "dienst": "turn_on" } },
+      { "modus": "fokus" }
+    ]
+  },
+  "clean_slate": {
+    "beschreibung": "Gespräch vergessen und neu anfangen",
+    "stufe": "extern",
+    "schritte": [
+      { "aktion": "neu" },
+      { "modus": "normal" },
+      { "nachricht": "Clean Slate. Wir fangen von vorne an." }
+    ]
+  }
+}

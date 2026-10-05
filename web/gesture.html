@@ -1,0 +1,290 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>JARVIS // GESTURE INTERFACE</title>
+<style>
+  :root { --bg: #07080c; --panel: #0c0e14; --line: #1d212c; --text: #d7dbe4; --dim: #6b7280; --accent: #ff8a3d; --ok: #7ee787; --warn: #ff6b6b; }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; background: var(--bg); color: var(--text); font: 13px/1.4 "SF Mono", Menlo, Consolas, monospace; }
+  .stage { display: grid; grid-template-columns: 1fr 1fr; height: 100%; }
+  @media (max-width: 900px) { .stage { grid-template-columns: 1fr; grid-template-rows: 1fr 1fr; } }
+  .cam { position: relative; background: #000; overflow: hidden; }
+  .cam video, .cam canvas { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; transform: scaleX(-1); }
+  .cam .tag { position: absolute; left: 14px; top: 12px; color: var(--dim); letter-spacing: .12em; font-size: 11px; }
+  .orb { position: relative; background: radial-gradient(ellipse at 50% 45%, #10131b 0%, var(--panel) 55%, #05060a 100%); border-left: 1px solid var(--line); }
+  .orb canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+  .hud { position: absolute; left: 18px; top: 14px; z-index: 2; letter-spacing: .14em; }
+  .hud h1 { margin: 0 0 2px; font-size: 13px; font-weight: 700; color: #eef1f6; }
+  .hud .sub { color: var(--dim); font-size: 10px; margin-bottom: 10px; }
+  .hud .row { font-size: 11px; color: #aab2c0; }
+  .hud .row b { color: #fff; font-weight: 600; }
+  .hud .live { color: var(--ok); }
+  .hud .off { color: var(--warn); }
+  .panel { position: absolute; right: 16px; bottom: 16px; z-index: 2; width: min(360px, calc(100% - 32px)); background: rgba(12,14,20,.86); border: 1px solid var(--line); border-radius: 10px; padding: 12px; backdrop-filter: blur(6px); }
+  .panel label { display: block; color: var(--dim); font-size: 10px; letter-spacing: .1em; margin: 8px 0 3px; }
+  .panel input, .panel textarea { width: 100%; background: #0a0c12; border: 1px solid var(--line); color: var(--text); border-radius: 6px; padding: 6px 8px; font: inherit; }
+  .panel .btns { display: flex; gap: 8px; margin-top: 10px; }
+  .panel button { flex: 1; background: #161a24; border: 1px solid #2a3040; color: #fff; border-radius: 6px; padding: 8px; font: inherit; cursor: pointer; }
+  .panel button.on { border-color: var(--accent); color: var(--accent); }
+  .reply { margin-top: 10px; max-height: 120px; overflow: auto; color: #e6e9f0; white-space: pre-wrap; font-size: 12px; border-top: 1px solid var(--line); padding-top: 8px; }
+  .toast { position: absolute; left: 50%; top: 18px; transform: translateX(-50%); z-index: 3; background: rgba(255,138,61,.15); border: 1px solid var(--accent); color: #ffd4b8; padding: 6px 12px; border-radius: 999px; font-size: 11px; letter-spacing: .1em; opacity: 0; transition: opacity .25s; }
+  .toast.show { opacity: 1; }
+</style>
+</head>
+<body>
+<div class="stage">
+  <div class="cam">
+    <video id="video" playsinline muted autoplay></video>
+    <canvas id="overlay"></canvas>
+    <div class="tag">KAMERA // HAND TRACKING</div>
+  </div>
+  <div class="orb">
+    <canvas id="orb"></canvas>
+    <div class="hud">
+      <h1>GESTURE // INTERFACE</h1>
+      <div class="sub">MEDIAPIPE HANDS · CANVAS PARTIKEL · LOKAL</div>
+      <div class="row">TRACKING: <b id="st" class="off">LADE MODELL…</b></div>
+      <div class="row">HÄNDE ERKANNT: <b id="hands">0</b> · FPS: <b id="fps">0</b></div>
+      <div class="row">GESTE: <b id="gest">–</b></div>
+      <div class="row">JARVIS: <b id="jv" class="off">NICHT VERBUNDEN</b></div>
+    </div>
+    <div class="toast" id="toast"></div>
+    <div class="panel">
+      <label>JARVIS-ADRESSE (leer = diese Seite)</label>
+      <input id="base" placeholder="http://192.168.1.50:3000">
+      <label>JARVIS_EVENT_TOKEN</label>
+      <input id="token" type="password" placeholder="aus .env">
+      <label>👍 DAUMEN HOCH (1 s) SENDET</label>
+      <input id="cmdA" value="Was steht heute bei mir an? Kurz.">
+      <label>✊ FAUST (2 s) SENDET</label>
+      <input id="cmdB" value="Mach das Licht im Büro aus.">
+      <div class="btns">
+        <button id="mic">🎙 Mikro für den Puls</button>
+        <button id="talk">🗣 Sprechen (Leertaste)</button>
+      </div>
+      <div class="reply" id="reply"></div>
+    </div>
+  </div>
+</div>
+
+<script type="module">
+import { HandLandmarker, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14";
+
+const $ = (id) => document.getElementById(id);
+const video = $("video"), overlay = $("overlay"), orbCanvas = $("orb");
+const octx = overlay.getContext("2d"), ctx = orbCanvas.getContext("2d");
+
+// ---------- Einstellungen merken ----------
+for (const id of ["base", "token", "cmdA", "cmdB"]) {
+  try { const v = localStorage.getItem("jarvis." + id); if (v !== null) $(id).value = v; } catch {}
+  $(id).addEventListener("change", () => { try { localStorage.setItem("jarvis." + id, $(id).value); } catch {} });
+}
+
+function toast(msg) { const t = $("toast"); t.textContent = msg; t.classList.add("show"); clearTimeout(toast.h); toast.h = setTimeout(() => t.classList.remove("show"), 1800); }
+
+// ---------- Jarvis-Brücke ----------
+let busy = false;
+async function jarvis(text) {
+  const token = $("token").value.trim();
+  if (!token) { toast("TOKEN FEHLT"); return; }
+  if (busy) { toast("JARVIS ARBEITET NOCH"); return; }
+  busy = true; $("jv").textContent = "ARBEITET…"; $("jv").className = "";
+  $("reply").textContent = "› " + text;
+  try {
+    const base = $("base").value.trim().replace(/\/$/, "");
+    const res = await fetch(`${base}/events`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ event: "frage_sync", text }),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`);
+    $("reply").textContent = "› " + text + "\n\n" + data.reply;
+    $("jv").textContent = "VERBUNDEN"; $("jv").className = "live";
+    speak(data.reply);
+  } catch (e) {
+    $("jv").textContent = "FEHLER"; $("jv").className = "off";
+    $("reply").textContent = "Fehler: " + e.message;
+  } finally { busy = false; }
+}
+
+function speak(text) {
+  if (!("speechSynthesis" in window)) return;
+  const u = new SpeechSynthesisUtterance(text.replace(/https?:\/\/\S+/g, "Link").slice(0, 1500));
+  const voices = speechSynthesis.getVoices();
+  u.voice = voices.find((v) => /^de[-_]CH/i.test(v.lang)) || voices.find((v) => /^de/i.test(v.lang)) || null;
+  u.lang = u.voice?.lang || "de-DE";
+  u.rate = 1.05;
+  speechSynthesis.cancel();
+  speechSynthesis.speak(u);
+}
+
+// Sprechen: Web Speech API (Chrome; die Erkennung läuft bei Google, nicht lokal)
+const Rec = window.SpeechRecognition || window.webkitSpeechRecognition;
+let listening = false;
+function listen() {
+  if (!Rec) { toast("SPRACHERKENNUNG NUR IN CHROME"); return; }
+  if (listening) return;
+  const rec = new Rec();
+  rec.lang = "de-DE"; rec.interimResults = false; rec.maxAlternatives = 1;
+  listening = true; $("talk").classList.add("on"); toast("ICH HÖRE…");
+  rec.onresult = (e) => { const t = e.results[0][0].transcript; toast("» " + t); jarvis(t); };
+  rec.onerror = (e) => toast("ERKENNUNG: " + e.error);
+  rec.onend = () => { listening = false; $("talk").classList.remove("on"); };
+  rec.start();
+}
+$("talk").addEventListener("click", listen);
+window.addEventListener("keydown", (e) => { if (e.code === "Space" && e.target.tagName !== "INPUT" && e.target.tagName !== "TEXTAREA") { e.preventDefault(); listen(); } });
+
+// ---------- Mikrofon-Pegel für den Puls ----------
+let level = 0, analyser, levelBuf;
+$("mic").addEventListener("click", async () => {
+  if (analyser) return;
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const ac = new AudioContext();
+    analyser = ac.createAnalyser(); analyser.fftSize = 512;
+    ac.createMediaStreamSource(stream).connect(analyser);
+    levelBuf = new Uint8Array(analyser.fftSize);
+    $("mic").classList.add("on"); toast("MIKRO AN");
+  } catch (e) { toast("MIKRO: " + e.message); }
+});
+function readLevel() {
+  if (!analyser) return 0;
+  analyser.getByteTimeDomainData(levelBuf);
+  let sum = 0;
+  for (let i = 0; i < levelBuf.length; i++) { const v = (levelBuf[i] - 128) / 128; sum += v * v; }
+  return Math.min(1, Math.sqrt(sum / levelBuf.length) * 4);
+}
+
+// ---------- Partikel-Kugel ----------
+const N = 1400;
+const P = Array.from({ length: N }, (_, i) => {
+  // gleichmässig auf einer Kugel verteilt (Fibonacci-Spirale), plus etwas Tiefenrauschen
+  const t = (i + 0.5) / N, phi = Math.acos(1 - 2 * t), theta = Math.PI * (1 + Math.sqrt(5)) * i;
+  return { x: Math.sin(phi) * Math.cos(theta), y: Math.sin(phi) * Math.sin(theta), z: Math.cos(phi), r: 0.85 + Math.random() * 0.3, s: 0.6 + Math.random() * 0.8 };
+});
+const state = { open: 0.5, cx: 0.5, cy: 0.5, pinch: 0, energy: 0, spread: 1, tx: 0.5, ty: 0.5 };
+let angle = 0;
+
+function drawOrb(dt) {
+  const w = orbCanvas.width = orbCanvas.clientWidth * devicePixelRatio;
+  const h = orbCanvas.height = orbCanvas.clientHeight * devicePixelRatio;
+  ctx.clearRect(0, 0, w, h);
+  ctx.globalCompositeOperation = "lighter";
+  state.cx += (state.tx - state.cx) * 0.12;
+  state.cy += (state.ty - state.cy) * 0.12;
+  const pulse = 1 + level * 0.35 + Math.sin(performance.now() / 420) * 0.02;
+  const radius = Math.min(w, h) * (0.07 + 0.22 * state.open) * pulse;
+  const cx = state.cx * w, cy = state.cy * h;
+  angle += dt * (0.25 + state.energy * 1.5);
+  const ca = Math.cos(angle), sa = Math.sin(angle), cb = Math.cos(angle * 0.7), sb = Math.sin(angle * 0.7);
+  for (const p of P) {
+    const x1 = p.x * ca - p.z * sa, z1 = p.x * sa + p.z * ca;          // um Y drehen
+    const y2 = p.y * cb - z1 * sb, z2 = p.y * sb + z1 * cb;            // um X drehen
+    const r = p.r * state.spread, depth = 1 / (1.9 - z2 * 0.6);
+    const sx = cx + x1 * radius * r * depth, sy = cy + y2 * radius * r * depth;
+    const alpha = 0.25 + 0.55 * ((z2 + 1) / 2);
+    const size = (1.2 + p.s * 1.6) * depth * devicePixelRatio;
+    const hue = 22 + 24 * ((z2 + 1) / 2) + level * 20;
+    ctx.fillStyle = `hsla(${hue}, 100%, ${58 + state.energy * 15}%, ${alpha})`;
+    ctx.fillRect(sx, sy, size, size);
+  }
+  // Kern
+  const g = ctx.createRadialGradient(cx, cy, 0, cx, cy, radius * 0.6);
+  g.addColorStop(0, `rgba(255,220,180,${0.35 + level * 0.3})`);
+  g.addColorStop(1, "rgba(255,140,60,0)");
+  ctx.fillStyle = g; ctx.beginPath(); ctx.arc(cx, cy, radius * 0.6, 0, Math.PI * 2); ctx.fill();
+  ctx.globalCompositeOperation = "source-over";
+}
+
+// ---------- Gesten aus 21 Landmarken ----------
+const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+function analyse(lm) {
+  const palm = dist(lm[0], lm[9]) || 1e-3;                                   // Handgrösse als Massstab
+  const tips = [8, 12, 16, 20].map((i) => dist(lm[i], lm[0]) / palm);
+  const open = Math.max(0, Math.min(1, (tips.reduce((a, b) => a + b, 0) / 4 - 1.1) / 1.0)); // 0 Faust … 1 offen
+  const pinch = dist(lm[4], lm[8]) / palm;                                   // Daumen–Zeigefinger
+  const thumbUp = dist(lm[4], lm[0]) / palm > 1.6 && open < 0.3 && lm[4].y < lm[5].y; // Daumen gestreckt, Finger eingeknickt, Daumen oben
+  return { open, pinch, fist: open < 0.12 && !thumbUp, thumbUp, x: 1 - lm[9].x, y: lm[9].y };
+}
+
+const hold = { name: "", since: 0, fired: false };
+function gesture(name, ms, action) {
+  if (hold.name !== name) { hold.name = name; hold.since = performance.now(); hold.fired = false; }
+  if (!hold.fired && performance.now() - hold.since > ms) { hold.fired = true; action(); }
+}
+
+// ---------- Hauptschleife ----------
+let landmarker, last = performance.now(), frames = 0, fpsAt = last;
+function drawHands(hands) {
+  overlay.width = video.videoWidth || 1280; overlay.height = video.videoHeight || 720;
+  octx.clearRect(0, 0, overlay.width, overlay.height);
+  octx.lineWidth = 3; octx.strokeStyle = "rgba(255,160,90,.9)"; octx.fillStyle = "#fff";
+  for (const lm of hands) {
+    for (const { start, end } of HandLandmarker.HAND_CONNECTIONS) {
+      octx.beginPath();
+      octx.moveTo(lm[start].x * overlay.width, lm[start].y * overlay.height);
+      octx.lineTo(lm[end].x * overlay.width, lm[end].y * overlay.height);
+      octx.stroke();
+    }
+    for (const p of lm) { octx.beginPath(); octx.arc(p.x * overlay.width, p.y * overlay.height, 5, 0, Math.PI * 2); octx.fill(); }
+  }
+}
+
+function loop() {
+  const now = performance.now(), dt = Math.min(0.05, (now - last) / 1000); last = now;
+  level += (readLevel() - level) * 0.3;
+  let hands = [];
+  if (landmarker && video.readyState >= 2) hands = landmarker.detectForVideo(video, now).landmarks ?? [];
+  drawHands(hands);
+  $("hands").textContent = hands.length;
+
+  let label = "–", openT = 0.45, energyT = 0.15, spreadT = 1;
+  if (hands.length >= 1) {
+    const g = analyse(hands[0]);
+    openT = g.open; energyT = g.open * 0.6 + (g.pinch < 0.3 ? 0.5 : 0);
+    if (g.pinch < 0.3) { label = "GREIFEN · BEWEGEN"; state.tx = g.x; state.ty = g.y; hold.name = ""; }
+    else if (g.thumbUp) { label = "DAUMEN HOCH"; gesture("up", 1000, () => { toast("👍 GESENDET"); jarvis($("cmdA").value); }); }
+    else if (g.fist) { label = "FAUST"; gesture("fist", 2000, () => { toast("✊ GESENDET"); jarvis($("cmdB").value); }); }
+    else { label = g.open > 0.7 ? "OFFENE HAND" : "HAND"; hold.name = ""; }
+    if (hands.length === 2) {
+      const a = analyse(hands[0]), b = analyse(hands[1]);
+      spreadT = 0.6 + Math.min(2.2, Math.abs(a.x - b.x) * 3);
+      label = "ZWEI HÄNDE · DEHNEN";
+    }
+  } else hold.name = "";
+  state.open += (openT - state.open) * 0.15;
+  state.energy += (energyT - state.energy) * 0.1;
+  state.spread += (spreadT - state.spread) * 0.1;
+  $("gest").textContent = label;
+
+  drawOrb(dt);
+  frames++;
+  if (now - fpsAt > 1000) { $("fps").textContent = frames; frames = 0; fpsAt = now; }
+  requestAnimationFrame(loop);
+}
+
+async function start() {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 1280, height: 720 }, audio: false });
+    video.srcObject = stream;
+    await new Promise((r) => (video.onloadedmetadata = r));
+    const vision = await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm");
+    landmarker = await HandLandmarker.createFromOptions(vision, {
+      baseOptions: { modelAssetPath: "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task", delegate: "GPU" },
+      runningMode: "VIDEO",
+      numHands: 2,
+    });
+    $("st").textContent = "LIVE"; $("st").className = "live";
+  } catch (e) {
+    $("st").textContent = "FEHLER: " + e.message; $("st").className = "off";
+  }
+  requestAnimationFrame(loop);
+}
+start();
+</script>
+</body>
+</html>
