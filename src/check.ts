@@ -33,58 +33,66 @@ async function pruefe(name: string, eingerichtet: boolean, test: () => Promise<s
   }
 }
 
-export async function selbsttest(): Promise<Befund[]> {
+/** `nur`: nur die Befunde mit diesen Namen laufen (Gross-/Kleinschreibung egal); unbekannte Namen → Befund «fehler». */
+export async function selbsttest(nur?: string[]): Promise<Befund[]> {
   const b: Befund[] = [];
+  const gewuenscht = nur?.length ? new Set(nur.map((n) => n.trim().toLowerCase())) : undefined;
+  const bekannt = new Set<string>();
+  const lauf = async (name: string, eingerichtet: boolean, test: () => Promise<string>) => {
+    bekannt.add(name.toLowerCase());
+    if (gewuenscht && !gewuenscht.has(name.toLowerCase())) return;
+    b.push(await pruefe(name, eingerichtet, test));
+  };
 
-  b.push(await pruefe("Claude-API", Boolean(opt("ANTHROPIC_API_KEY")), async () => {
+  await lauf("Claude-API", Boolean(opt("ANTHROPIC_API_KEY")), async () => {
     const list = await new Anthropic().models.list({ limit: 50 }, { timeout: 15_000 });
     const ids = list.data.map((m) => m.id);
     const fehlt = [config.claudeModel, config.claudeModelStark, config.claudeModelSehen].filter((m) => !ids.includes(m));
     return fehlt.length ? `erreichbar, aber unbekannte Modelle: ${fehlt.join(", ")}` : `erreichbar, Modelle gültig (${config.claudeModel}, ${config.claudeModelStark}, ${config.claudeModelSehen})`;
-  }));
+  });
 
-  b.push(await pruefe("Telegram", Boolean(config.telegramToken && config.telegramOwner), async () => {
+  await lauf("Telegram", Boolean(config.telegramToken && config.telegramOwner), async () => {
     const res = await fetch(`https://api.telegram.org/bot${config.telegramToken}/getMe`, { signal: t(10_000) });
     const j = (await res.json()) as { ok: boolean; result?: { username: string } };
     if (!j.ok) throw new Error("Token ungültig");
     return `Bot @${j.result?.username}, Chat ${config.telegramOwner}`;
-  }));
+  });
 
-  b.push(await pruefe("WHOOP", Boolean(opt("WHOOP_CLIENT_ID")), async () => {
+  await lauf("WHOOP", Boolean(opt("WHOOP_CLIENT_ID")), async () => {
     if (!state.whoop?.refreshToken) throw new Error("nicht verbunden: npm run whoop:auth");
     const r = await recoveryToday(10_000);
     return r ? `verbunden, Recovery heute ${r.score} %` : "verbunden, Recovery heute noch nicht berechnet";
-  }));
+  });
 
-  b.push(await pruefe("Google Kalender", Boolean(opt("GOOGLE_KEY_FILE") && opt("GOOGLE_CALENDAR_ID")), async () => {
+  await lauf("Google Kalender", Boolean(opt("GOOGLE_KEY_FILE") && opt("GOOGLE_CALENDAR_ID")), async () => {
     if (!existsSync(opt("GOOGLE_KEY_FILE")!)) throw new Error("Schlüsseldatei fehlt");
     const ev = await googleEvents();
     return `lesbar, heute ${ev.length} Termin(e)`;
-  }));
+  });
 
-  b.push(await pruefe("Outlook-Kalender", Boolean(opt("OUTLOOK_ICS_URL")), async () => `lesbar, heute ${(await outlookEvents()).length} Termin(e) (${config.outlookMode})`));
+  await lauf("Outlook-Kalender", Boolean(opt("OUTLOOK_ICS_URL")), async () => `lesbar, heute ${(await outlookEvents()).length} Termin(e) (${config.outlookMode})`);
 
-  b.push(await pruefe("Gmail", Boolean(config.gmail), async () => {
+  await lauf("Gmail", Boolean(config.gmail), async () => {
     if (!state.google?.refreshToken) throw new Error("nicht verbunden: npm run google:auth");
     const { searchMails } = await import("./gmail.js");
     await searchMails("newer_than:1d", 1);
     return "verbunden";
-  }));
+  });
 
-  b.push(await pruefe("Home Assistant", Boolean(config.homeAssistant), async () => {
+  await lauf("Home Assistant", Boolean(config.homeAssistant), async () => {
     const res = await fetch(`${config.homeAssistant!.url}/api/`, { headers: { Authorization: `Bearer ${config.homeAssistant!.token}` }, signal: t(10_000) });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const presence = config.presenceEntity ? `, ${config.presenceEntity} = ${await haState(config.presenceEntity).catch(() => "?")}` : "";
     return `erreichbar${presence}`;
-  }));
+  });
 
-  b.push(await pruefe("Frigate", Boolean(config.frigateUrl), async () => {
+  await lauf("Frigate", Boolean(config.frigateUrl), async () => {
     const res = await fetch(`${config.frigateUrl}/api/version`, { signal: t(10_000) });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     return `Version ${(await res.text()).trim()}, ${Object.keys(cameras).length} Kamera(s) in cameras.json`;
-  }));
+  });
 
-  b.push(await pruefe("MQTT", Boolean(config.mqtt), async () => {
+  await lauf("MQTT", Boolean(config.mqtt), async () => {
     const mqtt = (await import("mqtt")).default;
     await new Promise<void>((ok, err) => {
       const c = mqtt.connect(config.mqtt!.url, { username: config.mqtt!.username, password: config.mqtt!.password, connectTimeout: 8000, reconnectPeriod: 0 });
@@ -92,31 +100,31 @@ export async function selbsttest(): Promise<Befund[]> {
       c.once("error", (e) => { c.end(true); err(e); });
     });
     return "verbunden";
-  }));
+  });
 
-  b.push(await pruefe("Shopify", Boolean(config.shopify), async () => {
+  await lauf("Shopify", Boolean(config.shopify), async () => {
     const { recentOrders } = await import("./shopify.js");
     await recentOrders(1);
     return `erreichbar (${config.shopify!.shop}, API ${config.shopify!.version})`;
-  }));
+  });
 
-  b.push(await pruefe("Browser", true, async () => {
+  await lauf("Browser", true, async () => {
     const p = browserPath();
     if (!p) throw new Error("kein Chromium gefunden, Seiten gehen nur über seite_lesen");
     return p;
-  }));
+  });
 
-  b.push(await pruefe("Werkstatt", true, async () => (hasOpenscad() ? "OpenSCAD vorhanden" : (() => { throw new Error("OpenSCAD fehlt (apt install openscad)"); })())));
-  b.push(await pruefe("3D-Drucker", Boolean(config.octoprint), async () => {
+  await lauf("Werkstatt", true, async () => (hasOpenscad() ? "OpenSCAD vorhanden" : (() => { throw new Error("OpenSCAD fehlt (apt install openscad)"); })()));
+  await lauf("3D-Drucker", Boolean(config.octoprint), async () => {
     const res = await fetch(`${config.octoprint!.url}/api/version`, { headers: { "X-Api-Key": config.octoprint!.key }, signal: t(10_000) });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     return "OctoPrint erreichbar";
-  }));
+  });
 
-  b.push(await pruefe("Stimme (STT/TTS)", Boolean(config.stt || config.tts), async () => `${config.stt ? "STT " : ""}${config.tts ? "TTS " : ""}eingetragen (nicht live getestet)`));
-  b.push(await pruefe("Alexa-Skill", Boolean(opt("ALEXA_SKILL_ID")), async () => `Skill-ID gesetzt; Erreichbarkeit über den Tunnel im Alexa-Test-Tab prüfen`));
-  b.push(await pruefe("Protokolle", true, async () => `${Object.keys(protokolle).length} Protokoll(e)`));
-  b.push(await pruefe("Sicherheit", true, async () => {
+  await lauf("Stimme (STT/TTS)", Boolean(config.stt || config.tts), async () => `${config.stt ? "STT " : ""}${config.tts ? "TTS " : ""}eingetragen (nicht live getestet)`);
+  await lauf("Alexa-Skill", Boolean(opt("ALEXA_SKILL_ID")), async () => `Skill-ID gesetzt; Erreichbarkeit über den Tunnel im Alexa-Test-Tab prüfen`);
+  await lauf("Protokolle", true, async () => `${Object.keys(protokolle).length} Protokoll(e)`);
+  await lauf("Sicherheit", true, async () => {
     const warn: string[] = [];
     if (!config.pin) warn.push("keine PIN (JARVIS_PIN)");
     if (config.listenHost !== "127.0.0.1" && !config.eventToken) warn.push("im Heimnetz erreichbar ohne Ereignis-Token");
@@ -125,9 +133,23 @@ export async function selbsttest(): Promise<Befund[]> {
     if (!config.panicToken) warn.push("kein Panik-Token");
     if (warn.length) throw new Error(warn.join("; "));
     return "PIN, Token, Heimnetz-Sperre, Freigaben aktiv";
-  }));
+  });
 
+  for (const name of nur ?? []) {
+    if (!bekannt.has(name.trim().toLowerCase())) b.push({ name: name.trim(), status: "fehler", info: "unbekannte Prüfung" });
+  }
   return b;
+}
+
+/** Liest `--nur a,b` (oder `--nur=a,b`) aus argv; ohne Flag undefined. */
+export function nurAusArgv(argv: string[]): string[] | undefined {
+  let roh: string | undefined;
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i] === "--nur") roh = argv[i + 1];
+    else if (argv[i].startsWith("--nur=")) roh = argv[i].slice(6);
+  }
+  const namen = roh?.split(",").map((n) => n.trim()).filter(Boolean);
+  return namen?.length ? namen : undefined;
 }
 
 export function formatBefund(b: Befund[]): string {

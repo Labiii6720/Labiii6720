@@ -1,6 +1,6 @@
 {
   "name": "jarvis",
-  "version": "0.14.1",
+  "version": "0.15.0",
   "scripts": {
     "start": "tsx src/server.ts",
     "whoop:auth": "tsx scripts/whoop-auth.ts",
@@ -8,7 +8,9 @@
     "try:briefing": "tsx scripts/try.ts briefing",
     "typecheck": "tsc -p tsconfig.json",
     "google:auth": "tsx scripts/google-auth.ts",
-    "check": "tsx scripts/check.ts"
+    "check": "tsx scripts/check.ts",
+    "setup": "tsx scripts/setup.ts",
+    "test": "node --import tsx --test \"test/**/*.test.ts\""
   },
   "type": "module",
   "dependencies": {
