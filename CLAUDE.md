@@ -33,8 +33,8 @@ Du arbeitest am persönlichen Assistenten **JARVIS** von Labinot (Service Specia
 
 ## Arbeitsweise
 
-- Vor Änderungen: `npx tsc -p tsconfig.json` muss sauber sein, danach wieder. `npm run check` prüft Anbindungen (kostet keine Tokens).
-- Echte Dienste nie mit Testdaten belasten: Tests mit Attrappen (globalThis.fetch ersetzen), wie in den bisherigen Testläufen. Keine Testnachrichten an Telegram-Produktivchats.
+- Vor Änderungen: `npx tsc -p tsconfig.json` muss sauber und `npm test` grün sein, danach wieder. `npm run check` prüft Anbindungen (kostet keine Tokens).
+- Echte Dienste nie mit Testdaten belasten: Tests in `test/` (node:test) mit Attrappen (globalThis.fetch ersetzen), nur in Temp-Verzeichnissen (mkdtemp, `process.chdir` vor dem dynamischen Import). Keine Testnachrichten an Telegram-Produktivchats.
 - Kleine, nachvollziehbare Änderungen. Dateien nicht umbenennen oder umstrukturieren, ohne dass es nötig ist.
 - Nach Änderungen am Dienst: `sudo systemctl restart jarvis`, dann `journalctl -u jarvis -f` beobachten.
 - Kosten im Blick: Standardmodell Sonnet, Hintergrund Haiku (`CLAUDE_MODEL_SEHEN`), stark nur auf Zuruf. Prompt-Caching nicht zerstören (fester Systemprompt-Teil muss stabil bleiben).
@@ -42,19 +42,19 @@ Du arbeitest am persönlichen Assistenten **JARVIS** von Labinot (Service Specia
 
 ## Betrieb auf dem Pi
 
+- Einrichtung: `npm run setup` führt durch `.env`, erzeugt Tokens, prüft sofort; Optionen nach `--` (`npm run setup -- --abschnitt telegram`).
 - Dienst: `jarvis.service` (eigener Benutzer `jarvis`, gehärtet). Logs: `journalctl -u jarvis -f`. Audit: `data/audit.log`.
 - Einmalige Verbindungen: `npm run whoop:auth`, `npm run google:auth` (über SSH-Tunnel, siehe README).
 - Fernzugriff nur über Tailscale, nie Portweiterleitungen. Cloudflare Tunnel nur für `/alexa`.
 
 ## Offener Plan (Schicht 2, nach Nutzen sortiert)
 
-1. Einrichtungs-Assistent: `npm run setup` führt durch `.env`, erzeugt Tokens (`openssl rand`), prüft jede Anbindung sofort mit `check.ts`.
-2. Robustheit: Wiederholen mit Backoff bei API-Fehlern (Anthropic, Telegram, HA), sauberes Verhalten bei Internetausfall, Watchdog-Meldung bei dauerhaften Fehlern.
-3. Gedächtnis-Verdichtung: nachts Profil und Notizen zusammenfassen (Haiku), damit sie schlank und präzise bleiben; Fakten mit Datum, veraltete markieren.
-4. Finanz-Wochenbericht: offene Rechnungen, bezahlt, Summe pro Monat, in Telegram und Dashboard.
-5. Dashboard: Freigabe-Historie, Kosten (aus usage.json), Zeitpläne und Wachen bearbeiten.
-6. Alexa: Routinen-Hinweise im Briefing (offene Freigaben vorlesen), Nachtmodus-Stimme leiser.
-7. Satellit: Lautstärke per HA, Ton-Feedback beim Wakeword, zweiter Satellit (Bad) für das Briefing nach der Dusche statt Telegram.
-8. Werkstatt: Slicer-Anbindung (PrusaSlicer CLI) damit `cad_drucken` G-Code statt STL schickt.
+1. Robustheit: Wiederholen mit Backoff bei API-Fehlern (Anthropic, Telegram, HA), sauberes Verhalten bei Internetausfall, Watchdog-Meldung bei dauerhaften Fehlern.
+2. Gedächtnis-Verdichtung: nachts Profil und Notizen zusammenfassen (Haiku), damit sie schlank und präzise bleiben; Fakten mit Datum, veraltete markieren.
+3. Finanz-Wochenbericht: offene Rechnungen, bezahlt, Summe pro Monat, in Telegram und Dashboard.
+4. Dashboard: Freigabe-Historie, Kosten (aus usage.json), Zeitpläne und Wachen bearbeiten.
+5. Alexa: Routinen-Hinweise im Briefing (offene Freigaben vorlesen), Nachtmodus-Stimme leiser.
+6. Satellit: Lautstärke per HA, Ton-Feedback beim Wakeword, zweiter Satellit (Bad) für das Briefing nach der Dusche statt Telegram.
+7. Werkstatt: Slicer-Anbindung (PrusaSlicer CLI) damit `cad_drucken` G-Code statt STL schickt.
 
 Was nicht kommt: Anzug, Gegenangriff, Selbstmodifikation, Zahlungsauslösung.

@@ -14,6 +14,7 @@ Drei Etappen in einem Dienst:
 - **Etappe 10** – Die Seele: Finanzüberblick, Mail-Triage, ehrlicher Berater, Lernen über dich und ein defensives Notfall-Protokoll (Abschnitt 16)
 - **Etappe 11** – Der Rest aus dem Film: Protokolle (17), Werkstatt mit 3D-Druck (18) und die Kommandozentrale (19)
 - **Etappe 12** – Feinschliff: Selbsttest, Proaktivität (Rechnungen, Rückblick, Zielcheck), Token-Effizienz und die Stimme im Raum (Abschnitt 20)
+- **Etappe 13** – Einrichtungs-Assistent und Tests (Abschnitt 1 und Tests)
 
 ## So läuft dein Morgen
 
@@ -43,10 +44,39 @@ Den Cronjob aus Etappe 1 kannst du entfernen, Jarvis übernimmt das jetzt.
 
 ## 1. Installation
 
+Empfohlen ist der Einrichtungs-Assistent. Er fragt jede Einstellung aus `.env.example` ab, erzeugt die Geheimnisse selbst und prüft jede Anbindung sofort:
+
 ```bash
 # Projektordner auf den Pi kopieren, dann:
 cd ~/jarvis
 npm ci
+npm run setup
+```
+
+So läuft er ab:
+
+- Abschnitt für Abschnitt: zuerst die Pflicht (Grundlagen, Claude, Telegram, Sicherheit), dann die optionalen (Alexa, WHOOP, Wetter, Kalender, Gmail, Shopify, Home Assistant, Kameras, Stimme, Werkstatt, Proaktivität). Optionale Abschnitte fragen zuerst «Jetzt einrichten? [j/N]».
+- Pro Feld: Enter übernimmt den bestehenden Wert oder den Vorschlag, `-` leert das Feld, Strg-C bricht ab. Ungültige Eingaben (etwa eine Chat-ID mit Buchstaben) weist er mit Begründung ab; nach drei Fehlversuchen bleibt der alte Wert. Pflicht sind nur `ANTHROPIC_API_KEY`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` und `JARVIS_PIN`.
+- Bestehende Geheimnisse zeigt er nur maskiert, am Terminal tippst du sie ohne Echo. `JARVIS_EVENT_TOKEN` und `JARVIS_PANIC_TOKEN` erzeugt er bei Enter selbst (24 Zufallsbytes als Hex, dasselbe wie `openssl rand -hex 24`) und zeigt sie genau einmal: gleich in Home Assistant bzw. den Kurzbefehl eintragen.
+- Geschrieben wird erst, wenn ein Abschnitt vollständig beantwortet ist. Die `.env` bekommt Rechte 600; eine bestehende `.env` sichert er vorher einmal als `.env.bak` (ebenfalls 600). Lösch die Sicherung, sobald du sie nicht mehr brauchst. Kommentare und Reihenfolge der `.env` bleiben erhalten, eigene Schlüssel landen unten unter `# --- Eigene Einträge ---`.
+- Nach jedem Abschnitt laufen die passenden Prüfungen aus dem Selbsttest (Abschnitt 20), zum Schluss der ganze Selbsttest. Bei einem ❌ bietet er an, die Werte nochmals einzugeben.
+- Am Ende legt er `data/` und den Arbeitsordner an (Rechte 700), bietet an, `cameras.example.json` und `protokolle.example.json` zu kopieren, und nennt die nächsten Schritte (`npm run whoop:auth`, `npm run google:auth`, Dienst neu starten).
+
+Optionen kommen nach `--`, sonst schluckt npm sie:
+
+```bash
+npm run setup -- --abschnitt telegram   # nur einen Abschnitt (Namen zeigt --hilfe)
+npm run setup -- --alle                 # optionale Abschnitte ohne Rückfrage durchgehen
+npm run setup -- --ohne-pruefung        # keine Prüfungen nach den Abschnitten und am Ende
+npm run setup -- --env /pfad/.env --beispiel /pfad/.env.example   # andere Dateien, etwa für Tests
+npm run setup -- --hilfe
+```
+
+Nichts verlässt den Pi ausser den Prüfaufrufen an die Dienste, die du einrichtest. Der Assistent darf jederzeit nochmals laufen, er ändert nur, was du neu eingibst.
+
+Von Hand geht es weiterhin:
+
+```bash
 cp .env.example .env
 chmod 600 .env
 nano .env
@@ -465,6 +495,8 @@ Damit ist der Kern aus dem Film komplett: der Ort, an dem du siehst, was Jarvis 
 
 `npm run check` auf dem Pi oder `/check` in Telegram prüft jede eingerichtete Anbindung mit einem echten, billigen Aufruf und sagt, was läuft (✅), was fehlt (➖) und was kaputt ist (❌): Claude-Modelle gültig, Telegram, WHOOP, beide Kalender, Gmail, Home Assistant, Frigate, MQTT, Shopify, Browser, Werkstatt, Drucker, Stimme, Alexa, und ein Sicherheits-Check (PIN, Token, Heimnetz-Sperre, Freigaben, Panik-Token). Das ist dein erster Griff nach jeder Einrichtung und bei jeder Störung. Es kostet keine Tokens.
 
+Nur einzelne Anbindungen: `npm run check -- --nur Telegram,Frigate` (Namen wie in der Ausgabe, Gross-/Kleinschreibung egal; ein unbekannter Name erscheint als ❌ «unbekannte Prüfung»). Die anderen Prüfungen laufen dann gar nicht, also auch ohne Netzaufruf. So prüft der Einrichtungs-Assistent nach jedem Abschnitt.
+
 ### Jarvis meldet sich von selbst
 
 - **Rechnungen** (`RECHNUNG_ERINNERUNG`, Vorlauf `RECHNUNG_VORLAUF_TAGE`): täglich ein Hinweis auf alles, was in den nächsten Tagen fällig oder schon überfällig ist, mit den Zahlungsdaten. Ohne Claude, nur Daten.
@@ -491,6 +523,14 @@ So läuft die Sprache zusammen:
 4. Unter *Einstellungen → Sprachassistenten* einen Assistenten anlegen: Konversationsagent *Jarvis*, als Sprachausgabe eine deutsche Stimme (Home Assistant Cloud oder ein lokaler Piper-Server), als Spracheingabe Whisper. Diesen Assistenten dem Satelliten zuweisen.
 
 Damit spricht der Raum mit demselben Jarvis wie Telegram, Alexa und die Zentrale: dasselbe Gespräch, dieselben Werkzeuge, dieselben Freigaben. Die Spracherkennung und die Stimme kannst du über Piper/Whisper komplett lokal betreiben; dann verlässt nur noch die eigentliche Frage das Haus Richtung Claude.
+
+## Tests
+
+`npm test` fährt die Tests in `test/` mit Nodes eingebautem Testläufer (`node --test`, dank tsx direkt aus TypeScript). Sie brauchen weder `.env` noch Netz: echte Dienste werden nie angesprochen, Aufrufe nach aussen bekommen Attrappen (`globalThis.fetch` wird ersetzt und zählt die Aufrufe), geschrieben wird nur in Temp-Verzeichnisse, die am Ende wieder verschwinden.
+
+Heute abgedeckt: die `.env`-Verarbeitung des Assistenten (Roundtrip gegen Nodes eigenen Parser `util.parseEnv`, Kommentare und Reihenfolge, Rechte, `.env.bak`), alle Prüffunktionen, das Schema gegen `.env.example` (jeder Schlüssel genau einmal, in beide Richtungen), der Assistent End-zu-End mit gepipten Antworten, und `npm run check -- --nur`.
+
+Vor und nach jeder Änderung am Code: `npm run typecheck` muss sauber und `npm test` grün sein. Neue Anbindungen bekommen Tests mit Attrappen, nie mit echten Zugängen.
 
 ## Sicherheitskonzept
 

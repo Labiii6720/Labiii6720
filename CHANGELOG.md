@@ -2,6 +2,11 @@
 
 Kurz und nur das Wichtigste. Details stehen im README.
 
+## 0.15
+- Einrichtungs-Assistent `npm run setup`: führt Abschnitt für Abschnitt durch die `.env`, erzeugt Tokens (wie `openssl rand -hex 24`), sichert die alte Datei als `.env.bak` und prüft jede Anbindung sofort.
+- Selbsttest einzeln: `npm run check -- --nur Telegram,Frigate`.
+- Test-Infrastruktur `npm test` (Node-Testläufer, Attrappen statt echter Dienste) mit ersten Tests für Assistent und Selbsttest.
+
 ## 0.14.1
 - CLAUDE.md für die Weiterarbeit in Claude Code: Architektur, Leitplanken, Arbeitsweise, offener Plan.
 
