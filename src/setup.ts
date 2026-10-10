@@ -1,5 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { chmodSync, copyFileSync, existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { resolve, sep } from "node:path";
 
 /**
  * Einrichtungs-Assistent, Logik ohne Interaktion:  npm run setup  (scripts/setup.ts)
@@ -23,6 +25,8 @@ export interface Feld {
   pruefen?: (wert: string) => string | undefined;
   /** art token: leer + Enter erzeugt einen Token */
   erzeugen?: boolean;
+  /** am Terminal ohne Echo, obwohl kein Geheimnis: kann eines enthalten */
+  ohneEcho?: boolean;
 }
 
 export interface Abschnitt {
@@ -66,8 +70,13 @@ export function pruefeUrl(wert: string): string | undefined {
   }
 }
 
+/** Nur HH:MM, kein «off»: für Felder, die der Dienst nicht abschalten kann (BRIEFING_PREP_FROM). */
+export function pruefeUhrzeit(wert: string): string | undefined {
+  return /^([01]\d|2[0-3]):[0-5]\d$/.test(wert) ? undefined : "Form HH:MM";
+}
+
 export function pruefeZeit(wert: string): string | undefined {
-  return wert === "off" || /^([01]\d|2[0-3]):[0-5]\d$/.test(wert) ? undefined : "Form HH:MM oder off";
+  return wert === "off" || pruefeUhrzeit(wert) === undefined ? undefined : "Form HH:MM oder off";
 }
 
 export function pruefeZielcheck(wert: string): string | undefined {
@@ -110,6 +119,13 @@ export function pruefeSkillId(wert: string): string | undefined {
 
 export function pruefeShop(wert: string): string | undefined {
   return /^[a-z0-9-]+(\.myshopify\.com)?$/.test(wert) ? undefined : "Shop-Kennung ohne Protokoll, z. B. mein-shop oder mein-shop.myshopify.com";
+}
+
+/** Arbeitsordner: Systemordner und das eigene Home-Verzeichnis sind tabu (dort würde chmod 700 oder die Sandbox stören). */
+export function pruefeArbeitsordner(wert: string): string | undefined {
+  const ohneTrenner = (p: string) => (p.length > 1 && p.endsWith(sep) ? p.slice(0, -1) : p);
+  const verboten = ["/", "/tmp", "/home", "/usr", "/etc", "/var", homedir()].map((p) => ohneTrenner(resolve(p)));
+  return verboten.includes(ohneTrenner(resolve(wert))) ? "Systemordner oder Home-Verzeichnis sind als Arbeitsordner nicht erlaubt" : undefined;
 }
 
 // ---------- Schema (deckt jeden Schlüssel aus .env.example genau einmal ab) ----------
@@ -163,8 +179,8 @@ export const ABSCHNITTE: Abschnitt[] = [
     optional: false,
     felder: [
       { key: "JARVIS_PIN", frage: "PIN für sensible Aufträge", hinweis: "mindestens 4 Zeichen, kein Leerraum", art: "geheim", pflicht: true, pruefen: pruefePin },
-      { key: "JARVIS_EVENT_TOKEN", frage: "Ereignis-Token für POST /events", hinweis: "Enter = erzeugen (wie openssl rand -hex 24); «-» = Endpunkt aus", art: "token", erzeugen: true },
-      { key: "JARVIS_PANIC_TOKEN", frage: "Panik-Token für POST /notfall", hinweis: "Enter = erzeugen; «-» = Endpunkt aus", art: "token", erzeugen: true },
+      { key: "JARVIS_EVENT_TOKEN", frage: "Ereignis-Token für POST /events", hinweis: "Enter = bestehenden Token behalten, sonst erzeugen (wie openssl rand -hex 24); «-» = Endpunkt aus; neu erzeugen: erst «-», dann nochmals npm run setup -- --abschnitt sicherheit", art: "token", erzeugen: true },
+      { key: "JARVIS_PANIC_TOKEN", frage: "Panik-Token für POST /notfall", hinweis: "Enter = bestehenden Token behalten, sonst erzeugen; «-» = Endpunkt aus; neu erzeugen: erst «-», dann nochmals npm run setup -- --abschnitt sicherheit", art: "token", erzeugen: true },
       { key: "JARVIS_COMMANDS", frage: "Shell-Befehle", hinweis: "freigabe = jeder Befehl braucht Ihr OK (empfohlen), auto = läuft direkt", art: "wahl", wahl: ["freigabe", "auto"], standard: "freigabe", pruefen: pruefeWahl(["freigabe", "auto"]) },
       { key: "EVENTS_VIA_TUNNEL", frage: "/events und /gesture auch über den Tunnel", hinweis: "off empfohlen (nur Heimnetz/Tailscale)", art: "wahl", wahl: ["off", "on"], standard: "off", pruefen: anAus },
       { key: "DASHBOARD", frage: "Dashboard unter /dashboard", hinweis: "nur Heimnetz/Tailscale, nutzt JARVIS_EVENT_TOKEN", art: "wahl", wahl: ["on", "off"], standard: "on", pruefen: anAus },
@@ -216,7 +232,7 @@ export const ABSCHNITTE: Abschnitt[] = [
       // geheim: wer den Link kennt, liest den Kalender – darum maskiert und ohne Echo
       { key: "OUTLOOK_ICS_URL", frage: "Outlook ICS-Link", hinweis: "nur mit Freigabe der IT; Eingabe wird nicht angezeigt", art: "geheim", pruefen: pruefeUrl },
       { key: "OUTLOOK_MODE", frage: "Outlook-Sichtbarkeit", hinweis: "busy = nur belegte Zeiten (empfohlen), details = auch Titel", art: "wahl", wahl: ["busy", "details"], standard: "busy", pruefen: pruefeWahl(["busy", "details"]) },
-      { key: "BRIEFING_PREP_FROM", frage: "Briefing ab dieser Uhrzeit vorbereiten", art: "zeit", standard: "05:45", pruefen: pruefeZeit },
+      { key: "BRIEFING_PREP_FROM", frage: "Briefing ab dieser Uhrzeit vorbereiten", hinweis: "HH:MM, z. B. 05:45", art: "zeit", standard: "05:45", pruefen: pruefeUhrzeit },
     ],
     checks: ["Google Kalender", "Outlook-Kalender"],
   },
@@ -263,7 +279,7 @@ export const ABSCHNITTE: Abschnitt[] = [
     optional: true,
     felder: [
       { key: "FRIGATE_URL", frage: "Frigate-URL", hinweis: "z. B. http://192.168.1.20:5000", art: "url", pruefen: pruefeUrl },
-      { key: "MQTT_URL", frage: "MQTT-URL", hinweis: "z. B. mqtt://192.168.1.10:1883; leer = über Home Assistant", art: "url" },
+      { key: "MQTT_URL", frage: "MQTT-URL", hinweis: "z. B. mqtt://192.168.1.10:1883; leer = über Home Assistant", art: "url", ohneEcho: true },
       { key: "MQTT_USER", frage: "MQTT-Benutzer", art: "text" },
       { key: "MQTT_PASSWORD", frage: "MQTT-Passwort", art: "geheim" },
     ],
@@ -295,7 +311,7 @@ export const ABSCHNITTE: Abschnitt[] = [
       { key: "OPENSCAD_PATH", frage: "Pfad zu OpenSCAD", hinweis: "leer = automatisch suchen", art: "pfad" },
       { key: "OCTOPRINT_URL", frage: "OctoPrint-URL", art: "url", pruefen: pruefeUrl },
       { key: "OCTOPRINT_KEY", frage: "OctoPrint API-Key", art: "geheim" },
-      { key: "JARVIS_WORKSPACE", frage: "Arbeitsordner für Code und Websites", art: "pfad", standard: "workspace" },
+      { key: "JARVIS_WORKSPACE", frage: "Arbeitsordner für Code und Websites", art: "pfad", standard: "workspace", pruefen: pruefeArbeitsordner },
       { key: "WEB_SEARCH", frage: "Websuche über die Claude-API", art: "wahl", wahl: ["on", "off"], standard: "on", pruefen: anAus },
     ],
     checks: ["Browser", "Werkstatt", "3D-Drucker"],
@@ -339,20 +355,26 @@ export function parseEnv(text: string): EnvZeile[] {
     const gleich = z.indexOf("=");
     if (z.startsWith("#") || gleich < 0) { aus.push({ art: "kommentar", text: roh }); continue; }
     const key = z.slice(0, gleich).replace(/^export\s+/, "").trim();
+    // ohne Schlüssel (`=abc`): Node ignoriert die Zeile; hier bleibt sie als Text erhalten, zählt aber nicht als Wert
+    if (key === "") { aus.push({ art: "kommentar", text: roh }); continue; }
     let rest = z.slice(gleich + 1).trim();
     const q = rest[0];
     if (q === '"' || q === "'" || q === "`") {
-      let ende = rest.indexOf(q, 1);
-      while (ende < 0 && i + 1 < zeilen.length) { // mehrzeilig: weitere Zeilen anhängen bis zum schliessenden Zeichen
-        rest += "\n" + zeilen[++i];
-        ende = rest.indexOf(q, 1);
+      // mehrzeilig: erst vorausschauen, Folgezeilen nur übernehmen, wenn ein schliessendes Zeichen existiert
+      let kandidat = rest;
+      let ende = kandidat.indexOf(q, 1);
+      let j = i;
+      while (ende < 0 && j + 1 < zeilen.length) {
+        kandidat += "\n" + zeilen[++j];
+        ende = kandidat.indexOf(q, 1);
       }
       if (ende >= 0) {
-        const inner = rest.slice(1, ende);
+        i = j;
+        const inner = kandidat.slice(1, ende);
         aus.push({ art: "wert", key, wert: q === '"' ? inner.replace(/\\n/g, "\n") : inner });
         continue;
       }
-      // kein schliessendes Zeichen: wörtlich, wie Node
+      // kein schliessendes Zeichen bis Dateiende: nur diese Zeile wörtlich, wie Node; Folgezeilen bleiben eigene Schlüssel
       aus.push({ art: "wert", key, wert: rest });
       continue;
     }
@@ -436,7 +458,8 @@ export function erzeugeToken(bytes = 24): string {
 }
 
 export function maskiere(wert: string): string {
-  return wert.length <= 8 ? "••••" : `${wert.slice(0, 4)}…${wert.slice(-2)}`;
+  // Kurze Geheimnisse (PINs, kurze Passwörter) ganz verbergen; nur lange Schlüssel zeigen Anfang und Ende zur Wiedererkennung.
+  return wert.length <= 12 ? "••••" : `${wert.slice(0, 4)}…${wert.slice(-2)}`;
 }
 
 /** Bestehenden Wert für die Konsole aufbereiten: Geheimnisse, Tokens und URLs mit Passwort (mqtt://user:pass@host) nur maskiert. */

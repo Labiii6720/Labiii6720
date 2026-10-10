@@ -33,19 +33,25 @@ async function pruefe(name: string, eingerichtet: boolean, test: () => Promise<s
   }
 }
 
-/** `nur`: nur die Befunde mit diesen Namen laufen (Gross-/Kleinschreibung egal); unbekannte Namen → Befund «fehler». */
-export async function selbsttest(nur?: string[]): Promise<Befund[]> {
+/**
+ * `nur`: nur die Befunde mit diesen Namen laufen (Gross-/Kleinschreibung egal); unbekannte Namen → Befund «fehler».
+ * `beiBefund`: wird je Befund sofort gerufen, damit fertige Ergebnisse auch bei einem Zeitlimit sichtbar bleiben.
+ */
+export async function selbsttest(nur?: string[], beiBefund?: (b: Befund) => void): Promise<Befund[]> {
   const b: Befund[] = [];
   const gewuenscht = nur?.length ? new Set(nur.map((n) => n.trim().toLowerCase())) : undefined;
   const bekannt = new Set<string>();
   const lauf = async (name: string, eingerichtet: boolean, test: () => Promise<string>) => {
     bekannt.add(name.toLowerCase());
     if (gewuenscht && !gewuenscht.has(name.toLowerCase())) return;
-    b.push(await pruefe(name, eingerichtet, test));
+    const befund = await pruefe(name, eingerichtet, test);
+    b.push(befund);
+    beiBefund?.(befund);
   };
 
+  // Genau ein Versuch wie bei allen anderen Prüfungen; sonst wiederholt das SDK Zeitüberschreitungen zweimal (3 × 15 s).
   await lauf("Claude-API", Boolean(opt("ANTHROPIC_API_KEY")), async () => {
-    const list = await new Anthropic().models.list({ limit: 50 }, { timeout: 15_000 });
+    const list = await new Anthropic({ maxRetries: 0 }).models.list({ limit: 50 }, { timeout: 15_000 });
     const ids = list.data.map((m) => m.id);
     const fehlt = [config.claudeModel, config.claudeModelStark, config.claudeModelSehen].filter((m) => !ids.includes(m));
     return fehlt.length ? `erreichbar, aber unbekannte Modelle: ${fehlt.join(", ")}` : `erreichbar, Modelle gültig (${config.claudeModel}, ${config.claudeModelStark}, ${config.claudeModelSehen})`;
@@ -136,7 +142,10 @@ export async function selbsttest(nur?: string[]): Promise<Befund[]> {
   });
 
   for (const name of nur ?? []) {
-    if (!bekannt.has(name.trim().toLowerCase())) b.push({ name: name.trim(), status: "fehler", info: "unbekannte Prüfung" });
+    if (bekannt.has(name.trim().toLowerCase())) continue;
+    const befund: Befund = { name: name.trim(), status: "fehler", info: "unbekannte Prüfung" };
+    b.push(befund);
+    beiBefund?.(befund);
   }
   return b;
 }

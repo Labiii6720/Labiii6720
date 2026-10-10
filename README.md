@@ -60,7 +60,7 @@ So läuft er ab:
 - Bestehende Geheimnisse zeigt er nur maskiert (auch URLs mit Passwort wie `mqtt://user:pass@host`), am Terminal tippst du sie ohne Echo. `JARVIS_EVENT_TOKEN` und `JARVIS_PANIC_TOKEN` erzeugt er bei Enter selbst (24 Zufallsbytes als Hex, dasselbe wie `openssl rand -hex 24`) und zeigt sie genau einmal: gleich in Home Assistant bzw. den Kurzbefehl eintragen.
 - Geschrieben wird erst, wenn ein Abschnitt vollständig beantwortet ist. Die `.env` bekommt Rechte 600; eine bestehende `.env` sichert er vorher einmal als `.env.bak` (ebenfalls 600). Lösch die Sicherung, sobald du sie nicht mehr brauchst. Kommentare und Reihenfolge der `.env` bleiben erhalten, eigene Schlüssel landen unten unter `# --- Eigene Einträge ---`.
 - Nach jedem Abschnitt laufen die passenden Prüfungen aus dem Selbsttest (Abschnitt 20), zum Schluss der ganze Selbsttest. Bei einem ❌ bietet er an, die Werte nochmals einzugeben.
-- Am Ende legt er `data/` und den Arbeitsordner an (Rechte 700), bietet an, `cameras.example.json` und `protokolle.example.json` zu kopieren, und nennt die nächsten Schritte (`npm run whoop:auth`, `npm run google:auth`, Dienst neu starten).
+- Am Ende legt er `data/` und den Arbeitsordner an (Rechte 700; Systemordner wie `/tmp` oder dein Home-Verzeichnis lehnt er als `JARVIS_WORKSPACE` ab), bietet an, `cameras.example.json` und `protokolle.example.json` zu kopieren, und nennt die nächsten Schritte (`npm run whoop:auth`, `npm run google:auth`, Dienst neu starten).
 
 Optionen kommen nach `--`, sonst schluckt npm sie:
 

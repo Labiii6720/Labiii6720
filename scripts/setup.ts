@@ -8,9 +8,9 @@
  *   --env <pfad>         Ziel (Standard .env), --beispiel <pfad> Vorlage (Standard .env.example)
  *   --hilfe
  */
-import { spawn } from "node:child_process";
-import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { spawn, type ChildProcess } from "node:child_process";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
@@ -98,15 +98,20 @@ function sag(text = ""): void {
 /** Liest eine Zeile; null = Eingabe beendet (EOF). Bei `geheim` ohne Echo am Terminal. */
 async function frage(prompt: string, geheim = false): Promise<string | null> {
   rl.setPrompt(prompt); // readline kennt den Prompt und zeichnet ihn nach Backspace/Pfeiltasten korrekt neu
-  if (tty) rl.prompt();
+  // Geheimnis am Terminal: Echo schon vor dem Prompt aus, sonst zeichnet readline einen vorausgetippten Rest sichtbar mit
+  if (tty && geheim) { stumm = true; rl.prompt(); process.stdout.write(prompt); }
+  else if (tty) rl.prompt();
   else process.stdout.write(prompt);
-  if (tty && geheim) stumm = true;
   let z: string | null;
-  if (puffer.length) z = puffer.shift()!;
+  const vorab = puffer.length > 0;
+  if (vorab) z = puffer.shift()!;
   else if (eingabeZu) z = null;
   else z = await new Promise<string | null>((r) => { warter = r; });
-  if (tty && geheim) { stumm = false; process.stdout.write("\n"); }
-  else if (!tty) process.stdout.write("\n"); // gepipte Eingabe echot nicht
+  if (tty && geheim) {
+    stumm = false;
+    process.stdout.write("\n");
+    if (vorab) sag("  (vorab eingegebene Zeile übernommen)");
+  } else if (!tty) process.stdout.write("\n"); // gepipte Eingabe echot nicht
   return z;
 }
 
@@ -136,8 +141,9 @@ async function frageFeld(feld: Feld, bestehend: string | undefined): Promise<str
     ? `${bestehend === feld.standard ? "Vorschlag" : "bestehend"}: ${anzeige}`
     : feld.erzeugen ? "Enter: erzeugen" : feld.standard ? `Vorschlag: ${feld.standard}` : feld.pflicht ? "Pflicht" : "leer";
   const wahl = feld.wahl ? ` (${feld.wahl.join("/")})` : "";
-  // ohne Echo auch bei URLs: eine Form wie mqtt://user:pass@host darf nicht am Terminal mitgeschrieben werden
-  const geheim = feld.art === "geheim" || feld.art === "token" || feld.art === "url" || (anzeige !== undefined && anzeige !== bestehend);
+  // ohne Echo nur bei Geheimnissen, Tokens, maskiert angezeigten Werten und Feldern mit ohneEcho (MQTT_URL: mqtt://user:pass@host);
+  // andere URLs sichtbar tippen, damit ein Zahlendreher in der Adresse auffällt
+  const geheim = feld.art === "geheim" || feld.art === "token" || feld.ohneEcho === true || (anzeige !== undefined && anzeige !== bestehend);
   for (let versuch = 1; versuch <= 3; versuch++) {
     const eingabe = await frageOderAbbruch(`  ${feld.key} – ${feld.frage}${wahl} [${zusatz}]: `, geheim);
     const e = entscheideWert(eingabe, bestehend, feld);
@@ -162,9 +168,21 @@ async function frageFeld(feld: Feld, bestehend: string | undefined): Promise<str
 // ---------- Prüfungen im Kindprozess ----------
 
 const projekt = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+/** Laufende Prüfung – wird bei Strg-C mit beendet, sonst liefe sie verwaist mit den eben eingegebenen Geheimnissen weiter. */
+let laufendesKind: ChildProcess | undefined;
+/** Zeitlimit einer Abschnittsprüfung (Vorgabe) */
+const ZEITLIMIT_ABSCHNITT_MS = 60_000;
+/**
+ * Zeitlimit des Abschluss-Selbsttests: alle Prüfungen laufen nacheinander mit eigenem Timeout (Claude-API 15 s ohne
+ * SDK-Wiederholungen, Telegram/HA/Frigate/OctoPrint je 10 s, MQTT 8 s). Hängen mehrere Dienste, reichen 60 s nicht für ein Ergebnis.
+ */
+const ZEITLIMIT_SELBSTTEST_MS = 180_000;
 
-/** Lässt scripts/check.ts mit --nur im Kindprozess laufen (liest die frische .env). Liefert true bei mindestens einem Fehler. */
-function pruefeImKind(wurzel: string, envPfad: string, nur?: string[]): Promise<boolean> {
+/**
+ * Lässt scripts/check.ts mit --nur im Kindprozess laufen (liest die frische .env). Liefert true bei mindestens einem Fehler.
+ * `zeitlimitMs`: danach wird das Kind beendet und die Prüfung als abgebrochen gemeldet.
+ */
+function pruefeImKind(wurzel: string, envPfad: string, nur?: string[], zeitlimitMs = ZEITLIMIT_ABSCHNITT_MS): Promise<boolean> {
   return new Promise((fertig) => {
     const env: NodeJS.ProcessEnv = { ...process.env };
     for (const k of alleSchluessel()) delete env[k];
@@ -172,7 +190,9 @@ function pruefeImKind(wurzel: string, envPfad: string, nur?: string[]): Promise<
     // Die eben geschriebene Datei explizit mitgeben (auch bei --env <anderer Name>); config.ts lädt danach nur noch Fehlendes.
     if (existsSync(envPfad)) args.unshift(`--env-file=${envPfad}`);
     if (nur?.length) args.push("--nur", nur.join(","));
-    const kind = spawn(process.execPath, args, { cwd: wurzel, env, stdio: ["ignore", "pipe", "pipe"], timeout: 60_000 });
+    if (tty) stumm = true; // keine Frage offen: Vorausgetipptes (oft das nächste Geheimnis) nicht echoen
+    const kind = spawn(process.execPath, args, { cwd: wurzel, env, stdio: ["ignore", "pipe", "pipe"], timeout: zeitlimitMs });
+    laufendesKind = kind;
     let fehler = false;
     let rest = "";
     const zeige = (chunk: Buffer) => {
@@ -186,10 +206,12 @@ function pruefeImKind(wurzel: string, envPfad: string, nur?: string[]): Promise<
     };
     kind.stdout.on("data", zeige);
     kind.stderr.on("data", zeige);
-    kind.on("error", (e) => { sag(`    Prüfung nicht gestartet: ${e.message}`); fertig(true); });
+    kind.on("error", (e) => { stumm = false; sag(`    Prüfung nicht gestartet: ${e.message}`); fertig(true); });
     kind.on("close", (code, signal) => {
+      laufendesKind = undefined;
+      stumm = false;
       if (rest.trim()) sag(`    ${rest.trim()}`);
-      if (signal) { sag("    Prüfung abgebrochen (Zeitlimit 60 s)."); fehler = true; }
+      if (signal) { sag(`    Prüfung abgebrochen (Zeitlimit ${zeitlimitMs / 1000} s).`); fehler = true; }
       else if (code !== 0) { sag(`    Prüfung endete mit Code ${code}.`); fehler = true; }
       fertig(fehler);
     });
@@ -231,20 +253,33 @@ async function abschnittDurchlaufen(a: Abschnitt, zeilen: EnvZeile[], o: Optione
   }
 }
 
-/** data/ und Arbeitsordner mit 0o700; eigene bestehende Ordner mit offeneren Rechten werden nachgezogen. Mehrfach aufrufbar. */
+/** Von diesem Lauf angelegte Ordner: deren Rechte dürfen auch ausserhalb des Projekts nachgezogen werden. */
+const selbstAngelegt = new Set<string>();
+
+/**
+ * data/ und Arbeitsordner mit 0o700. Bestehende eigene Ordner mit offeneren Rechten werden nur nachgezogen, wenn sie (nach Auflösen
+ * von Symlinks) im Projekt liegen oder von diesem Lauf stammen – ein fremder Pfad (/tmp, Home, Freigabe) bekommt nur einen Hinweis.
+ * Mehrfach aufrufbar.
+ */
 function ordnerAnlegen(wurzel: string, zeilen: EnvZeile[]): void {
   const ws = holeWert(zeilen, "JARVIS_WORKSPACE") || "workspace";
   for (const p of [join(wurzel, "data"), isAbsolute(ws) ? ws : join(wurzel, ws)]) {
     if (!existsSync(p)) {
       mkdirSync(p, { recursive: true, mode: 0o700 });
+      selbstAngelegt.add(realpathSync(p));
       sag(`  Ordner angelegt: ${p}`);
       continue;
     }
     try {
       const st = statSync(p);
-      if (st.isDirectory() && st.uid === process.getuid?.() && (st.mode & 0o077) !== 0) {
+      if (!st.isDirectory() || st.uid !== process.getuid?.() || (st.mode & 0o077) === 0) continue;
+      // echte Pfade: ein Symlink im Projekt auf eine Freigabe ausserhalb zählt als fremd (chmod folgt dem Link)
+      const echt = realpathSync(p);
+      if (echt.startsWith(realpathSync(wurzel) + sep) || selbstAngelegt.has(echt)) {
         chmodSync(p, 0o700);
         sag(`  Rechte auf 700 gesetzt: ${p}`);
+      } else {
+        sag(`  Rechte von ${p} nicht angepasst (liegt ausserhalb des Projekts), Sir. Bitte selbst prüfen: chmod 700 ${p}`);
       }
     } catch (e) {
       sag(`  Rechte von ${p} nicht gesetzt: ${e instanceof Error ? e.message : String(e)}`);
@@ -277,7 +312,17 @@ async function haupt(o: Optionen): Promise<void> {
   sag("  • Geschrieben wird erst, wenn ein Abschnitt vollständig beantwortet ist.");
 
   if (!existsSync(beispielPfad)) throw new Error(`Vorlage fehlt: ${beispielPfad}`);
+  if (!existsSync(wurzel) || !statSync(wurzel).isDirectory()) throw new Error(`Zielordner fehlt: ${wurzel}`);
+  if (envPfad === beispielPfad || (existsSync(envPfad) && realpathSync(envPfad) === realpathSync(beispielPfad))) {
+    throw new Error("Ziel und Vorlage sind dieselbe Datei – bitte --env .env verwenden (die Vorlage ist versioniert)");
+  }
+  if (basename(envPfad) !== ".env") sag(`  Hinweis: ${basename(envPfad)} und ${basename(envPfad)}.bak sind nicht von .gitignore erfasst – nicht committen.`);
   const zeilen = ladeEnv(beispielPfad, envPfad);
+  // Bestandswerte sofort prüfen: ein nicht darstellbarer Wert fiele sonst erst beim Schreiben auf – nach allen Fragen des Abschnitts
+  for (const z of zeilen) {
+    if (z.art !== "wert") continue;
+    try { quoteWert(z.wert); } catch (e) { throw new Error(`${z.key} in ${envPfad}: ${(e as Error).message} – bitte von Hand anpassen`); }
+  }
   if (existsSync(envPfad)) {
     const gesetzt = parseEnv(readFileSync(envPfad, "utf8")).filter((z) => z.art === "wert" && z.wert !== "").length; // nur die Datei, nicht die Vorlage
     sag(`  Bestehende .env gefunden: ${gesetzt} Wert(e) gesetzt. Enter behält sie.`);
@@ -305,7 +350,7 @@ async function haupt(o: Optionen): Promise<void> {
   if (!o.ohnePruefung) {
     sag();
     sag("── Selbsttest ──");
-    await pruefeImKind(wurzel, envPfad);
+    await pruefeImKind(wurzel, envPfad, undefined, ZEITLIMIT_SELBSTTEST_MS);
   }
 
   sag();
@@ -318,6 +363,7 @@ async function haupt(o: Optionen): Promise<void> {
 function abbrechen(grund: string): void {
   sag();
   sag(`${grund} Die .env enthält nur vollständig beantwortete Abschnitte, Sir.`);
+  laufendesKind?.kill("SIGTERM");
   rl.close();
   process.exit(1);
 }

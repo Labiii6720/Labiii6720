@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
+import { createServer, type AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, describe, it } from "node:test";
@@ -11,8 +12,18 @@ after(() => rmSync(temp, { recursive: true, force: true }));
 process.env.TELEGRAM_BOT_TOKEN = "123456789:ABCdefGHIjklMNOpqrSTUvwxYZ0123456789";
 process.env.TELEGRAM_CHAT_ID = "12345";
 
+// Stummer TCP-Listener: nimmt Verbindungen an, antwortet nie – simuliert eine hängende Claude-API
+const stumm = createServer((socket) => socket.on("error", () => {}));
+await new Promise<void>((ok) => stumm.listen(0, "127.0.0.1", ok));
+after(() => stumm.close());
+process.env.ANTHROPIC_API_KEY = "sk-ant-attrappe-nur-fuer-tests";
+process.env.ANTHROPIC_BASE_URL = `http://127.0.0.1:${(stumm.address() as AddressInfo).port}`;
+
 let aufrufe = 0;
-globalThis.fetch = (async (eingabe: string | URL | Request) => {
+const echterFetch = globalThis.fetch;
+globalThis.fetch = (async (eingabe: string | URL | Request, init?: RequestInit) => {
+  // Das Anthropic-SDK darf nur den stummen Listener erreichen
+  if (String(eingabe instanceof Request ? eingabe.url : eingabe).startsWith(process.env.ANTHROPIC_BASE_URL!)) return echterFetch(eingabe, init);
   aufrufe++;
   assert.ok(String(eingabe).startsWith("https://api.telegram.org/bot"), `unerwarteter Aufruf: ${eingabe}`);
   return new Response(JSON.stringify({ ok: true, result: { username: "jarvis_test_bot" } }), { headers: { "content-type": "application/json" } });
@@ -40,12 +51,34 @@ describe("selbsttest(nur)", () => {
     assert.equal(aufrufe, 1);
   });
 
+  it("beiBefund wird je Befund sofort und in Reihenfolge gerufen", async () => {
+    aufrufe = 0;
+    const gemeldet: string[] = [];
+    const b = await selbsttest(["Telegram", "Sicherheit"], (x) => gemeldet.push(x.name));
+    assert.deepEqual(gemeldet, ["Telegram", "Sicherheit"]);
+    assert.deepEqual(b.map((x) => x.name), gemeldet);
+    const unbekannt: { name: string; info: string }[] = [];
+    await selbsttest(["Sicherheit", "Gibtsnicht"], (x) => unbekannt.push({ name: x.name, info: x.info }));
+    assert.deepEqual(unbekannt.map((x) => x.name), ["Sicherheit", "Gibtsnicht"]);
+    assert.equal(unbekannt[1].info, "unbekannte Prüfung");
+  });
+
   it("Prüfung ohne Netz läuft allein (kein fetch)", async () => {
     aufrufe = 0;
     const b = await selbsttest(["Sicherheit"]);
     assert.equal(b.length, 1);
     assert.equal(b[0].name, "Sicherheit");
     assert.equal(aufrufe, 0);
+  });
+
+  it("Claude-API: hängende Verbindung → ein Versuch, fehler nach unter 20 s", { timeout: 25_000 }, async () => {
+    const start = Date.now();
+    const b = await selbsttest(["Claude-API"]);
+    const dauer = Date.now() - start;
+    assert.equal(b.length, 1);
+    assert.equal(b[0].name, "Claude-API");
+    assert.equal(b[0].status, "fehler");
+    assert.ok(dauer < 20_000, `Selbsttest brauchte ${dauer} ms (SDK wiederholt den Aufruf?)`);
   });
 });
 
