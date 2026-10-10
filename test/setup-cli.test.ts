@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { copyFileSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { after, describe, it } from "node:test";
@@ -13,8 +13,13 @@ interface Lauf { code: number | null; signal: NodeJS.Signals | null; out: string
 
 /** Fährt den Assistenten mit gepipten Antworten; keine Prüfungen, keine Netzaufrufe. */
 function fahre(dir: string, antworten: string[], extra: string[] = [], sigint = false): Promise<Lauf> {
+  return fahreRoh(dir, antworten, ["--ohne-pruefung", "--alle", "--env", join(dir, ".env"), ...extra], sigint);
+}
+
+/** Wie fahre, aber mit freier Argumentliste (Vorlage immer die Kopie im Temp-Verzeichnis). */
+function fahreRoh(dir: string, antworten: string[], argumente: string[], sigint = false): Promise<Lauf> {
   return new Promise((fertig) => {
-    const kind = spawn(process.execPath, ["--import", "tsx", skript, "--ohne-pruefung", "--alle", "--env", join(dir, ".env"), "--beispiel", join(dir, ".env.example"), ...extra], {
+    const kind = spawn(process.execPath, ["--import", "tsx", skript, "--beispiel", join(dir, ".env.example"), ...argumente], {
       cwd: projekt, timeout: 60_000, env: { ...process.env, ANTHROPIC_API_KEY: "", TELEGRAM_BOT_TOKEN: "" },
     });
     let out = "";
@@ -23,7 +28,12 @@ function fahre(dir: string, antworten: string[], extra: string[] = [], sigint = 
     kind.stderr.on("data", (c) => (err += c));
     kind.on("close", (code, signal) => fertig({ code, signal, out, err }));
     if (sigint) {
-      setTimeout(() => kind.kill("SIGINT"), 1500);
+      // Signal erst, wenn die erste Frage steht: dann ist der SIGINT-Handler sicher installiert (auch auf langsamem Pi).
+      let gesendet = false;
+      const senden = (): void => { if (!gesendet) { gesendet = true; kind.kill("SIGINT"); } };
+      const ersatz = setTimeout(senden, 20_000);
+      kind.stdout.on("data", () => { if (out.includes("NAME – Ihr Name")) senden(); });
+      kind.on("close", () => clearTimeout(ersatz));
     } else {
       kind.stdin.end(antworten.map((a) => a + "\n").join(""));
     }
@@ -42,6 +52,7 @@ function neuesVerzeichnis(): string {
 
 const TOKEN = "123456789:ABCdefGHIjklMNOpqrSTUvwxYZ0123456789";
 const KEY = "sk-ant-api03-testschluessel-nicht-echt";
+const PIN = "zz99"; // bewusst mit Nicht-Hex-Zeichen: kein erzeugter Token kann diese Folge enthalten
 
 /** Antworten erster Lauf: Pflichtwerte, Chat-ID zuerst ungültig, sonst Enter (63 Felder in Reihenfolge der Abschnitte) */
 function ersteAntworten(): string[] {
@@ -49,7 +60,7 @@ function ersteAntworten(): string[] {
     "Labinot", "", "", "", "", // grundlagen
     KEY, "", "", "", "", "", // claude
     TOKEN, "abc", "12345", // telegram: Chat-ID erst ungültig
-    "9876", "", "", "", "", "", "", // sicherheit: PIN, zwei Tokens erzeugen
+    PIN, "", "", "", "", "", "", // sicherheit: PIN, zwei Tokens erzeugen
     ...Array(50).fill(""), // Rest: Enter (mehr als nötig schadet nicht)
   ];
 }
@@ -67,7 +78,7 @@ describe("scripts/setup.ts (End-zu-End)", () => {
     assert.equal(werte.ANTHROPIC_API_KEY, KEY);
     assert.equal(werte.TELEGRAM_BOT_TOKEN, TOKEN);
     assert.equal(werte.TELEGRAM_CHAT_ID, "12345");
-    assert.equal(werte.JARVIS_PIN, "9876");
+    assert.equal(werte.JARVIS_PIN, PIN);
     assert.equal(werte.NAME, "Labinot");
     assert.equal(werte.PORT, "3000");
     assert.equal(werte.ZIELCHECK, "so 18:00");
@@ -78,7 +89,7 @@ describe("scripts/setup.ts (End-zu-End)", () => {
     assert.ok(text.includes("# --- Etappe 7: Kameras ---"));
     assert.ok(/Chat-ID ist eine Zahl/.test(lauf.out), "ungültige Chat-ID gemeldet");
     assert.ok(lauf.out.includes(`Erzeugt: ${werte.JARVIS_EVENT_TOKEN}`), "erzeugter Token einmal angezeigt");
-    assert.ok(!lauf.out.includes(KEY) && !lauf.out.includes(TOKEN) && !lauf.out.includes("9876"), "Geheimnisse nicht in der Konsole");
+    assert.ok(!lauf.out.includes(KEY) && !lauf.out.includes(TOKEN) && !lauf.out.includes(PIN), "Geheimnisse nicht in der Konsole");
     assert.ok(existsSync(join(dir, "data")) && (statSync(join(dir, "data")).mode & 0o777) === 0o700);
     assert.ok(existsSync(join(dir, "workspace")) && (statSync(join(dir, "workspace")).mode & 0o777) === 0o700);
     assert.ok(!existsSync(`${env}.bak`), "erster Lauf: keine Sicherung");
@@ -127,6 +138,74 @@ describe("scripts/setup.ts (End-zu-End)", () => {
     assert.equal(lauf.signal, null);
     assert.ok(lauf.out.includes("Abgebrochen"));
     assert.ok(!/\n\s+at /.test(lauf.out + lauf.err), "kein Stacktrace");
+  });
+
+  it("Bestehende .env: gezählt werden nur die Werte der Datei, nicht die Vorlage", async () => {
+    const dir = neuesVerzeichnis();
+    writeFileSync(join(dir, ".env"), "PORT=4000\n", { mode: 0o600 });
+    const lauf = await fahre(dir, ["", "", "", "", ""], ["--abschnitt", "grundlagen"]);
+    assert.equal(lauf.code, 0, lauf.out + lauf.err);
+    assert.ok(lauf.out.includes("Bestehende .env gefunden: 1 Wert(e)"), lauf.out);
+    assert.equal(parseEnv(readFileSync(join(dir, ".env"), "utf8")).PORT, "4000");
+  });
+
+  it("Pipe-Ende nach vollständigem Abschnitt: Exit 0, Vorlagen nur auf «j» kopiert", async () => {
+    const dir = neuesVerzeichnis();
+    for (const n of ["cameras.example.json", "protokolle.example.json"]) copyFileSync(join(projekt, n), join(dir, n));
+    const sicherheit = ["1234", "", "", "", "", "", ""]; // genau die 7 Felder, keine Antwort übrig
+    const lauf = await fahre(dir, sicherheit, ["--abschnitt", "sicherheit"]);
+    assert.equal(lauf.code, 0, lauf.out + lauf.err);
+    assert.ok(!lauf.out.includes("Eingabe beendet"), lauf.out);
+    assert.ok(!existsSync(join(dir, "cameras.json")) && !existsSync(join(dir, "protokolle.json")), "EOF gilt als Nein");
+    // mit «j» für cameras.json wird kopiert; die zweite Rückfrage endet wieder am Pipe-Ende
+    const zweiter = await fahre(dir, [...sicherheit, "j"], ["--abschnitt", "sicherheit"]);
+    assert.equal(zweiter.code, 0, zweiter.out + zweiter.err);
+    assert.ok(existsSync(join(dir, "cameras.json")));
+    assert.ok(!existsSync(join(dir, "protokolle.json")));
+  });
+
+  it("Prüfung im Kind liest die --env-Datei und findet den Arbeitsordner mit Rechten 700 vor", async () => {
+    const dir = neuesVerzeichnis();
+    const env = join(dir, "jarvis.env");
+    // Abschnitt Sicherheit mit aktiver Prüfung: läuft ohne Netz (keine Dienste eingerichtet)
+    const lauf = await fahreRoh(dir, ["1234", "", "", "", "", "", ""], ["--abschnitt", "sicherheit", "--env", env]);
+    assert.equal(lauf.code, 0, lauf.out + lauf.err);
+    assert.ok(lauf.out.includes("✅ Sicherheit"), lauf.out);
+    assert.ok(!existsSync(join(dir, ".env")), "nur die angegebene Datei wird geschrieben");
+    assert.equal(parseEnv(readFileSync(env, "utf8")).JARVIS_PIN, "1234");
+    assert.ok(!lauf.out.includes("1234"), "PIN nicht in der Konsole");
+    assert.equal(statSync(join(dir, "data")).mode & 0o777, 0o700);
+    assert.equal(statSync(join(dir, "workspace")).mode & 0o777, 0o700, "Arbeitsordner vor dem Kindprozess mit 700 angelegt");
+  });
+
+  it("Prüfung meldet Fehler, Rückfrage endet am Pipe-Ende: kein Abbruch, Exit 0", async () => {
+    const dir = neuesVerzeichnis();
+    const lauf = await fahreRoh(dir, ["1234", "", "", "auto", "", "", ""], ["--abschnitt", "sicherheit", "--env", join(dir, ".env")]);
+    assert.equal(lauf.code, 0, lauf.out + lauf.err);
+    assert.ok(lauf.out.includes("❌ Sicherheit"), lauf.out);
+    assert.ok(lauf.out.includes("nochmals eingeben?"), lauf.out);
+    assert.ok(!lauf.out.includes("Eingabe beendet"), lauf.out);
+    assert.equal(parseEnv(readFileSync(join(dir, ".env"), "utf8")).JARVIS_COMMANDS, "auto", "Abschnitt bleibt gespeichert");
+  });
+
+  it("bestehender Arbeitsordner mit offenen Rechten wird auf 700 nachgezogen", async () => {
+    const dir = neuesVerzeichnis();
+    mkdirSync(join(dir, "workspace"), { mode: 0o755 });
+    const lauf = await fahre(dir, ["", "", "", "", ""], ["--abschnitt", "grundlagen"]);
+    assert.equal(lauf.code, 0, lauf.out + lauf.err);
+    assert.equal(statSync(join(dir, "workspace")).mode & 0o777, 0o700);
+    assert.ok(lauf.out.includes("Rechte auf 700 gesetzt"), lauf.out);
+  });
+
+  it("MQTT_URL mit Passwort wird als bestehender Wert nur maskiert angezeigt", async () => {
+    const dir = neuesVerzeichnis();
+    const url = "mqtt://frigate:streng-geheim@192.168.1.10:1883";
+    writeFileSync(join(dir, ".env"), `MQTT_URL=${url}\n`, { mode: 0o600 });
+    const lauf = await fahre(dir, ["", "", "", ""], ["--abschnitt", "kameras"]);
+    assert.equal(lauf.code, 0, lauf.out + lauf.err);
+    assert.ok(lauf.out.includes("MQTT_URL – MQTT-URL [bestehend: mqtt…83]"), lauf.out);
+    assert.ok(!lauf.out.includes("streng-geheim"), "Passwort nicht in der Konsole");
+    assert.equal(parseEnv(readFileSync(join(dir, ".env"), "utf8")).MQTT_URL, url, "Enter behält den Wert");
   });
 
   it("--hilfe und unbekannte Option", async () => {

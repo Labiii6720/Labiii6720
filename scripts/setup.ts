@@ -9,13 +9,13 @@
  *   --hilfe
  */
 import { spawn } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import {
-  ABSCHNITTE, alleSchluessel, entscheideWert, holeWert, ladeEnv, maskiere, naechsteSchritte, quoteWert, schreibeEnv, setzeWert,
+  ABSCHNITTE, alleSchluessel, anzeigeBestehend, entscheideWert, holeWert, ladeEnv, naechsteSchritte, parseEnv, quoteWert, schreibeEnv, setzeWert,
   type Abschnitt, type EnvZeile, type Feld,
 } from "../src/setup.js";
 
@@ -75,7 +75,8 @@ const ausgang = new Writable({
     cb();
   },
 });
-const rl = createInterface({ input: process.stdin, output: ausgang, terminal: tty });
+// historySize 0: keine Historie, sonst holt Pfeil-hoch ein stumm eingegebenes Geheimnis sichtbar zurück
+const rl = createInterface({ input: process.stdin, output: ausgang, terminal: tty, historySize: 0 });
 
 /** Eigene Zeilen-Warteschlange: gepipte Eingaben kommen auch an, wenn gerade keine Frage offen ist. */
 const puffer: string[] = [];
@@ -96,7 +97,9 @@ function sag(text = ""): void {
 
 /** Liest eine Zeile; null = Eingabe beendet (EOF). Bei `geheim` ohne Echo am Terminal. */
 async function frage(prompt: string, geheim = false): Promise<string | null> {
-  process.stdout.write(prompt);
+  rl.setPrompt(prompt); // readline kennt den Prompt und zeichnet ihn nach Backspace/Pfeiltasten korrekt neu
+  if (tty) rl.prompt();
+  else process.stdout.write(prompt);
   if (tty && geheim) stumm = true;
   let z: string | null;
   if (puffer.length) z = puffer.shift()!;
@@ -115,17 +118,15 @@ async function frageOderAbbruch(prompt: string, geheim = false): Promise<string>
   return z;
 }
 
-async function jaNein(prompt: string): Promise<boolean> {
-  const a = (await frageOderAbbruch(`${prompt} [j/N] `)).trim().toLowerCase();
+/** `endeIstNein`: Eingabe zu Ende (EOF) gilt als Nein statt als Abbruch – für Rückfragen nach dem Speichern. */
+async function jaNein(prompt: string, endeIstNein = false): Promise<boolean> {
+  const z = endeIstNein ? await frage(`${prompt} [j/N] `) : await frageOderAbbruch(`${prompt} [j/N] `);
+  if (z === null) return false;
+  const a = z.trim().toLowerCase();
   return a === "j" || a === "ja" || a === "y";
 }
 
 // ---------- Felder ----------
-
-function anzeigeBestehend(feld: Feld, wert: string | undefined): string | undefined {
-  if (!wert) return undefined;
-  return feld.art === "geheim" || feld.art === "token" ? maskiere(wert) : wert;
-}
 
 /** Fragt ein Feld ab; liefert den neuen Wert oder undefined (Wert behalten). */
 async function frageFeld(feld: Feld, bestehend: string | undefined): Promise<string | undefined> {
@@ -135,8 +136,10 @@ async function frageFeld(feld: Feld, bestehend: string | undefined): Promise<str
     ? `${bestehend === feld.standard ? "Vorschlag" : "bestehend"}: ${anzeige}`
     : feld.erzeugen ? "Enter: erzeugen" : feld.standard ? `Vorschlag: ${feld.standard}` : feld.pflicht ? "Pflicht" : "leer";
   const wahl = feld.wahl ? ` (${feld.wahl.join("/")})` : "";
+  // ohne Echo auch bei URLs: eine Form wie mqtt://user:pass@host darf nicht am Terminal mitgeschrieben werden
+  const geheim = feld.art === "geheim" || feld.art === "token" || feld.art === "url" || (anzeige !== undefined && anzeige !== bestehend);
   for (let versuch = 1; versuch <= 3; versuch++) {
-    const eingabe = await frageOderAbbruch(`  ${feld.key} – ${feld.frage}${wahl} [${zusatz}]: `, feld.art === "geheim" || feld.art === "token");
+    const eingabe = await frageOderAbbruch(`  ${feld.key} – ${feld.frage}${wahl} [${zusatz}]: `, geheim);
     const e = entscheideWert(eingabe, bestehend, feld);
     let fehler = e.fehler;
     if (!fehler && e.wert !== undefined) {
@@ -161,11 +164,13 @@ async function frageFeld(feld: Feld, bestehend: string | undefined): Promise<str
 const projekt = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 /** Lässt scripts/check.ts mit --nur im Kindprozess laufen (liest die frische .env). Liefert true bei mindestens einem Fehler. */
-function pruefeImKind(wurzel: string, nur?: string[]): Promise<boolean> {
+function pruefeImKind(wurzel: string, envPfad: string, nur?: string[]): Promise<boolean> {
   return new Promise((fertig) => {
     const env: NodeJS.ProcessEnv = { ...process.env };
     for (const k of alleSchluessel()) delete env[k];
     const args = ["--import", import.meta.resolve("tsx"), join(projekt, "scripts", "check.ts")];
+    // Die eben geschriebene Datei explizit mitgeben (auch bei --env <anderer Name>); config.ts lädt danach nur noch Fehlendes.
+    if (existsSync(envPfad)) args.unshift(`--env-file=${envPfad}`);
     if (nur?.length) args.push("--nur", nur.join(","));
     const kind = spawn(process.execPath, args, { cwd: wurzel, env, stdio: ["ignore", "pipe", "pipe"], timeout: 60_000 });
     let fehler = false;
@@ -201,7 +206,7 @@ function liesState(wurzel: string): { whoop?: unknown; google?: unknown } {
   }
 }
 
-async function abschnittDurchlaufen(a: Abschnitt, zeilen: EnvZeile[], o: Optionen, schreiben: () => void, wurzel: string): Promise<void> {
+async function abschnittDurchlaufen(a: Abschnitt, zeilen: EnvZeile[], o: Optionen, schreiben: () => void, wurzel: string, envPfad: string): Promise<void> {
   sag();
   sag(`── ${a.titel} ──`);
   sag(a.beschreibung);
@@ -218,19 +223,31 @@ async function abschnittDurchlaufen(a: Abschnitt, zeilen: EnvZeile[], o: Optione
     schreiben();
     sag(`  Gespeichert (${a.titel}).`);
     if (o.ohnePruefung || !a.checks?.length) return;
+    ordnerAnlegen(wurzel, zeilen); // vor dem Kind, sonst legt es den Arbeitsordner mit umask-Rechten an
     sag("  Prüfe …");
-    const fehler = await pruefeImKind(wurzel, a.checks);
+    const fehler = await pruefeImKind(wurzel, envPfad, a.checks);
     if (!fehler) return;
-    if (!(await jaNein("  Werte dieses Abschnitts nochmals eingeben?"))) return;
+    if (!(await jaNein("  Werte dieses Abschnitts nochmals eingeben?", true))) return;
   }
 }
 
+/** data/ und Arbeitsordner mit 0o700; eigene bestehende Ordner mit offeneren Rechten werden nachgezogen. Mehrfach aufrufbar. */
 function ordnerAnlegen(wurzel: string, zeilen: EnvZeile[]): void {
   const ws = holeWert(zeilen, "JARVIS_WORKSPACE") || "workspace";
   for (const p of [join(wurzel, "data"), isAbsolute(ws) ? ws : join(wurzel, ws)]) {
     if (!existsSync(p)) {
       mkdirSync(p, { recursive: true, mode: 0o700 });
       sag(`  Ordner angelegt: ${p}`);
+      continue;
+    }
+    try {
+      const st = statSync(p);
+      if (st.isDirectory() && st.uid === process.getuid?.() && (st.mode & 0o077) !== 0) {
+        chmodSync(p, 0o700);
+        sag(`  Rechte auf 700 gesetzt: ${p}`);
+      }
+    } catch (e) {
+      sag(`  Rechte von ${p} nicht gesetzt: ${e instanceof Error ? e.message : String(e)}`);
     }
   }
 }
@@ -240,7 +257,7 @@ async function beispieleAnbieten(wurzel: string): Promise<void> {
     const ziel = join(wurzel, name);
     const vorlage = join(wurzel, name.replace(".json", ".example.json"));
     if (existsSync(ziel) || !existsSync(vorlage)) continue;
-    if (await jaNein(`  ${name} fehlt. Vorlage ${name.replace(".json", ".example.json")} kopieren?`)) {
+    if (await jaNein(`  ${name} fehlt. Vorlage ${name.replace(".json", ".example.json")} kopieren?`, true)) {
       copyFileSync(vorlage, ziel);
       sag(`  Kopiert: ${ziel} – bitte anpassen.`);
     }
@@ -262,7 +279,7 @@ async function haupt(o: Optionen): Promise<void> {
   if (!existsSync(beispielPfad)) throw new Error(`Vorlage fehlt: ${beispielPfad}`);
   const zeilen = ladeEnv(beispielPfad, envPfad);
   if (existsSync(envPfad)) {
-    const gesetzt = zeilen.filter((z) => z.art === "wert" && z.wert !== "").length;
+    const gesetzt = parseEnv(readFileSync(envPfad, "utf8")).filter((z) => z.art === "wert" && z.wert !== "").length; // nur die Datei, nicht die Vorlage
     sag(`  Bestehende .env gefunden: ${gesetzt} Wert(e) gesetzt. Enter behält sie.`);
   } else {
     sag("  Keine .env vorhanden – ich baue sie aus der Vorlage auf.");
@@ -278,7 +295,7 @@ async function haupt(o: Optionen): Promise<void> {
 
   for (const a of ABSCHNITTE) {
     if (o.abschnitt && a.name !== o.abschnitt) continue;
-    await abschnittDurchlaufen(a, zeilen, o, schreiben, wurzel);
+    await abschnittDurchlaufen(a, zeilen, o, schreiben, wurzel, envPfad);
   }
 
   sag();
@@ -288,7 +305,7 @@ async function haupt(o: Optionen): Promise<void> {
   if (!o.ohnePruefung) {
     sag();
     sag("── Selbsttest ──");
-    await pruefeImKind(wurzel);
+    await pruefeImKind(wurzel, envPfad);
   }
 
   sag();

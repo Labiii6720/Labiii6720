@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { after, describe, it } from "node:test";
 import { parseEnv as nodeParseEnv } from "node:util";
+import type { Feld, FeldArt } from "../src/setup.js"; // nur Typen: kein Import vor dem chdir
 
 const projekt = resolve(import.meta.dirname, "..");
 const temp: string[] = [];
@@ -250,6 +252,53 @@ describe("Schema ↔ .env.example", () => {
     for (const a of s.ABSCHNITTE) for (const c of a.checks ?? []) assert.ok(bekannt.includes(c), `unbekannter Check ${c} in ${a.name}`);
     for (const a of s.ABSCHNITTE) for (const f of a.felder) if (f.art === "wahl") assert.ok(f.wahl?.length && f.pruefen, `wahl ohne Liste/Prüfung: ${f.key}`);
   });
+
+  it("Geheimnisse haben art geheim oder token (maskiert, ohne Echo)", () => {
+    const felder = s.ABSCHNITTE.flatMap((a) => a.felder);
+    // Capability-URL: wer den Link kennt, liest den Kalender ohne Anmeldung
+    const outlook = felder.find((f) => f.key === "OUTLOOK_ICS_URL")!;
+    assert.equal(outlook.art, "geheim");
+    assert.equal(outlook.pruefen, s.pruefeUrl, "URL-Prüfung bleibt");
+    assert.equal(outlook.pruefen?.("https://outlook.office365.com/owa/calendar/x/y/calendar.ics"), undefined);
+    assert.ok(outlook.pruefen?.("kein-link"));
+    // Namenskonvention: alles, was wie ein Zugangsgeheimnis heisst, ist geheim/token
+    for (const f of felder) {
+      if (/(_TOKEN|_SECRET|_KEY|_PASSWORD|_PIN)$/.test(f.key)) assert.ok(f.art === "geheim" || f.art === "token", `${f.key} ist ${f.art}, nicht geheim/token`);
+    }
+  });
+});
+
+describe("anzeigeBestehend", () => {
+  const feld = (art: FeldArt): Feld => ({ key: "X", frage: "x", art });
+
+  it("leer → undefined", () => {
+    assert.equal(s.anzeigeBestehend(feld("text"), undefined), undefined);
+    assert.equal(s.anzeigeBestehend(feld("geheim"), ""), undefined);
+  });
+
+  it("geheim und token nur maskiert", () => {
+    const geheim = "https://outlook.office365.com/owa/calendar/geheimeKennung/calendar.ics";
+    const anzeige = s.anzeigeBestehend(feld("geheim"), geheim)!;
+    assert.equal(anzeige, s.maskiere(geheim));
+    assert.ok(!anzeige.includes("geheimeKennung"));
+    assert.equal(s.anzeigeBestehend(feld("token"), "0123456789abcdef"), "0123…ef");
+  });
+
+  it("URL mit Passwort maskiert, ohne Passwort unverändert", () => {
+    const mitPasswort = "mqtt://frigate:streng-geheim@192.168.1.10:1883";
+    const anzeige = s.anzeigeBestehend(feld("url"), mitPasswort)!;
+    assert.equal(anzeige, s.maskiere(mitPasswort));
+    assert.ok(!anzeige.includes("streng-geheim"));
+    assert.equal(s.anzeigeBestehend(feld("url"), "mqtt://192.168.1.10:1883"), "mqtt://192.168.1.10:1883");
+    assert.equal(s.anzeigeBestehend(feld("url"), "http://192.168.1.10:8123"), "http://192.168.1.10:8123");
+    assert.equal(s.anzeigeBestehend(feld("url"), "mqtts://nurbenutzer@host"), "mqtts://nurbenutzer@host");
+  });
+
+  it("gewöhnliche Werte unverändert", () => {
+    assert.equal(s.anzeigeBestehend(feld("text"), "Labinot"), "Labinot");
+    assert.equal(s.anzeigeBestehend(feld("zahl"), "3000"), "3000");
+    assert.equal(s.anzeigeBestehend(feld("pfad"), "service-account.json"), "service-account.json");
+  });
 });
 
 describe("naechsteSchritte", () => {
@@ -266,5 +315,24 @@ describe("naechsteSchritte", () => {
     const leer = s.naechsteSchritte(s.parseEnv("ANTHROPIC_API_KEY=\n"), {});
     assert.ok(leer.some((t) => t.includes("ANTHROPIC_API_KEY")));
     assert.ok(!existsSync("/x/.env.bak"));
+  });
+});
+
+describe(".gitignore deckt Sicherung und Temp-Datei der .env ab", () => {
+  const gitignore = join(projekt, ".gitignore");
+  const eintraege = readFileSync(gitignore, "utf8").split("\n").map((z) => z.trim()).filter((z) => z && !z.startsWith("#"));
+  const geheim = [".env", ".env.bak", ".env.tmp"]; // .env sowie das, was schreibeEnv daneben anlegt
+
+  it("Einträge stehen wörtlich in .gitignore, .env.example nicht", () => {
+    for (const name of geheim) assert.ok(eintraege.includes(name), `${name} fehlt in .gitignore`);
+    assert.ok(!eintraege.includes(".env.example"), ".env.example darf nicht ignoriert werden");
+  });
+
+  it("git check-ignore bestätigt es (übersprungen ohne git oder Repository)", (t) => {
+    const pruefe = (name: string) => spawnSync("git", ["check-ignore", "-q", "--no-index", name], { cwd: projekt, stdio: "ignore" });
+    const probe = pruefe(".env");
+    if (probe.error || probe.status === null || probe.status >= 128) { t.skip("git oder Repository nicht verfügbar"); return; }
+    for (const name of geheim) assert.equal(pruefe(name).status, 0, `${name} wird von git nicht ignoriert`);
+    assert.equal(pruefe(".env.example").status, 1, ".env.example darf nicht ignoriert werden");
   });
 });

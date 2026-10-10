@@ -1,5 +1,7 @@
 node_modules/
 .env
+.env.bak
+.env.tmp
 data/
 service-account.json
 *.log

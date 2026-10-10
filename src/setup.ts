@@ -213,7 +213,8 @@ export const ABSCHNITTE: Abschnitt[] = [
     felder: [
       { key: "GOOGLE_KEY_FILE", frage: "Pfad zur Dienstkonto-Schlüsseldatei", hinweis: "z. B. service-account.json", art: "pfad" },
       { key: "GOOGLE_CALENDAR_ID", frage: "Kalender-ID", hinweis: "Google Kalender → Einstellungen, mit dem Dienstkonto geteilt", art: "text" },
-      { key: "OUTLOOK_ICS_URL", frage: "Outlook ICS-Link", hinweis: "nur mit Freigabe der IT", art: "url", pruefen: pruefeUrl },
+      // geheim: wer den Link kennt, liest den Kalender – darum maskiert und ohne Echo
+      { key: "OUTLOOK_ICS_URL", frage: "Outlook ICS-Link", hinweis: "nur mit Freigabe der IT; Eingabe wird nicht angezeigt", art: "geheim", pruefen: pruefeUrl },
       { key: "OUTLOOK_MODE", frage: "Outlook-Sichtbarkeit", hinweis: "busy = nur belegte Zeiten (empfohlen), details = auch Titel", art: "wahl", wahl: ["busy", "details"], standard: "busy", pruefen: pruefeWahl(["busy", "details"]) },
       { key: "BRIEFING_PREP_FROM", frage: "Briefing ab dieser Uhrzeit vorbereiten", art: "zeit", standard: "05:45", pruefen: pruefeZeit },
     ],
@@ -436,6 +437,18 @@ export function erzeugeToken(bytes = 24): string {
 
 export function maskiere(wert: string): string {
   return wert.length <= 8 ? "••••" : `${wert.slice(0, 4)}…${wert.slice(-2)}`;
+}
+
+/** Bestehenden Wert für die Konsole aufbereiten: Geheimnisse, Tokens und URLs mit Passwort (mqtt://user:pass@host) nur maskiert. */
+export function anzeigeBestehend(feld: Feld, wert: string | undefined): string | undefined {
+  if (!wert) return undefined;
+  if (feld.art === "geheim" || feld.art === "token") return maskiere(wert);
+  try {
+    if (new URL(wert).password) return maskiere(wert);
+  } catch {
+    // keine URL
+  }
+  return wert;
 }
 
 /**
