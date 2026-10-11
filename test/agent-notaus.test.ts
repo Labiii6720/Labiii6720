@@ -16,7 +16,7 @@ globalThis.fetch = (async (eingabe: string | URL | Request) => {
 }) as typeof fetch;
 
 const { anthropic } = await import("../src/claude.js");
-const { runTask } = await import("../src/agent.js");
+const { runTask, pausiertText } = await import("../src/agent.js");
 const { state } = await import("../src/state.js");
 
 const NOTIZEN = join(temp, "data", "notizen.md");
@@ -39,6 +39,7 @@ describe("runLoop: Notaus während eines Claude-Aufrufs", () => {
   afterEach(() => {
     client.messages.create = orig;
     state.paused = false;
+    delete state.notfall;
   });
 
   it("Notaus kommt während messages.create: keine Werkzeuge, Historie bleibt gültig", async () => {
@@ -58,6 +59,49 @@ describe("runLoop: Notaus während eines Claude-Aufrufs", () => {
     assert.equal(letzte.role, "user");
     const ergebnisse = letzte.content as Anthropic.ToolResultBlockParam[];
     assert.deepEqual(ergebnisse.map((r) => [r.tool_use_id, r.is_error]), [["tu_1", true], ["tu_2", true]]);
+  });
+
+  it("Notaus kommt während des letzten Aufrufs (ohne Werkzeuge): Antwort wird nicht herausgegeben", async () => {
+    let aufrufe = 0;
+    client.messages.create = (async () => {
+      aufrufe++;
+      state.paused = true; // /notfall trifft ein, während die fertige Antwort unterwegs ist
+      return { ...mitWerkzeugen(), stop_reason: "end_turn", content: [{ type: "text", text: "Ihre Rechnungen: geheim.", citations: null }] } as Anthropic.Message;
+    }) as unknown as typeof client.messages.create;
+    const verlauf: Anthropic.MessageParam[] = [];
+    const antwort = await runTask("Welche Rechnungen sind offen?", hooks, { history: verlauf });
+    assert.equal(antwort, "Ich bin pausiert (Notaus). In Telegram hebt /weiter das wieder auf.");
+    assert.equal(aufrufe, 1);
+    assert.doesNotMatch(antwort, /geheim/);
+    // Historie bleibt gültig: Nutzer, dann Assistent
+    assert.deepEqual(verlauf.map((m) => m.role), ["user", "assistant"]);
+  });
+
+  it("Notfall kommt während messages.create: Antwort verweist auf /entwarnung statt /weiter", async () => {
+    client.messages.create = (async () => {
+      // /notfall setzt beides (notfall.ts): Notaus und Notfall-Status
+      state.paused = true;
+      state.notfall = { aktiv: true, seit: new Date().toISOString(), grund: "Test" };
+      return mitWerkzeugen();
+    }) as unknown as typeof client.messages.create;
+    const antwort = await runTask("Merk dir eins und zwei.", hooks, { history: [] });
+    assert.equal(antwort, "Notfall aktiv, Sir. Aufheben nur mit /entwarnung in Telegram.");
+    assert.doesNotMatch(antwort, /\/weiter/);
+    assert.equal(existsSync(NOTIZEN), false);
+  });
+
+  it("Anfrage im laufenden Notfall: kein Claude-Aufruf, Hinweis auf /entwarnung", async () => {
+    let aufrufe = 0;
+    client.messages.create = (async () => { aufrufe++; return mitWerkzeugen(); }) as unknown as typeof client.messages.create;
+    state.paused = true;
+    state.notfall = { aktiv: true, seit: new Date().toISOString(), grund: "Test" };
+    const antwort = await runTask("Was steht an?", hooks, { history: [] });
+    assert.equal(antwort, pausiertText());
+    assert.match(antwort, /\/entwarnung/);
+    assert.equal(aufrufe, 0);
+    // nach der Entwarnung (Notfall aus, Notaus noch an) gilt wieder der /weiter-Hinweis
+    state.notfall = { aktiv: false };
+    assert.equal(pausiertText(), "Ich bin pausiert (Notaus). In Telegram hebt /weiter das wieder auf.");
   });
 
   it("ohne Notaus: Werkzeuge laufen wie bisher", async () => {

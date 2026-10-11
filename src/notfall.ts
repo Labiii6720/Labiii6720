@@ -4,7 +4,7 @@ import { audit } from "./audit.js";
 import { config } from "./config.js";
 import { save, state } from "./state.js";
 import { fehlerDetail } from "./robust.js";
-import { sendeSpaeter } from "./telegram.js";
+import { notausVermerken, sendeSpaeter } from "./telegram.js";
 
 /**
  * Notfall-Protokoll (defensiv, legal): isolieren, sperren, alarmieren.
@@ -36,6 +36,8 @@ const CHECKLISTE = [
 
 /** Schaltet alles scharf ab: Notaus an, Werkzeuge/Zeitpläne/Wachen aus, Alarm + Checkliste. */
 export async function ausloesen(grund: string): Promise<void> {
+  // Auch wenn der Notfall schon läuft: ein vorher eingereihtes /entwarnung darf diesen Auslöser nicht aufheben.
+  notausVermerken();
   if (state.notfall?.aktiv) return;
   state.notfall = { aktiv: true, seit: new Date().toISOString(), grund };
   state.paused = true; // kein Werkzeug läuft mehr, keine Freigabe geht mehr durch
@@ -79,6 +81,11 @@ export async function handlePanic(req: Request, res: Response): Promise<void> {
     res.status(401).json({ ok: false });
     return;
   }
-  await ausloesen("Panik-Auslöser vom Gerät.");
-  res.json({ ok: true });
+  // Nicht auf den Alarmversand warten: bei Telegram-Störung dauert er mit Wiederholungen bis ~90 s, der Kurzbefehl
+  // liefe in sein Zeitlimit und der Nutzer müsste annehmen, der Notfall sei nicht ausgelöst. ausloesen setzt den
+  // Zustand vor dem ersten await, die Antwort spiegelt also, was wirksam ist.
+  const alarm = ausloesen("Panik-Auslöser vom Gerät.");
+  if (notfallAktiv()) res.json({ ok: true });
+  else res.status(500).json({ ok: false });
+  await alarm;
 }

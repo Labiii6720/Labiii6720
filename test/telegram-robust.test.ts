@@ -35,7 +35,7 @@ globalThis.fetch = (async (eingabe: string | URL | Request, init?: RequestInit) 
 const fetchAttrappe = globalThis.fetch;
 
 const { HttpFehler, gesundheit } = await import("../src/robust.js");
-const { abhaengigkeiten, approveAuftrag, handleUpdate, istDringend, pollFehlerMelden, pollWartezeit, postausgangTick, remindersTick, sendText, sendeSpaeter, setzeWarten, verteileUpdate } = await import("../src/telegram.js");
+const { abhaengigkeiten, annehmen, approveAuftrag, denyAuftrag, handleUpdate, istDringend, naechsterOffset, pollFehlerMelden, pollWartezeit, postausgangTick, remindersTick, sendText, sendeSpaeter, setzeWarten, verteileUpdate } = await import("../src/telegram.js");
 const { state } = await import("../src/state.js");
 const { reminders } = await import("../src/tools.js");
 const { createAuftrag, getAuftrag } = await import("../src/queue.js");
@@ -400,6 +400,40 @@ describe("handleUpdate: Antwort von Claude und Telegram-Sendefehler", () => {
     assert.deepEqual(liesPostausgang(), []);
   });
 
+  it("Notaus zwischen Claude-Antwort und Senden: nur der Pausenhinweis geht raus", async () => {
+    abhaengigkeiten.handleMessage = async () => {
+      state.paused = true; // /pause trifft ein, nachdem runLoop schon zurückgegeben hat
+      return "Ihre Rechnungen: geheim.";
+    };
+    try {
+      await handleUpdate(nachricht("Rechnungen?"));
+    } finally {
+      state.paused = false;
+    }
+    const gesendet = aufrufe.filter((a) => a.method === "sendMessage");
+    assert.deepEqual(gesendet.map((a) => a.text), ["Ich bin pausiert (Notaus). In Telegram hebt /weiter das wieder auf."]);
+    assert.deepEqual(liesPostausgang(), []);
+  });
+
+  it("Notfall zwischen Claude-Antwort und Senden: der Hinweis nennt /entwarnung, nicht /weiter", async () => {
+    abhaengigkeiten.handleMessage = async () => {
+      state.paused = true;
+      state.notfall = { aktiv: true, seit: new Date().toISOString(), grund: "Test" };
+      return "Ihre Rechnungen: geheim.";
+    };
+    try {
+      await handleUpdate(nachricht("Rechnungen?"));
+    } finally {
+      state.paused = false;
+      state.notfall = { aktiv: false };
+    }
+    const gesendet = aufrufe.filter((a) => a.method === "sendMessage").map((a) => a.text ?? "");
+    assert.equal(gesendet.length, 1);
+    assert.match(gesendet[0], /\/entwarnung/);
+    assert.doesNotMatch(gesendet[0], /\/weiter/);
+    assert.deepEqual(liesPostausgang(), []);
+  });
+
   it("lange Antwort, zweiter Teil scheitert: nur der Rest landet im Postausgang", async () => {
     abhaengigkeiten.handleMessage = async () => "A".repeat(4000) + "B".repeat(50);
     let n = 0;
@@ -707,5 +741,617 @@ describe("PIN-Abfrage: Notaus und abgelaufenes Warten", () => {
     await handleUpdate(nachricht(25, "4711"));
     assert.equal(getAuftrag(a.id)?.status, "erledigt");
     assert.ok(gesendet().some((t) => t.startsWith(`✅ #${a.id} erledigt:`)));
+  });
+});
+
+describe("Notaus-Reihenfolge: ein eingereihtes /weiter oder /entwarnung hebt einen neueren Notaus nicht auf", () => {
+  const origHandle = abhaengigkeiten.handleMessage;
+  const nachricht = (id: number, text: string) => ({ update_id: id, message: { message_id: id, chat: { id: 12345 }, text } });
+  const gesendet = () => aufrufe.filter((x) => x.method === "sendMessage").map((x) => x.text ?? "");
+  afterEach(() => {
+    abhaengigkeiten.handleMessage = origHandle;
+    state.paused = false;
+    state.notfall = { aktiv: false };
+  });
+
+  /** Erste Nachricht hängt bei Claude; danach kommen `befehle` in dieser Reihenfolge an. */
+  async function mitHaengenderAnfrage(startId: number, befehle: string[]): Promise<void> {
+    let freigeben!: () => void;
+    const haengt = new Promise<void>((r) => { freigeben = r; });
+    let gestartet = false;
+    abhaengigkeiten.handleMessage = async () => { gestartet = true; await haengt; return "fertig"; };
+    const laeufe = [verteileUpdate(nachricht(startId, "Frage"))];
+    for (let i = 0; i < 100 && !gestartet; i++) await new Promise((r) => setImmediate(r));
+    assert.equal(gestartet, true);
+    for (const [i, b] of befehle.entries()) {
+      const lauf = verteileUpdate(nachricht(startId + 1 + i, b));
+      laeufe.push(lauf);
+      if (istDringend(nachricht(0, b))) await lauf; // vorgezogen: läuft, während die Anfrage noch hängt
+    }
+    freigeben();
+    await Promise.all(laeufe);
+  }
+
+  it("/weiter, dann /pause, während eine Anfrage hängt: der Notaus bleibt an", async () => {
+    await mitHaengenderAnfrage(1001, ["/weiter", "/pause"]);
+    assert.equal(state.paused, true);
+    assert.ok(gesendet().includes("/weiter kam vor dem Notaus an und gilt nicht, Sir. Bitte erneut senden."));
+    assert.ok(!gesendet().includes("▶️ Weiter geht's."));
+  });
+
+  it("/entwarnung, dann /notfall, während eine Anfrage hängt: der Notfall bleibt aktiv", async () => {
+    await mitHaengenderAnfrage(1011, ["/entwarnung", "/notfall"]);
+    assert.equal(state.notfall?.aktiv, true);
+    assert.equal(state.paused, true);
+    assert.ok(gesendet().includes("/entwarnung kam vor dem Notaus an und gilt nicht, Sir. Bitte erneut senden."));
+  });
+
+  it("ein nach dem /pause getipptes /weiter gilt weiterhin", async () => {
+    await mitHaengenderAnfrage(1021, ["/pause", "/weiter"]);
+    assert.equal(state.paused, false);
+    assert.ok(gesendet().includes("▶️ Weiter geht's."));
+  });
+
+  it("/weiter im aktiven Notfall hebt den Notaus nicht auf", async () => {
+    await verteileUpdate(nachricht(1031, "/notfall"));
+    await verteileUpdate(nachricht(1032, "/weiter"));
+    assert.equal(state.notfall?.aktiv, true);
+    assert.equal(state.paused, true);
+    assert.ok(gesendet().includes("Es läuft ein Notfall, Sir. Erst /entwarnung."));
+  });
+});
+
+describe("Freigabe: genau einmal ausführen, ohne langes Warten zwischen Prüfung und Ausführung", () => {
+  const origErr = console.error;
+  beforeEach(() => {
+    state.paused = false;
+    reminders.splice(0, reminders.length);
+    console.error = () => undefined;
+  });
+  afterEach(() => {
+    console.error = origErr;
+    globalThis.fetch = fetchAttrappe;
+    reminders.splice(0, reminders.length);
+  });
+  const erinnerung = () =>
+    createAuftrag({ tool: "erinnerung", input: { zeit: new Date(Date.now() + 3_600_000).toISOString(), text: "Einmal" }, stufe: "extern", summary: "Erinnerung" });
+
+  it("zwei gleichzeitige Freigaben (Doppelklick): das Werkzeug läuft genau einmal", async () => {
+    const a = erinnerung();
+    const antworten2 = await Promise.all([approveAuftrag(a), approveAuftrag(a)]);
+    assert.equal(reminders.length, 1);
+    assert.equal(antworten2.filter((t) => t.startsWith(`✅ #${a.id} erledigt`)).length, 1);
+    assert.ok(antworten2.includes(`#${a.id} wird bereits ausgeführt, Sir.`));
+    assert.equal(getAuftrag(a.id)?.status, "erledigt");
+  });
+
+  it("Ablehnen während der Ausführung wird abgewiesen, der Status bleibt «erledigt»", async () => {
+    const a = erinnerung();
+    const [ok, nein] = await Promise.all([approveAuftrag(a), denyAuftrag(a)]);
+    assert.match(ok, new RegExp(`^✅ #${a.id} erledigt`));
+    assert.equal(nein, `#${a.id} wird bereits ausgeführt, Sir.`);
+    assert.equal(getAuftrag(a.id)?.status, "erledigt");
+    assert.equal(reminders.length, 1);
+  });
+
+  it("Telegram hängt beim Entfernen der Knöpfe: ausgeführt wird sofort, nicht erst nach den Wiederholungen", async () => {
+    const a = erinnerung();
+    a.messageId = 99;
+    let freigeben!: () => void;
+    const haengt = new Promise<void>((r) => { freigeben = r; });
+    globalThis.fetch = (async (eingabe, init) => {
+      const url = String(eingabe instanceof Request ? eingabe.url : eingabe);
+      if (url.endsWith("/editMessageReplyMarkup")) await haengt;
+      return fetchAttrappe(eingabe, init);
+    }) as typeof fetch;
+    const antwort = await approveAuftrag(a);
+    assert.match(antwort, new RegExp(`^✅ #${a.id} erledigt`));
+    assert.equal(reminders.length, 1);
+    // ein Notaus danach ändert nichts mehr, eine zweite Freigabe auch nicht
+    state.paused = true;
+    assert.equal(await approveAuftrag(a), `#${a.id} ist bereits erledigt.`);
+    freigeben();
+    for (let i = 0; i < 100 && !aufrufe.some((x) => x.method === "editMessageReplyMarkup"); i++) await new Promise((r) => setImmediate(r));
+    assert.ok(aufrufe.some((x) => x.method === "editMessageReplyMarkup"));
+    assert.equal(reminders.length, 1);
+  });
+
+  it("Startvermerk wird vor dem Werkzeug persistent gespeichert", async () => {
+    const a = erinnerung();
+    let vermerkVorher: string | undefined;
+    const vorher = reminders.push;
+    reminders.push = function (this: typeof reminders, ...e: (typeof reminders)[number][]) {
+      const gespeichert = JSON.parse(readFileSync(join(temp, "data", "auftraege.json"), "utf8")) as { id: number; gestartetAm?: string }[];
+      vermerkVorher = gespeichert.find((x) => x.id === a.id)?.gestartetAm;
+      return vorher.apply(this, e);
+    };
+    try {
+      assert.match(await approveAuftrag(a), new RegExp(`^✅ #${a.id} erledigt`));
+    } finally {
+      reminders.push = vorher;
+    }
+    assert.ok(vermerkVorher, "gestartetAm fehlte in data/auftraege.json, als das Werkzeug lief");
+    assert.equal(getAuftrag(a.id)?.gestartetAm, vermerkVorher);
+  });
+
+  it("begonnen, aber nie abgeschlossen (Absturz): erneute Freigabe führt nicht nochmals aus", async () => {
+    const a = erinnerung();
+    a.gestartetAm = new Date().toISOString(); // Stand nach einem Absturz mitten in runAuftrag
+    const unklar = `#${a.id} wurde bereits gestartet, Ergebnis unklar – bitte prüfen, Sir.`;
+    assert.equal(await approveAuftrag(a), unklar);
+    aufrufe = [];
+    await handleUpdate({ update_id: 777001, callback_query: { id: "cb1", data: `ok:${a.id}`, from: { id: 12345 }, message: { message_id: 5 } } });
+    assert.ok(aufrufe.some((x) => x.method === "sendMessage" && x.text === unklar));
+    assert.equal(getAuftrag(a.id)?.status, "offen");
+    assert.equal(reminders.length, 0);
+  });
+
+  it("Notaus vor der Freigabe: nichts läuft, der Auftrag bleibt offen", async () => {
+    const a = erinnerung();
+    state.paused = true;
+    assert.equal(await approveAuftrag(a), "⛔ Notaus aktiv. Erst /weiter.");
+    assert.equal(getAuftrag(a.id)?.status, "offen");
+    assert.equal(reminders.length, 0);
+    state.paused = false;
+    await denyAuftrag(a);
+  });
+});
+
+describe("pollFehlerMelden: eine HTTP-Antwort beweist das Internet", () => {
+  it("nach einem Netzausfall beendet 409, 401 oder 502 die Internet-Störung (istOffline false)", () => {
+    for (const status of [409, 401, 502]) {
+      gesundheit._reset();
+      pollFehlerMelden(netzfehler());
+      assert.equal(gesundheit.istOffline(), true);
+      pollFehlerMelden(new HttpFehler(`HTTP ${status} (getUpdates)`, status));
+      assert.equal(gesundheit.zustand("internet")?.ok, true, `Status ${status}`);
+      assert.equal(gesundheit.istOffline(), false, `Status ${status}`);
+    }
+  });
+});
+
+describe("Postausgang: Vorrang-Einträge überleben das Kürzen", () => {
+  it("voller Postausgang: ein späteres gewöhnliches Ablegen verdrängt den Notfall-Alarm nicht", async () => {
+    antworten = [netzfehler(), netzfehler(), netzfehler(), netzfehler()];
+    for (let i = 0; i < 100; i++) await sendeSpaeter(`n${i}`);
+    antworten = [netzfehler(), netzfehler(), netzfehler(), netzfehler()];
+    await sendeSpaeter("🚨 Alarm", { vorrang: true });
+    await sendeSpaeter("Watchdog");
+    await sendeSpaeter("Erinnerung");
+    const inhalt = liesPostausgang().map((e) => e.text);
+    assert.equal(inhalt.length, 100);
+    assert.equal(inhalt[0], "🚨 Alarm");
+    assert.equal(inhalt[1], "n3");
+    assert.deepEqual(inhalt.slice(-2), ["Watchdog", "Erinnerung"]);
+    aufrufe = [];
+    await postausgangTick();
+    assert.match(aufrufe[0]?.text ?? "", /^\(nachgereicht, \d{2}:\d{2}\) 🚨 Alarm$/);
+  });
+});
+
+describe("Offset: eingereihte Updates erst bestätigen, wenn ihre Verarbeitung beginnt", () => {
+  const origHandle = abhaengigkeiten.handleMessage;
+  const nachricht = (id: number, text: string) => ({ update_id: id, message: { message_id: id, chat: { id: 12345 }, text } });
+  afterEach(() => { abhaengigkeiten.handleMessage = origHandle; });
+
+  it("eine hängende (begonnene) Anfrage ist bestätigt, eine dahinter eingereihte nicht; Wiederholungen laufen nicht doppelt", async () => {
+    let freigeben!: () => void;
+    const haengt = new Promise<void>((r) => { freigeben = r; });
+    const reihenfolge: string[] = [];
+    abhaengigkeiten.handleMessage = async (text: string) => {
+      reihenfolge.push(text);
+      if (text === "erste") await haengt;
+      return `Antwort auf ${text}`;
+    };
+    assert.equal(annehmen([nachricht(5001, "erste")]), 1);
+    for (let i = 0; i < 100 && reihenfolge.length === 0; i++) await new Promise((r) => setImmediate(r));
+    // begonnen → bestätigt und vermerkt: ein Neustart führt sie nicht ein zweites Mal aus
+    assert.equal(naechsterOffset(), 5002);
+    // Telegram liefert sie (noch unbestätigt) erneut, dazu eine neue
+    assert.equal(annehmen([nachricht(5001, "erste"), nachricht(5002, "zweite")]), 1);
+    assert.equal(annehmen([nachricht(5001, "erste"), nachricht(5002, "zweite")]), 0);
+    assert.equal(naechsterOffset(), 5002); // eingereiht, nicht begonnen: ein Neustart verliert sie nicht
+    freigeben();
+    for (let i = 0; i < 200 && naechsterOffset() !== 5003; i++) await new Promise((r) => setImmediate(r));
+    assert.equal(naechsterOffset(), 5003);
+    assert.deepEqual(reihenfolge, ["erste", "zweite"]);
+  });
+});
+
+describe("Nachprüfung Runde 2: Offset, Neustart, Notaus", () => {
+  const origHandle = abhaengigkeiten.handleMessage;
+  const nachricht = (id: number, text: string, chat = 12345) => ({ update_id: id, message: { message_id: id, chat: { id: chat }, text } });
+  const gesendet = () => aufrufe.filter((x) => x.method === "sendMessage").map((x) => x.text ?? "");
+  const origErr = console.error;
+  const origWarn = console.warn;
+  /** Mikro- und Makroaufgaben abarbeiten, bis die Bedingung gilt (keine echten Timer) */
+  const bis = async (bedingung: () => boolean, runden = 20_000) => {
+    for (let i = 0; i < runden && !bedingung(); i++) await new Promise((r) => setImmediate(r));
+    assert.ok(bedingung(), "Bedingung nicht erreicht");
+  };
+  let neustarts = 0;
+  /** Neustart: das Modul frisch laden (eigener Speicher; data/ bleibt) */
+  const neustart = async () => (await import(`../src/telegram.js?neustart=${++neustarts}`)) as typeof import("../src/telegram.js");
+  beforeEach(() => {
+    console.error = () => undefined;
+    console.warn = () => undefined;
+  });
+  afterEach(() => {
+    abhaengigkeiten.handleMessage = origHandle;
+    console.error = origErr;
+    console.warn = origWarn;
+    globalThis.fetch = fetchAttrappe;
+    state.paused = false;
+    state.notfall = { aktiv: false };
+    reminders.splice(0, reminders.length);
+  });
+
+  it("Kopf hängt, 100 Nachrichten dahinter: ein danach getipptes /pause kommt trotzdem an", async () => {
+    let freigeben!: () => void;
+    const haengt = new Promise<void>((r) => { freigeben = r; });
+    let anClaude = 0;
+    abhaengigkeiten.handleMessage = async (text: string) => {
+      anClaude++;
+      if (text === "Kopf") await haengt;
+      return "ok";
+    };
+    const alle = [nachricht(7001, "Kopf"), ...Array.from({ length: 100 }, (_, i) => nachricht(7002 + i, `n${i}`)), nachricht(7102, "/pause")];
+    // Telegram-Attrappe: höchstens 100 unbestätigte Updates ab dem Offset; ein Offset bestätigt alles darunter endgültig
+    let bestaetigtBis = 0;
+    for (let runde = 0; runde < 5 && !state.paused; runde++) {
+      bestaetigtBis = Math.max(bestaetigtBis, naechsterOffset());
+      annehmen(alle.filter((u) => u.update_id >= bestaetigtBis).slice(0, 100));
+      await bis(() => anClaude > 0);
+    }
+    assert.equal(state.paused, true);
+    assert.equal(anClaude, 1); // der Kopf hängt noch
+    freigeben();
+    await bis(() => anClaude === 101);
+    await bis(() => naechsterOffset() === 7103);
+  });
+
+  it("Fremde Updates laufen sofort: sie halten den Offset nicht und der Missbrauchs-Notfall greift, während der Kopf hängt", async () => {
+    let freigeben!: () => void;
+    const haengt = new Promise<void>((r) => { freigeben = r; });
+    let gestartet = false;
+    abhaengigkeiten.handleMessage = async () => { gestartet = true; await haengt; return "ok"; };
+    annehmen([nachricht(7201, "Frage")]);
+    await bis(() => gestartet);
+    annehmen(Array.from({ length: 5 }, (_, i) => nachricht(7202 + i, "hallo", 666)));
+    assert.equal(naechsterOffset(), 7207);
+    await bis(() => state.notfall?.aktiv === true);
+    assert.equal(state.paused, true);
+    freigeben();
+    // im Notfall nennt der Hinweis /entwarnung (/weiter lehnt dort ab)
+    await bis(() => gesendet().includes("Notfall aktiv, Sir. Aufheben nur mit /entwarnung in Telegram."));
+  });
+
+  it("/notfall während eine lange Antwort in Teilen rausgeht: kein weiterer Teil, nichts im Postausgang", async () => {
+    abhaengigkeiten.handleMessage = async () => "A".repeat(4000) + "B".repeat(4000) + "C";
+    globalThis.fetch = (async (eingabe, init) => {
+      const antwort = await fetchAttrappe(eingabe, init);
+      // der Notfall trifft ein, während der erste Teil unterwegs ist
+      if (aufrufe.at(-1)?.text?.startsWith("A")) state.notfall = { aktiv: true, seit: new Date().toISOString() };
+      return antwort;
+    }) as typeof fetch;
+    await handleUpdate(nachricht(7301, "Liste bitte"));
+    assert.deepEqual(gesendet(), ["A".repeat(4000)]);
+    assert.deepEqual(liesPostausgang(), []);
+  });
+
+  it("Neustart während einer Freigabe: der erneut gelieferte Callback führt den Auftrag nicht zweimal aus", async () => {
+    const a = createAuftrag({ tool: "erinnerung", input: { zeit: new Date(Date.now() + 3_600_000).toISOString(), text: "Einmal" }, stufe: "extern", summary: "Erinnerung" });
+    let freigeben!: () => void;
+    const haengt = new Promise<void>((r) => { freigeben = r; });
+    let begonnen = false;
+    globalThis.fetch = (async (eingabe, init) => {
+      const url = String(eingabe instanceof Request ? eingabe.url : eingabe);
+      if (url.endsWith("/answerCallbackQuery")) {
+        begonnen = true;
+        await haengt; // Verarbeitung läuft, da kommt der Neustart
+      }
+      return fetchAttrappe(eingabe, init);
+    }) as typeof fetch;
+    const cb = { update_id: 8001, callback_query: { id: "cb8001", data: `ok:${a.id}`, from: { id: 12345 } } };
+    assert.equal(annehmen([cb]), 1);
+    await bis(() => begonnen);
+    assert.ok(naechsterOffset() > 8001); // begonnen → beim nächsten getUpdates bestätigt
+    const datei = join(temp, "data", "telegram-begonnen.json");
+    assert.ok((JSON.parse(readFileSync(datei, "utf8")) as number[]).includes(8001));
+    assert.equal(statSync(datei).mode & 0o777, 0o600);
+
+    const neu = await neustart();
+    assert.equal(neu.naechsterOffset(), 0);
+    assert.equal(neu.annehmen([cb]), 0); // schon begonnen: nicht erneut
+    assert.equal(neu.naechsterOffset(), 8002);
+
+    freigeben();
+    await bis(() => getAuftrag(a.id)?.status === "erledigt");
+    await bis(() => gesendet().some((t) => t.startsWith(`✅ #${a.id} erledigt`)));
+    assert.equal(reminders.length, 1);
+  });
+
+  it("PIN nach einem Neustart erneut geliefert (keine Freigabe wartet): gelöscht, nie an Claude", async () => {
+    const neu = await neustart();
+    let claudeGefragt = false;
+    neu.abhaengigkeiten.handleMessage = async () => { claudeGefragt = true; return "ok"; };
+    aufrufe = [];
+    assert.equal(neu.annehmen([nachricht(8101, "4711")]), 1);
+    await bis(() => gesendet().length > 0);
+    assert.equal(claudeGefragt, false);
+    assert.ok(aufrufe.some((x) => x.method === "deleteMessage"));
+    assert.deepEqual(gesendet(), ["Keine Freigabe wartet auf eine PIN, Sir. Nachricht gelöscht."]);
+    // ebenso im laufenden Modul ohne wartende Freigabe
+    let gefragt = false;
+    abhaengigkeiten.handleMessage = async () => { gefragt = true; return "ok"; };
+    await handleUpdate(nachricht(8102, "4711"));
+    assert.equal(gefragt, false);
+  });
+
+  it("update_id nach einer Woche Ruhe neu und kleiner: wird angenommen, /weiter nach /pause gilt", async () => {
+    assert.equal(annehmen([nachricht(9000, "/pause")]), 1);
+    await bis(() => state.paused === true);
+    assert.equal(annehmen([nachricht(17, "/weiter")]), 1);
+    await bis(() => state.paused === false);
+    assert.ok(gesendet().includes("▶️ Weiter geht's."));
+    assert.equal(naechsterOffset(), 18);
+  });
+
+  it("Freigabe wartet auf die PIN, /pause, dann /weiter: Notaus aufgehoben, nichts gelöscht", async () => {
+    const a = createAuftrag({ tool: "erinnerung", input: { zeit: new Date(Date.now() + 3_600_000).toISOString(), text: "PIN" }, stufe: "sensibel", summary: "sensibel" });
+    await handleUpdate({ update_id: 9100, callback_query: { id: "cb", data: `ok:${a.id}`, from: { id: 12345 } } });
+    aufrufe = [];
+    await verteileUpdate(nachricht(9101, "/pause"));
+    await verteileUpdate(nachricht(9102, "/weiter"));
+    assert.equal(state.paused, false);
+    assert.ok(!aufrufe.some((x) => x.method === "deleteMessage"));
+    assert.ok(gesendet().includes("▶️ Weiter geht's."));
+    assert.equal(getAuftrag(a.id)?.status, "offen");
+  });
+
+  it("Freigabe wartet auf die PIN, /notfall, dann /entwarnung: Notfall aufgehoben", async () => {
+    const a = createAuftrag({ tool: "erinnerung", input: { zeit: new Date(Date.now() + 3_600_000).toISOString(), text: "PIN" }, stufe: "sensibel", summary: "sensibel" });
+    await handleUpdate({ update_id: 9110, callback_query: { id: "cb", data: `ok:${a.id}`, from: { id: 12345 } } });
+    aufrufe = [];
+    await verteileUpdate(nachricht(9111, "/notfall"));
+    assert.equal(state.notfall?.aktiv, true);
+    await verteileUpdate(nachricht(9112, "/entwarnung"));
+    assert.equal(state.notfall?.aktiv, false);
+    assert.equal(state.paused, false);
+    assert.ok(!aufrufe.some((x) => x.method === "deleteMessage"));
+    assert.equal(getAuftrag(a.id)?.status, "offen");
+  });
+
+  it("zwei gescheiterte Vorrang-Meldungen: in Sendereihenfolge nachgereicht, beide vor gewöhnlichen", async () => {
+    antworten = [netzfehler(), netzfehler(), netzfehler(), netzfehler()];
+    await sendeSpaeter("alt");
+    antworten = [netzfehler(), netzfehler(), netzfehler(), netzfehler()];
+    await sendeSpaeter("A zuerst", { vorrang: true });
+    antworten = [netzfehler(), netzfehler(), netzfehler(), netzfehler()];
+    await sendeSpaeter("B danach", { vorrang: true });
+    assert.deepEqual(liesPostausgang().map((e) => e.text), ["A zuerst", "B danach", "alt"]);
+    aufrufe = [];
+    await postausgangTick();
+    assert.deepEqual(gesendet().map((t) => t.replace(/^\(nachgereicht, \d{2}:\d{2}\) /, "")), ["A zuerst", "B danach", "alt"]);
+  });
+});
+
+describe("Nachprüfung Runde 3: Notaus über den Neustart, Notfall während der Freigabe, Kosmetik ohne Warten", () => {
+  const origHandle = abhaengigkeiten.handleMessage;
+  const nachricht = (id: number, text: string) => ({ update_id: id, message: { message_id: id, chat: { id: 12345 }, text } });
+  const gesendet = () => aufrufe.filter((x) => x.method === "sendMessage").map((x) => x.text ?? "");
+  const origErr = console.error;
+  const bis = async (bedingung: () => boolean, runden = 20_000) => {
+    for (let i = 0; i < runden && !bedingung(); i++) await new Promise((r) => setImmediate(r));
+    assert.ok(bedingung(), "Bedingung nicht erreicht");
+  };
+  let neustarts = 0;
+  const neustart = async () => (await import(`../src/telegram.js?neustart-r3=${++neustarts}`)) as typeof import("../src/telegram.js");
+  const erinnerung = () =>
+    createAuftrag({ tool: "erinnerung", input: { zeit: new Date(Date.now() + 3_600_000).toISOString(), text: "Runde 3" }, stufe: "extern", summary: "Erinnerung" });
+  const sendenKaputt = () => {
+    globalThis.fetch = (async (eingabe, init) => {
+      const url = String(eingabe instanceof Request ? eingabe.url : eingabe);
+      if (url.endsWith("/sendMessage")) {
+        aufrufe.push({ method: "sendMessage", text: (JSON.parse(String(init?.body)) as { text?: string }).text });
+        throw netzfehler();
+      }
+      return fetchAttrappe(eingabe, init);
+    }) as typeof fetch;
+  };
+  beforeEach(() => {
+    console.error = () => undefined;
+    state.paused = false;
+    state.notfall = { aktiv: false };
+    reminders.splice(0, reminders.length);
+  });
+  afterEach(() => {
+    abhaengigkeiten.handleMessage = origHandle;
+    console.error = origErr;
+    globalThis.fetch = fetchAttrappe;
+    state.paused = false;
+    state.notfall = { aktiv: false };
+    reminders.splice(0, reminders.length);
+  });
+
+  /** Anfrage hängt, dahinter `aufheben` (eingereiht) und `notaus` (vorgezogen, begonnen); dann Neustart mit erneuter Lieferung. */
+  async function neustartNachNotaus(startId: number, aufheben: string, notaus: string): Promise<{ freigeben: () => void }> {
+    let freigeben!: () => void;
+    const haengt = new Promise<void>((r) => { freigeben = r; });
+    let gestartet = false;
+    abhaengigkeiten.handleMessage = async () => { gestartet = true; await haengt; return "fertig"; };
+    annehmen([nachricht(startId, "Frage")]);
+    await bis(() => gestartet);
+    annehmen([nachricht(startId + 1, aufheben)]);
+    annehmen([nachricht(startId + 2, notaus)]);
+    await bis(() => state.paused === true);
+    assert.equal(naechsterOffset(), startId + 1); // das eingereihte Aufheben hält den Offset
+    const neu = await neustart();
+    aufrufe = [];
+    assert.equal(neu.annehmen([nachricht(startId + 1, aufheben), nachricht(startId + 2, notaus)]), 1);
+    await bis(() => gesendet().length > 0);
+    return { freigeben };
+  }
+
+  it("Neustart: ein vor /pause eingereihtes /weiter hebt den Notaus danach nicht auf", async () => {
+    const { freigeben } = await neustartNachNotaus(9501, "/weiter", "/pause");
+    assert.equal(state.paused, true);
+    assert.deepEqual(gesendet(), ["/weiter kam vor dem Notaus an und gilt nicht, Sir. Bitte erneut senden."]);
+    freigeben();
+    // auch im alten Modul (Kette läuft noch) gilt es nicht
+    await bis(() => gesendet().filter((t) => t.startsWith("/weiter kam vor dem Notaus")).length === 2);
+    assert.equal(state.paused, true);
+    assert.ok(!gesendet().includes("▶️ Weiter geht's."));
+  });
+
+  it("Neustart: ein vor /notfall eingereihtes /entwarnung hebt den Notfall danach nicht auf", async () => {
+    const { freigeben } = await neustartNachNotaus(9511, "/entwarnung", "/notfall");
+    assert.equal(state.notfall?.aktiv, true);
+    assert.equal(state.paused, true);
+    assert.deepEqual(gesendet(), ["/entwarnung kam vor dem Notaus an und gilt nicht, Sir. Bitte erneut senden."]);
+    freigeben();
+    await bis(() => gesendet().filter((t) => t.startsWith("/entwarnung kam vor dem Notaus")).length === 2);
+    assert.equal(state.notfall?.aktiv, true);
+  });
+
+  it("Neustart: ein nach dem begonnenen /pause getipptes /weiter gilt weiterhin", async () => {
+    const pause = nachricht(9521, "/pause");
+    annehmen([pause]);
+    await bis(() => state.paused === true);
+    const neu = await neustart();
+    aufrufe = [];
+    assert.equal(neu.annehmen([pause, nachricht(9522, "/weiter")]), 1);
+    await bis(() => state.paused === false);
+    assert.deepEqual(gesendet(), ["▶️ Weiter geht's."]);
+  });
+
+  /** Löst den Notfall aus, während das Werkzeug (Erinnerung setzen) läuft. */
+  async function mitNotfallImWerkzeug<T>(lauf: () => Promise<T>): Promise<T> {
+    const { ausloesen } = await import("../src/notfall.js");
+    const vorher = reminders.push;
+    reminders.push = function (this: typeof reminders, ...e: (typeof reminders)[number][]) {
+      void ausloesen("Test während der Freigabe");
+      return vorher.apply(this, e);
+    };
+    try {
+      return await lauf();
+    } finally {
+      reminders.push = vorher;
+    }
+  }
+
+  it("Dashboard: Notfall während das Werkzeug läuft → Ergebnis weder in Telegram noch im Postausgang noch in der Antwort", async () => {
+    const a = erinnerung();
+    const antwort = await mitNotfallImWerkzeug(() => approveAuftrag(a));
+    const ergebnis = getAuftrag(a.id)?.result ?? "";
+    assert.equal(getAuftrag(a.id)?.status, "erledigt"); // gelaufen: nicht nochmals freigeben
+    assert.match(ergebnis, /^Erinnerung gesetzt/);
+    assert.equal(antwort, `⏸ #${a.id} lief noch zu Ende; Ergebnis wegen Notfall zurückgehalten, Sir.`);
+    await bis(() => gesendet().includes(antwort));
+    assert.ok(gesendet().some((t) => t.startsWith("🚨 NOTFALL")));
+    assert.ok(!gesendet().some((t) => t.includes(ergebnis)));
+    assert.ok(!liesPostausgang().some((e) => e.text.includes(ergebnis)));
+  });
+
+  it("Telegram-Knopf: Notfall während das Werkzeug läuft → nur die neutrale Meldung", async () => {
+    const a = erinnerung();
+    await mitNotfallImWerkzeug(() => handleUpdate({ update_id: 9531, callback_query: { id: "cb9531", data: `ok:${a.id}`, from: { id: 12345 } } }));
+    const ergebnis = getAuftrag(a.id)?.result ?? "";
+    assert.equal(getAuftrag(a.id)?.status, "erledigt");
+    assert.ok(gesendet().includes(`⏸ #${a.id} lief noch zu Ende; Ergebnis wegen Notfall zurückgehalten, Sir.`));
+    assert.ok(!gesendet().some((t) => t.includes(ergebnis)));
+    assert.ok(!liesPostausgang().some((e) => e.text.includes(ergebnis)));
+  });
+
+  it("Notfall während der Sendewiederholungen der Ergebnis-Meldung: kein weiterer Versuch, nichts im Postausgang", async () => {
+    sendenKaputt();
+    setzeWarten(async () => {
+      state.paused = true;
+      state.notfall = { aktiv: true, seit: new Date().toISOString(), grund: "Test" };
+    }, () => 0.5);
+    const a = erinnerung();
+    await approveAuftrag(a);
+    const ergebnis = getAuftrag(a.id)?.result ?? "";
+    assert.equal(getAuftrag(a.id)?.status, "erledigt");
+    assert.equal(gesendet().length, 1); // nur der erste Versuch, danach keine Wiederholung mehr
+    assert.ok(!liesPostausgang().some((e) => e.text.includes(ergebnis)));
+  });
+
+  it("sendeSpaeter mit imNotfallZurueckhalten: im Notfall weder gesendet noch abgelegt; der Alarm (ohne Option) geht", async () => {
+    state.paused = true;
+    state.notfall = { aktiv: true, seit: new Date().toISOString(), grund: "Test" };
+    await sendeSpaeter("Daten", { vorrang: true, imNotfallZurueckhalten: true });
+    await sendeSpaeter("Daten hinten", { imNotfallZurueckhalten: true });
+    assert.deepEqual(gesendet(), []);
+    assert.deepEqual(liesPostausgang(), []);
+    await sendeSpaeter("🚨 Alarm", { vorrang: true });
+    assert.deepEqual(gesendet(), ["🚨 Alarm"]);
+  });
+
+  it("Notaus während der Sendewiederholungen einer Antwort: der Rest landet nicht im Postausgang", async () => {
+    abhaengigkeiten.handleMessage = async () => "Ihre Rechnungen: geheim.";
+    sendenKaputt();
+    setzeWarten(async () => { state.paused = true; }, () => 0.5);
+    await handleUpdate(nachricht(9541, "Rechnungen?"));
+    assert.equal(gesendet().length, 1);
+    assert.deepEqual(liesPostausgang(), []);
+  });
+
+  it("Claude-Fehler nach /pause: der Pausenhinweis statt «dreimal versucht»", async () => {
+    abhaengigkeiten.handleMessage = async () => {
+      state.paused = true; // /pause kam während der Anfrage; claudeAufruf bricht ab und wirft den echten Fehler
+      throw netzfehler();
+    };
+    await handleUpdate(nachricht(9551, "Hallo"));
+    assert.deepEqual(gesendet(), ["Ich bin pausiert (Notaus). In Telegram hebt /weiter das wieder auf."]);
+  });
+
+  it("Claude-Fehler nach /notfall: der Hinweis nennt /entwarnung", async () => {
+    abhaengigkeiten.handleMessage = async () => {
+      state.paused = true;
+      state.notfall = { aktiv: true, seit: new Date().toISOString(), grund: "Test" };
+      throw netzfehler();
+    };
+    await handleUpdate(nachricht(9552, "Hallo"));
+    assert.deepEqual(gesendet(), ["Notfall aktiv, Sir. Aufheben nur mit /entwarnung in Telegram."]);
+  });
+
+  it("Telegram-Knopf: das Werkzeug läuft, bevor answerCallbackQuery und editMessageReplyMarkup fertig sind", async () => {
+    let freigeben!: () => void;
+    const haengt = new Promise<void>((r) => { freigeben = r; });
+    let haengend = 0;
+    globalThis.fetch = (async (eingabe, init) => {
+      const url = String(eingabe instanceof Request ? eingabe.url : eingabe);
+      if (url.endsWith("/answerCallbackQuery") || url.endsWith("/editMessageReplyMarkup")) {
+        haengend++;
+        await haengt;
+      }
+      return fetchAttrappe(eingabe, init);
+    }) as typeof fetch;
+    const a = erinnerung();
+    await handleUpdate({ update_id: 9561, callback_query: { id: "cb9561", data: `ok:${a.id}`, from: { id: 12345 }, message: { message_id: 5 } } });
+    assert.equal(haengend, 2); // beide hängen noch
+    assert.equal(getAuftrag(a.id)?.status, "erledigt");
+    assert.equal(reminders.length, 1);
+    assert.ok(gesendet().some((t) => t.startsWith(`✅ #${a.id} erledigt:`)));
+    freigeben();
+    await bis(() => aufrufe.some((x) => x.method === "editMessageReplyMarkup"));
+  });
+
+  it("Dashboard-Freigabe antwortet, während die Ergebnis-Meldung an Telegram noch hängt", async () => {
+    let freigeben!: () => void;
+    const haengt = new Promise<void>((r) => { freigeben = r; });
+    globalThis.fetch = (async (eingabe, init) => {
+      const url = String(eingabe instanceof Request ? eingabe.url : eingabe);
+      if (url.endsWith("/sendMessage")) await haengt;
+      return fetchAttrappe(eingabe, init);
+    }) as typeof fetch;
+    setzeWarten(async (ms) => { gewartet.push(ms); }, () => 0.5, async () => undefined); // Frist läuft sofort ab
+    const a = erinnerung();
+    const antwort = await approveAuftrag(a);
+    assert.match(antwort, new RegExp(`^✅ #${a.id} erledigt: Erinnerung gesetzt`));
+    assert.equal(gesendet().length, 0); // die Meldung ist noch unterwegs
+    freigeben();
+    await bis(() => gesendet().some((t) => t.startsWith(`✅ #${a.id} erledigt:`)));
   });
 });

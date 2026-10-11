@@ -1,14 +1,8 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { existsSync } from "node:fs";
-import { browserPath } from "./browser.js";
-import { cameras } from "./cameras.js";
 import { config, opt } from "./config.js";
-import { haState } from "./homeassistant.js";
-import { protokolle } from "./protokolle.js";
 import { gesundheit } from "./robust.js";
-import { googleEvents, outlookEvents, recoveryToday } from "./sources.js";
 import { state } from "./state.js";
-import { hasOpenscad } from "./werkstatt.js";
 
 /**
  * Selbsttest: prüft jede eingerichtete Anbindung mit einem echten, billigen Aufruf und sagt klar,
@@ -24,6 +18,12 @@ export interface Befund {
 }
 
 const t = (ms: number) => AbortSignal.timeout(ms);
+// Schwere Module (googleapis, Playwright, Werkzeugkasten) erst bei Bedarf laden: npm run check und die Prüfung im
+// Einrichtungs-Assistenten starten sonst Sekunden langsamer. Im Dienst sind sie ohnehin schon geladen.
+const sources = () => import("./sources.js");
+// Nur für Tests verkürzbar (JARVIS_CHECK_TIMEOUT_MS); im Betrieb 10 s je Dienst.
+const TEST_MS = Number(process.env.JARVIS_CHECK_TIMEOUT_MS);
+const PRUEF_MS = TEST_MS > 0 ? TEST_MS : 10_000;
 
 async function pruefe(name: string, eingerichtet: boolean, test: () => Promise<string>): Promise<Befund> {
   if (!eingerichtet) return { name, status: "fehlt", info: "nicht eingerichtet" };
@@ -52,14 +52,14 @@ export async function selbsttest(nur?: string[], beiBefund?: (b: Befund) => void
 
   // Genau ein Versuch wie bei allen anderen Prüfungen; sonst wiederholt das SDK Zeitüberschreitungen zweimal (3 × 15 s).
   await lauf("Claude-API", Boolean(opt("ANTHROPIC_API_KEY")), async () => {
-    const list = await new Anthropic({ maxRetries: 0 }).models.list({ limit: 50 }, { timeout: 15_000 });
+    const list = await new Anthropic({ maxRetries: 0 }).models.list({ limit: 50 }, { timeout: TEST_MS > 0 ? PRUEF_MS : 15_000 });
     const ids = list.data.map((m) => m.id);
     const fehlt = [config.claudeModel, config.claudeModelStark, config.claudeModelSehen].filter((m) => !ids.includes(m));
     return fehlt.length ? `erreichbar, aber unbekannte Modelle: ${fehlt.join(", ")}` : `erreichbar, Modelle gültig (${config.claudeModel}, ${config.claudeModelStark}, ${config.claudeModelSehen})`;
   });
 
   await lauf("Telegram", Boolean(config.telegramToken && config.telegramOwner), async () => {
-    const res = await fetch(`https://api.telegram.org/bot${config.telegramToken}/getMe`, { signal: t(10_000) });
+    const res = await fetch(`https://api.telegram.org/bot${config.telegramToken}/getMe`, { signal: t(PRUEF_MS) });
     const j = (await res.json()) as { ok: boolean; result?: { username: string } };
     if (!j.ok) throw new Error("Token ungültig");
     return `Bot @${j.result?.username}, Chat ${config.telegramOwner}`;
@@ -67,17 +67,17 @@ export async function selbsttest(nur?: string[], beiBefund?: (b: Befund) => void
 
   await lauf("WHOOP", Boolean(opt("WHOOP_CLIENT_ID")), async () => {
     if (!state.whoop?.refreshToken) throw new Error("nicht verbunden: npm run whoop:auth");
-    const r = await recoveryToday(10_000);
+    const r = await (await sources()).recoveryToday(PRUEF_MS);
     return r ? `verbunden, Recovery heute ${r.score} %` : "verbunden, Recovery heute noch nicht berechnet";
   });
 
   await lauf("Google Kalender", Boolean(opt("GOOGLE_KEY_FILE") && opt("GOOGLE_CALENDAR_ID")), async () => {
     if (!existsSync(opt("GOOGLE_KEY_FILE")!)) throw new Error("Schlüsseldatei fehlt");
-    const ev = await googleEvents();
+    const ev = await (await sources()).googleEvents();
     return `lesbar, heute ${ev.length} Termin(e)`;
   });
 
-  await lauf("Outlook-Kalender", Boolean(opt("OUTLOOK_ICS_URL")), async () => `lesbar, heute ${(await outlookEvents()).length} Termin(e) (${config.outlookMode})`);
+  await lauf("Outlook-Kalender", Boolean(opt("OUTLOOK_ICS_URL")), async () => `lesbar, heute ${(await (await sources()).outlookEvents()).length} Termin(e) (${config.outlookMode})`);
 
   await lauf("Gmail", Boolean(config.gmail), async () => {
     if (!state.google?.refreshToken) throw new Error("nicht verbunden: npm run google:auth");
@@ -87,22 +87,24 @@ export async function selbsttest(nur?: string[], beiBefund?: (b: Befund) => void
   });
 
   await lauf("Home Assistant", Boolean(config.homeAssistant), async () => {
-    const res = await fetch(`${config.homeAssistant!.url}/api/`, { headers: { Authorization: `Bearer ${config.homeAssistant!.token}` }, signal: t(10_000) });
+    const res = await fetch(`${config.homeAssistant!.url}/api/`, { headers: { Authorization: `Bearer ${config.homeAssistant!.token}` }, signal: t(PRUEF_MS) });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const { haState } = await import("./homeassistant.js");
     const presence = config.presenceEntity ? `, ${config.presenceEntity} = ${await haState(config.presenceEntity).catch(() => "?")}` : "";
     return `erreichbar${presence}`;
   });
 
   await lauf("Frigate", Boolean(config.frigateUrl), async () => {
-    const res = await fetch(`${config.frigateUrl}/api/version`, { signal: t(10_000) });
+    const res = await fetch(`${config.frigateUrl}/api/version`, { signal: t(PRUEF_MS) });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const { cameras } = await import("./cameras.js");
     return `Version ${(await res.text()).trim()}, ${Object.keys(cameras).length} Kamera(s) in cameras.json`;
   });
 
   await lauf("MQTT", Boolean(config.mqtt), async () => {
     const mqtt = (await import("mqtt")).default;
     await new Promise<void>((ok, err) => {
-      const c = mqtt.connect(config.mqtt!.url, { username: config.mqtt!.username, password: config.mqtt!.password, connectTimeout: 8000, reconnectPeriod: 0 });
+      const c = mqtt.connect(config.mqtt!.url, { username: config.mqtt!.username, password: config.mqtt!.password, connectTimeout: TEST_MS > 0 ? PRUEF_MS : 8000, reconnectPeriod: 0 });
       c.once("connect", () => { c.end(true); ok(); });
       c.once("error", (e) => { c.end(true); err(e); });
     });
@@ -116,21 +118,22 @@ export async function selbsttest(nur?: string[], beiBefund?: (b: Befund) => void
   });
 
   await lauf("Browser", true, async () => {
+    const { browserPath } = await import("./browser.js");
     const p = browserPath();
     if (!p) throw new Error("kein Chromium gefunden, Seiten gehen nur über seite_lesen");
     return p;
   });
 
-  await lauf("Werkstatt", true, async () => (hasOpenscad() ? "OpenSCAD vorhanden" : (() => { throw new Error("OpenSCAD fehlt (apt install openscad)"); })()));
+  await lauf("Werkstatt", true, async () => ((await import("./werkstatt.js")).hasOpenscad() ? "OpenSCAD vorhanden" : (() => { throw new Error("OpenSCAD fehlt (apt install openscad)"); })()));
   await lauf("3D-Drucker", Boolean(config.octoprint), async () => {
-    const res = await fetch(`${config.octoprint!.url}/api/version`, { headers: { "X-Api-Key": config.octoprint!.key }, signal: t(10_000) });
+    const res = await fetch(`${config.octoprint!.url}/api/version`, { headers: { "X-Api-Key": config.octoprint!.key }, signal: t(PRUEF_MS) });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     return "OctoPrint erreichbar";
   });
 
   await lauf("Stimme (STT/TTS)", Boolean(config.stt || config.tts), async () => `${config.stt ? "STT " : ""}${config.tts ? "TTS " : ""}eingetragen (nicht live getestet)`);
   await lauf("Alexa-Skill", Boolean(opt("ALEXA_SKILL_ID")), async () => `Skill-ID gesetzt; Erreichbarkeit über den Tunnel im Alexa-Test-Tab prüfen`);
-  await lauf("Protokolle", true, async () => `${Object.keys(protokolle).length} Protokoll(e)`);
+  await lauf("Protokolle", true, async () => `${Object.keys((await import("./protokolle.js")).protokolle).length} Protokoll(e)`);
   await lauf("Sicherheit", true, async () => {
     const warn: string[] = [];
     if (!config.pin) warn.push("keine PIN (JARVIS_PIN)");

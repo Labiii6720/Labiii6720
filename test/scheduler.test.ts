@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { after, afterEach, beforeEach, describe, it } from "node:test";
@@ -28,7 +28,7 @@ globalThis.fetch = (async (eingabe: string | URL | Request) => {
 mkdirSync(join(temp, "data"), { recursive: true });
 writeFileSync(join(temp, "data", "routinen.json"), "{}");
 
-const { abhaengigkeiten, rechnungsTick, routinenBeimErststart, rueckblickTick, zeitplanTick, zielcheckTick } = await import("../src/scheduler.js");
+const { LESENDE_WERKZEUGE, abhaengigkeiten, rechnungsTick, routinenBeimErststart, rueckblickTick, zeitplanTick, zielcheckTick } = await import("../src/scheduler.js");
 const { zeitplaene } = await import("../src/zeitplaene.js");
 const { HttpFehler, gesundheit } = await import("../src/robust.js");
 const { imFenster, todayKey } = await import("../src/time.js");
@@ -36,6 +36,8 @@ const { faelligIm } = await import("../src/zeitplaene.js");
 const { state } = await import("../src/state.js");
 const { addRechnung, rechnungen } = await import("../src/finanzen.js");
 const { profil } = await import("../src/profil.js");
+const { config } = await import("../src/config.js");
+const { activeTools } = await import("../src/tools.js");
 
 /** 10.10.2026 Samstag, 11.10.2026 Sonntag, 12.10.2026 Montag (lokale Zeit Europe/Zurich) */
 const am = (tag: number, h: number, m: number) => new Date(2026, 9, tag, h, m, 0, 0);
@@ -61,6 +63,17 @@ abhaengigkeiten.sendeSpaeter = async (text: string) => { gesendet.push(text); };
 const netzfehler = () => Object.assign(new TypeError("fetch failed"), { cause: Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" }) });
 const serverfehler = () => new HttpFehler("503 Service Unavailable", 503);
 const clientfehler = () => new HttpFehler("400 Bad Request: max_tokens zu gross", 400);
+const ueberlastet = () => new HttpFehler("529 Overloaded", 529);
+type Opts = { onStep?: (step: number, tool: string) => void };
+
+/** Attrappe wie runLoop: Runde 1 führt `n` Werkzeuge aus (onStep), der claudeAufruf der nächsten Runde scheitert mit `f` */
+function nachSchrittenFehler(n: number, f: () => unknown, werkzeuge: string[] = ["erinnerung"]) {
+  return async (text: string, _hooks: unknown, opts: Opts = {}) => {
+    prompts.push(text);
+    for (let i = 1; i <= n; i++) opts.onStep?.(i, werkzeuge[(i - 1) % werkzeuge.length]!);
+    throw f();
+  };
+}
 
 function plan(id: number, zeit: string, tage = "taeglich", lastRun?: string) {
   zeitplaene.length = 0;
@@ -294,6 +307,196 @@ describe("zeitplanTick", () => {
   });
 });
 
+describe("Abbruch nach Werkzeugschritten: nie den ganzen Lauf wiederholen", () => {
+  it("Zeitplan: vorübergehender Fehler nach einem Werkzeug → abgehakt, eine Meldung, kein zweiter Lauf", async () => {
+    const z = plan(30, "08:30");
+    const vorher = abhaengigkeiten.handleMessage;
+    abhaengigkeiten.handleMessage = nachSchrittenFehler(2, ueberlastet);
+    try {
+      await zeitplanTick(am(10, 8, 30));
+      assert.equal(prompts.length, 1);
+      assert.equal(z.lastRun, "2026-10-10");
+      assert.equal((JSON.parse(readFileSync(ZEITPLAENE_DATEI, "utf8")) as { id: number; lastRun?: string }[]).find((p) => p.id === 30)?.lastRun, "2026-10-10");
+      assert.deepEqual(gesendet, ["⚠️ Zeitplan «Plan 30» brach nach 2 Werkzeugschritten ab (Verbindung). Ich wiederhole ihn nicht, um nichts doppelt auszuführen, Sir."]);
+      await zeitplanTick(am(10, 8, 36));
+      await zeitplanTick(am(10, 8, 45));
+      assert.equal(prompts.length, 1);
+      assert.equal(gesendet.length, 1);
+    } finally {
+      abhaengigkeiten.handleMessage = vorher;
+    }
+  });
+
+  it("ohne Werkzeugschritt bleibt es beim Nachholen (nichts gewirkt)", async () => {
+    const z = plan(31, "08:30");
+    const vorher = abhaengigkeiten.handleMessage;
+    abhaengigkeiten.handleMessage = nachSchrittenFehler(0, ueberlastet);
+    try {
+      await zeitplanTick(am(10, 8, 30));
+    } finally {
+      abhaengigkeiten.handleMessage = vorher;
+    }
+    assert.equal(z.lastRun, undefined);
+    assert.deepEqual(gesendet, []);
+    await zeitplanTick(am(10, 8, 35));
+    assert.equal(prompts.length, 2);
+    assert.equal(z.lastRun, "2026-10-10");
+  });
+
+  it("Rückblick und Zielcheck: onStep wird durchgereicht, nach einem Schritt kein zweiter Lauf", async () => {
+    const vorher = abhaengigkeiten.handleMessage;
+    abhaengigkeiten.handleMessage = nachSchrittenFehler(1, netzfehler);
+    profil.ziele.push({ id: 30, text: "Marathon", status: "offen", angelegt: "2026-10-01" });
+    try {
+      await rueckblickTick(am(21, 22, 30));
+      await rueckblickTick(am(21, 22, 40));
+      assert.equal(prompts.length, 1);
+      assert.deepEqual(gesendet, ["⚠️ Der Rückblick brach nach 1 Werkzeugschritt ab (Verbindung). Ich wiederhole ihn nicht, um nichts doppelt auszuführen, Sir."]);
+      assert.equal((JSON.parse(readFileSync(ROUTINEN_DATEI, "utf8")) as { rueckblick?: string }).rueckblick, "2026-10-21");
+
+      const sonntag = new Date(2026, 10, 8, 18, 0, 0, 0); // 8.11.2026 Sonntag
+      await zielcheckTick(sonntag);
+      await zielcheckTick(new Date(2026, 10, 8, 18, 10, 0, 0));
+      assert.equal(prompts.length, 2);
+      assert.equal(gesendet.length, 2);
+      assert.match(gesendet[1]!, /^⚠️ Der Zielcheck brach nach 1 Werkzeugschritt ab/);
+    } finally {
+      abhaengigkeiten.handleMessage = vorher;
+    }
+  });
+
+  it("Notaus nach einem Werkzeugschritt: abgehakt statt nach /weiter erneut", async () => {
+    const z = plan(32, "08:30");
+    const vorher = abhaengigkeiten.handleMessage;
+    abhaengigkeiten.handleMessage = async (text: string, _hooks: unknown, opts: Opts = {}) => {
+      prompts.push(text);
+      opts.onStep?.(1, "notiz_speichern");
+      state.paused = true;
+      return "Ich bin pausiert (Notaus).";
+    };
+    try {
+      await zeitplanTick(am(10, 8, 30));
+    } finally {
+      abhaengigkeiten.handleMessage = vorher;
+    }
+    assert.equal(z.lastRun, "2026-10-10");
+    assert.equal(gesendet.length, 1);
+    assert.match(gesendet[0]!, /brach nach 1 Werkzeugschritt ab \(Notaus\)/);
+    state.paused = false;
+    await zeitplanTick(am(10, 8, 31));
+    assert.equal(prompts.length, 1);
+  });
+
+  it("nur lesende Werkzeuge (Wetter, Kalender): vorübergehender Fehler → bleibt offen und wird im Fenster nachgeholt", async () => {
+    const z = plan(33, "07:00");
+    const vorher = abhaengigkeiten.handleMessage;
+    abhaengigkeiten.handleMessage = nachSchrittenFehler(2, ueberlastet, ["wetter", "kalender_termine"]);
+    try {
+      await zeitplanTick(am(10, 7, 0));
+    } finally {
+      abhaengigkeiten.handleMessage = vorher;
+    }
+    assert.equal(prompts.length, 1);
+    assert.equal(z.lastRun, undefined);
+    assert.deepEqual(gesendet, []);
+    await zeitplanTick(am(10, 7, 3));
+    assert.equal(prompts.length, 1); // noch keine 5 Minuten
+    antworten = ["Sonnig, zwei Termine."];
+    await zeitplanTick(am(10, 7, 5));
+    assert.equal(prompts.length, 2);
+    assert.equal(z.lastRun, "2026-10-10");
+    assert.deepEqual(gesendet, ["🕒 Plan 33\n\nSonnig, zwei Termine."]);
+  });
+
+  it("lesend und schreibend gemischt: abgehakt, gezählt wird nur der schreibende Schritt", async () => {
+    const z = plan(34, "08:30");
+    const vorher = abhaengigkeiten.handleMessage;
+    abhaengigkeiten.handleMessage = nachSchrittenFehler(3, netzfehler, ["wetter", "notiz_speichern", "geraete_status"]);
+    try {
+      await zeitplanTick(am(10, 8, 30));
+      await zeitplanTick(am(10, 8, 40));
+    } finally {
+      abhaengigkeiten.handleMessage = vorher;
+    }
+    assert.equal(prompts.length, 1);
+    assert.equal(z.lastRun, "2026-10-10");
+    assert.deepEqual(gesendet, ["⚠️ Zeitplan «Plan 34» brach nach 1 Werkzeugschritt ab (Verbindung). Ich wiederhole ihn nicht, um nichts doppelt auszuführen, Sir."]);
+  });
+
+  it("Freigabe-Auftrag, unbekanntes Werkzeug oder eingabeabhängige Stufe zählen als Nebenwirkung", async () => {
+    for (const [id, werkzeug] of [[35, "kalender_termin_erstellen"], [36, "gibt_es_nicht"], [37, "seite_lesen"], [38, "kamera_schauen"]] as const) {
+      const z = plan(id, "08:30");
+      const vorher = abhaengigkeiten.handleMessage;
+      abhaengigkeiten.handleMessage = nachSchrittenFehler(1, serverfehler, [werkzeug]);
+      try {
+        await zeitplanTick(am(10, 8, 30));
+      } finally {
+        abhaengigkeiten.handleMessage = vorher;
+      }
+      assert.equal(z.lastRun, "2026-10-10", werkzeug);
+    }
+    assert.equal(gesendet.length, 4);
+  });
+
+  it("Rückblick: nur gelesen, dann Netzfehler → nach 5 Minuten erneut", async () => {
+    const vorher = abhaengigkeiten.handleMessage;
+    abhaengigkeiten.handleMessage = nachSchrittenFehler(1, netzfehler, ["notizen_lesen"]);
+    try {
+      await rueckblickTick(am(22, 22, 30));
+    } finally {
+      abhaengigkeiten.handleMessage = vorher;
+    }
+    assert.deepEqual(gesendet, []);
+    await rueckblickTick(am(22, 22, 35));
+    assert.equal(prompts.length, 2);
+    assert.deepEqual(gesendet, ["🌙 Rückblick\n\nErledigt, Sir."]);
+  });
+
+  it("Notaus nach nur lesendem Schritt: nichts gemeldet, Lauf bleibt für nach /weiter offen", async () => {
+    const z = plan(39, "08:30");
+    const vorher = abhaengigkeiten.handleMessage;
+    abhaengigkeiten.handleMessage = async (text: string, _hooks: unknown, opts: Opts = {}) => {
+      prompts.push(text);
+      opts.onStep?.(1, "wetter");
+      state.paused = true;
+      return "Ich bin pausiert (Notaus).";
+    };
+    try {
+      await zeitplanTick(am(10, 8, 30));
+    } finally {
+      abhaengigkeiten.handleMessage = vorher;
+    }
+    assert.equal(z.lastRun, undefined);
+    assert.deepEqual(gesendet, []);
+    state.paused = false;
+    await zeitplanTick(am(10, 8, 31));
+    assert.equal(prompts.length, 2);
+    assert.equal(z.lastRun, "2026-10-10");
+  });
+
+  it("jedes lesende Werkzeug hat eine feste Stufe auto (sonst legt es Aufträge an und muss gezählt werden)", () => {
+    const k = config as unknown as Record<string, unknown>;
+    const vorher = { gmail: k.gmail, shopify: k.shopify, homeAssistant: k.homeAssistant };
+    try {
+      // Nur zum Auflisten; es wird nichts aufgerufen
+      k.gmail = { clientId: "x", clientSecret: "y" };
+      k.shopify = { shop: "x", token: "y", version: "2026-01" };
+      k.homeAssistant = { url: "http://ha.invalid", token: "y" };
+      const werkzeuge = new Map(activeTools().map((t) => [t.name, t]));
+      let geprueft = 0;
+      for (const name of LESENDE_WERKZEUGE) {
+        const t = werkzeuge.get(name);
+        if (!t) continue; // z. B. Kamera-Werkzeuge ohne cameras.json
+        geprueft++;
+        assert.equal(t.stufe, "auto", name);
+      }
+      assert.ok(geprueft >= 15, `nur ${geprueft} geprüft`);
+    } finally {
+      Object.assign(k, vorher);
+    }
+  });
+});
+
 describe("rueckblickTick", () => {
   it("im Fenster einmal pro Tag, Meldung über sendeSpaeter", async () => {
     antworten = ["Ein ruhiger Tag, Sir."];
@@ -470,6 +673,38 @@ describe("Neustart im Nachholfenster", () => {
 });
 
 describe("Erster Start ohne routinen.json (Update auf 0.16)", () => {
+  it("Ergebnis wird sofort gespeichert: ein Neustart danach wertet die Uhrzeit nicht erneut aus", async () => {
+    const rueckblickVorher = config.rueckblick;
+    try {
+      rmSync(ROUTINEN_DATEI, { force: true });
+      // Erster Start vor der Zielzeit (hier: Rückblick aus Sicht dieses Starts noch nicht dran)
+      config.rueckblick = "off";
+      const erster = (await import(new URL("../src/scheduler.js?erststart=1", import.meta.url).href)) as typeof import("../src/scheduler.js");
+      assert.equal(existsSync(ROUTINEN_DATEI), true);
+      assert.equal(statSync(ROUTINEN_DATEI).mode & 0o777, 0o600);
+      assert.equal((JSON.parse(readFileSync(ROUTINEN_DATEI, "utf8")) as { rueckblick?: string }).rueckblick, undefined);
+
+      // Neustart, nachdem die Zielzeit (00:00) vorbei ist und der Lauf vorübergehend scheiterte: er bleibt offen
+      config.rueckblick = "00:00";
+      const heute = todayKey(new Date());
+      const [j, m, t] = heute.split("-").map(Number) as [number, number, number];
+      const imFensterHeute = new Date(j, m - 1, t, 0, 10, 0, 0);
+      erster.abhaengigkeiten.handleMessage = abhaengigkeiten.handleMessage;
+      erster.abhaengigkeiten.sendeSpaeter = abhaengigkeiten.sendeSpaeter;
+      fehler = [netzfehler()];
+      await erster.rueckblickTick(imFensterHeute);
+      assert.equal(prompts.length, 1);
+      const zweiter = (await import(new URL("../src/scheduler.js?erststart=2", import.meta.url).href)) as typeof import("../src/scheduler.js");
+      zweiter.abhaengigkeiten.handleMessage = abhaengigkeiten.handleMessage;
+      zweiter.abhaengigkeiten.sendeSpaeter = abhaengigkeiten.sendeSpaeter;
+      await zweiter.rueckblickTick(new Date(imFensterHeute.getTime() + 2 * 60_000));
+      assert.equal(prompts.length, 2);
+      assert.deepEqual(gesendet, ["🌙 Rückblick\n\nErledigt, Sir."]);
+    } finally {
+      config.rueckblick = rueckblickVorher;
+    }
+  });
+
   it("heute schon vorbei → als erledigt, noch nicht dran → offen", () => {
     // Montag 12.10. 09:00: Rechnung (08:30) vorbei, Rückblick (22:30) noch nicht, Zielcheck nicht heute
     assert.deepEqual(routinenBeimErststart(am(12, 9, 0)), { rechnungen: "2026-10-12" });

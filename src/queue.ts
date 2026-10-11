@@ -20,6 +20,8 @@ export interface Auftrag {
   status: Status;
   result?: string;
   messageId?: number;
+  /** ISO-Zeit, zu der die Ausführung begann. Bleibt der Status danach «offen» (Absturz mitten im Werkzeug), ist das Ergebnis unklar. */
+  gestartetAm?: string;
 }
 
 const FILE = "data/auftraege.json";

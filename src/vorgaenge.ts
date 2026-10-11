@@ -1,6 +1,7 @@
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { addSystemNote, runTask, type AgentHooks } from "./agent.js";
 import { schwaerze } from "./robust.js";
+import { state } from "./state.js";
 import { sendText, sendeSpaeter } from "./telegram.js";
 
 /**
@@ -49,12 +50,23 @@ export function startVorgang(auftrag: string, hooks: AgentHooks): Vorgang {
     // Gesendet wird über den Postausgang – ist Telegram gestört, kommt die Meldung nach.
     .then(
       async (result) => {
+        // Notaus während des Vorgangs: runLoop liefert dann pausiertText() statt eines Ergebnisses. Der Vorgang ist
+        // abgebrochen, nicht fertig – sonst halten /vorgaenge und Claude ihn für erledigt. Kein Ergebnistext nach aussen.
+        if (state.paused) {
+          v.status = "fehler";
+          v.result = "wegen Notaus angehalten";
+          v.finishedAt = new Date().toISOString();
+          save();
+          addSystemNote(`Vorgang #${v.id} («${auftrag.slice(0, 80)}») wurde wegen Notaus angehalten (nach ${v.steps} Schritten), nicht fertig.`);
+          await sendeSpaeter(`⏸ Vorgang #${v.id} wegen Notaus angehalten.`).catch(() => undefined);
+          return;
+        }
         v.status = "fertig";
         v.result = result.slice(0, 4000);
         v.finishedAt = new Date().toISOString();
         save();
         addSystemNote(`Vorgang #${v.id} («${auftrag.slice(0, 80)}») ist fertig: ${v.result.slice(0, 1500)}`);
-        await sendeSpaeter(`✅ Vorgang #${v.id} fertig (${v.steps} Werkzeugschritte)\n\n${result}`).catch((e: unknown) =>
+        await sendeSpaeter(`✅ Vorgang #${v.id} fertig (${v.steps} Werkzeugschritte)\n\n${result}`, { imNotfallZurueckhalten: true }).catch((e: unknown) =>
           console.error(`Vorgang #${v.id}: Ergebnis nicht zustellbar (${schwaerze(e instanceof Error ? e.message : String(e))}).`),
         );
       },
@@ -64,7 +76,7 @@ export function startVorgang(auftrag: string, hooks: AgentHooks): Vorgang {
         v.result = meldung;
         v.finishedAt = new Date().toISOString();
         save();
-        await sendeSpaeter(`⚠️ Vorgang #${v.id} abgebrochen: ${schwaerze(meldung)}`).catch(() => undefined);
+        await sendeSpaeter(`⚠️ Vorgang #${v.id} abgebrochen: ${schwaerze(meldung)}`, { imNotfallZurueckhalten: true }).catch(() => undefined);
       },
     )
     // nur noch Unvorhergesehenes (z. B. save() bei voller Platte) – nie als unbehandelte Ablehnung den Dienst beenden

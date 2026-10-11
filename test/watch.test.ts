@@ -31,6 +31,7 @@ after(() => { process.chdir(projekt); rmSync(temp, { recursive: true, force: tru
 const aufrufe: string[] = [];
 let telegramGestoert = false;
 let frigateFehler: Error | undefined;
+let beiTelegram: ((methode: string) => void) | undefined;
 const echteFetch = globalThis.fetch;
 const netz = () => Object.assign(new TypeError("fetch failed"), { cause: Object.assign(new Error("getaddrinfo ENOTFOUND"), { code: "ENOTFOUND" }) });
 
@@ -44,6 +45,7 @@ globalThis.fetch = (async (eingabe: string | URL | Request) => {
   const m = /^https:\/\/api\.telegram\.org\/bot[^/]+\/(\w+)$/.exec(url);
   if (m) {
     aufrufe.push(m[1]!);
+    beiTelegram?.(m[1]!);
     if (telegramGestoert) throw netz();
     return new Response(JSON.stringify({ ok: true, result: { message_id: 1 } }), { status: 200, headers: { "content-type": "application/json" } });
   }
@@ -56,13 +58,17 @@ const telegram = await import("../src/telegram.js");
 const { anthropic } = await import("../src/claude.js");
 const { gesundheit } = await import("../src/robust.js");
 const { onCameraEvent, wachenTick } = await import("../src/watch.js");
+const { state } = await import("../src/state.js");
 
 // Claude schaut hin: Antwort fest vorgegeben, keine echte API
 let claudeAntwort = "JA\nEine Person steht beim Tor.";
-(anthropic().messages as unknown as { create: () => Promise<unknown> }).create = async () => ({
-  content: [{ type: "text", text: claudeAntwort }],
-  usage: { input_tokens: 1, output_tokens: 1 },
-});
+let beiClaude: (() => void) | undefined;
+let claudeAufrufe = 0;
+(anthropic().messages as unknown as { create: () => Promise<unknown> }).create = async () => {
+  claudeAufrufe++;
+  beiClaude?.();
+  return { content: [{ type: "text", text: claudeAntwort }], usage: { input_tokens: 1, output_tokens: 1 } };
+};
 
 const postausgang = (): { text: string }[] => {
   try {
@@ -155,5 +161,85 @@ describe("Fehlertexte im Log sind geschwärzt", () => {
       assert.doesNotMatch(z, /admin:/);
     }
     assert.ok(zeilen.some((z) => z.includes("http://<geheim>@nvr:5000")));
+  });
+});
+
+describe("Notaus und Notfall während laufender Wache oder Meldung", () => {
+  const zweiteWache = { kamera: "hof", frage: "Steht das Tor offen?", alle_minuten: 1, ruhe_minuten: 0 };
+  beforeEach(() => {
+    telegramGestoert = false;
+    claudeAntwort = "JA\nEine Person steht beim Tor.";
+    claudeAufrufe = 0;
+    assert.equal(postausgang().length, 0);
+  });
+  afterEach(() => {
+    beiClaude = undefined;
+    beiTelegram = undefined;
+    telegramGestoert = false;
+    state.paused = false;
+    state.notfall = { aktiv: false };
+    const i = cameras.dynamicWachen.indexOf(zweiteWache);
+    if (i >= 0) cameras.dynamicWachen.splice(i, 1);
+    delete cameras.cameras.hof!.melden!.beschreiben;
+  });
+
+  it("/pause während look(): kein Bild an Telegram, kein Postausgang, die zweite Wache läuft nicht mehr", async () => {
+    cameras.dynamicWachen.push(zweiteWache);
+    beiClaude = () => { state.paused = true; };
+    jetzt += 10 * 60_000;
+    await wachenTick(jetzt);
+    assert.equal(claudeAufrufe, 1, "nur die erste Wache hat ein Bild an die API geschickt");
+    assert.deepEqual(aufrufe, ["frigate"]);
+    assert.equal(postausgang().length, 0);
+  });
+
+  it("Ohne Notaus laufen beide Wachen (Gegenprobe)", async () => {
+    cameras.dynamicWachen.push(zweiteWache);
+    jetzt += 10 * 60_000;
+    await wachenTick(jetzt);
+    assert.equal(claudeAufrufe, 2);
+    assert.deepEqual(aufrufe, ["frigate", "sendPhoto", "frigate", "sendPhoto"]);
+  });
+
+  it("/notfall während des gescheiterten Bildversands einer Wache: Text geht nicht in den Postausgang", async () => {
+    telegramGestoert = true;
+    beiTelegram = () => { state.notfall = { aktiv: true, seit: new Date().toISOString(), grund: "Test" }; state.paused = true; };
+    jetzt += 10 * 60_000;
+    await wachenTick(jetzt);
+    assert.equal(postausgang().length, 0);
+  });
+
+  it("/notfall während look() einer Kamera-Meldung: kein sendPhoto, kein Postausgang, nicht gemeldet", async () => {
+    cameras.cameras.hof!.melden!.beschreiben = true;
+    beiClaude = () => { state.notfall = { aktiv: true, seit: new Date().toISOString(), grund: "Test" }; state.paused = true; };
+    assert.equal(await onCameraEvent({ camera: "hof", label: "person", id: "ev-notfall", hasSnapshot: true }), false);
+    assert.equal(claudeAufrufe, 1);
+    assert.deepEqual(aufrufe, ["frigate"]);
+    assert.equal(postausgang().length, 0);
+  });
+
+  it("/pause während des Schnappschusses einer Kamera-Meldung: nichts geht hinaus", async () => {
+    frigateFehler = undefined;
+    // Der Schnappschuss selbst läuft noch, danach greift der Notaus
+    const echt = globalThis.fetch;
+    globalThis.fetch = (async (e: string | URL | Request, i?: RequestInit) => {
+      const r = await echt(e, i);
+      if (String(e instanceof Request ? e.url : e).startsWith("http://frigate.test:5000/")) state.paused = true;
+      return r;
+    }) as typeof fetch;
+    try {
+      assert.equal(await onCameraEvent({ camera: "hof", label: "person", id: "ev-pause", hasSnapshot: true }), false);
+    } finally {
+      globalThis.fetch = echt;
+    }
+    assert.deepEqual(aufrufe, ["frigate"]);
+    assert.equal(postausgang().length, 0);
+  });
+
+  it("/pause während des gescheiterten Bildversands einer Kamera-Meldung: kein Postausgang-Eintrag", async () => {
+    telegramGestoert = true;
+    beiTelegram = () => { state.paused = true; };
+    await onCameraEvent({ camera: "hof", label: "person", id: "ev-pause-senden", hasSnapshot: true });
+    assert.equal(postausgang().length, 0);
   });
 });

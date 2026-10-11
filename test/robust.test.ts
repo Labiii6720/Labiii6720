@@ -435,6 +435,39 @@ describe("gesundheit", () => {
     ]);
   });
 
+  it("nach Internetausfall keine Einzelmeldung für Netzfehler aus der Ausfallzeit", async () => {
+    gesundheit.setzeMelder(async (t) => { gesendet.push(t); });
+    // 20 Minuten ohne Internet: Polling meldet internet, der Postausgang scheitert jede Minute an Telegram
+    for (let m = 0; m <= 20; m++) {
+      gesundheit.melde("internet", false, "Netz: ENOTFOUND", m * MIN);
+      gesundheit.melde("telegram", false, "telegram.sendMessage: Netz: ENOTFOUND", m * MIN);
+      gesundheit.melde("wetter", false, "wetter.get: Zeitlimit: The operation was aborted due to timeout", m * MIN);
+      gesundheit.melde("claude", false, "claude.messages: HTTP 500", m * MIN);
+    }
+    await gesundheit.tick(20 * MIN);
+    assert.deepEqual(gesendet, ["Sir, die Internetverbindung ist seit 20 Minuten gestört."]);
+    // Polling: Internet wieder da; der Watchdog-Tick kommt vor dem nächsten Sendeversuch
+    gesundheit.melde("internet", true, undefined, 20 * MIN + 30_000);
+    await gesundheit.tick(21 * MIN);
+    assert.deepEqual(gesendet.slice(1), [
+      "Die Internetverbindung ist wieder da (Ausfall 21 Minuten).",
+      // HTTP 500 ist kein Netzfehler: eigene Störung, nach der Erholung gemeldet
+      "Sir, die Claude-API antwortet seit 21 Minuten nicht (HTTP 500). Ich versuche es weiter.",
+    ]);
+    assert.equal(gesundheit.zustand("telegram")!.gemeldet, false);
+    assert.equal(gesundheit.zustand("wetter")!.gemeldet, false);
+    // Postausgang klappt: keine Erholungsmeldung für Telegram (nie einzeln gemeldet)
+    gesundheit.melde("telegram", true, undefined, 21 * MIN + 10_000);
+    await gesundheit.tick(22 * MIN);
+    await gesundheit.tick(23 * MIN);
+    assert.equal(gesendet.length, 3);
+    assert.ok(!gesendet.some((t) => /Telegram|Wetterdienst/.test(t)), gesendet.join("\n"));
+    // Scheitert eine Komponente auch nach der Erholung weiter, ist das eine eigene Störung
+    gesundheit.melde("wetter", false, "wetter.get: Zeitlimit: The operation was aborted due to timeout", 24 * MIN);
+    await gesundheit.tick(24 * MIN);
+    assert.deepEqual(gesendet.slice(3), ["Sir, der Wetterdienst antwortet seit 24 Minuten nicht (Zeitlimit). Ich versuche es weiter."]);
+  });
+
   it("Melder-Fehler lässt gemeldet auf false, nächster Tick versucht erneut", async () => {
     let kaputt = true;
     gesundheit.setzeMelder(async (t) => { if (kaputt) throw new Error("Telegram weg"); gesendet.push(t); });

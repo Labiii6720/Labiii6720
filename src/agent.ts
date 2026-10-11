@@ -130,10 +130,17 @@ export function runTask(text: string, hooks: AgentHooks, opts: RunOptions = {}):
   return runLoop(text, hooks, { stark: true, ...opts, history: opts.history ?? [] });
 }
 
-const PAUSIERT = "Ich bin pausiert (Notaus). In Telegram hebt /weiter das wieder auf.";
+/**
+ * Antwort im Notaus. Im Notfall lehnt /weiter ab, deshalb dort direkt auf /entwarnung verweisen.
+ * state.notfall direkt gelesen statt notfallAktiv(), um keinen Importzyklus über notfall.ts zu erzeugen.
+ */
+export const pausiertText = (): string =>
+  state.notfall?.aktiv
+    ? "Notfall aktiv, Sir. Aufheben nur mit /entwarnung in Telegram."
+    : "Ich bin pausiert (Notaus). In Telegram hebt /weiter das wieder auf.";
 
 async function runLoop(text: string, hooks: AgentHooks, opts: RunOptions & { history: Msg[] }): Promise<string> {
-  if (state.paused) return PAUSIERT;
+  if (state.paused) return pausiertText();
   const anthropic = claude();
   const tools = activeTools();
   const toolParams: Anthropic.Messages.ToolUnion[] = tools.map((t) => ({ name: t.name, description: t.description, input_schema: t.input_schema }));
@@ -160,7 +167,15 @@ async function runLoop(text: string, hooks: AgentHooks, opts: RunOptions & { his
     reply = msg.content.map((b) => (b.type === "text" ? b.text : "")).join("").trim();
 
     const uses = msg.content.filter((b): b is Anthropic.ToolUseBlock => b.type === "tool_use");
-    if (msg.stop_reason !== "tool_use" || uses.length === 0) break;
+    if (msg.stop_reason !== "tool_use" || uses.length === 0) {
+      // Notaus/Notfall kam während des letzten Aufrufs: die fertige Antwort kann Daten enthalten und darf nicht
+      // mehr in einen womöglich kompromittierten Chat. Sie bleibt in der Historie, ausgegeben wird nur pausiertText().
+      if (state.paused) {
+        if (isChat) saveHistory();
+        return pausiertText();
+      }
+      break;
+    }
 
     // Notaus während eines laufenden Aufrufs oder Werkzeugs: übrige Werkzeuge nicht mehr ausführen. Jedes tool_use
     // bekommt trotzdem ein tool_result, damit die Historie für die API gültig bleibt.
@@ -176,7 +191,7 @@ async function runLoop(text: string, hooks: AgentHooks, opts: RunOptions & { his
     h.push({ role: "user", content: results });
     if (state.paused) {
       if (isChat) saveHistory();
-      return PAUSIERT;
+      return pausiertText();
     }
     if (loop === maxLoops - 1) reply = `${reply}\n\n(Limit von ${maxLoops} Werkzeugrunden erreicht, Zwischenstand.)`.trim();
   }

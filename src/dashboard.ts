@@ -40,7 +40,7 @@ export function statusJson(_req: Request, res: Response): void {
     modus: state.mode ?? "normal",
     pausiert: Boolean(state.paused),
     notfall: notfallAktiv(),
-    auftraege: offeneAuftraege().map((a) => ({ id: a.id, tool: a.tool, stufe: a.stufe, summary: a.summary, seit: a.createdAt })),
+    auftraege: offeneAuftraege().map((a) => ({ id: a.id, tool: a.tool, stufe: a.stufe, summary: a.summary, seit: a.createdAt, gestartetAm: a.gestartetAm })),
     rechnungen: offeneRechnungen().slice(0, 10).map((r) => ({ id: r.id, empfaenger: r.empfaenger, betrag: r.betrag, waehrung: r.waehrung, faellig: r.faellig })),
     vorgaenge: vorgaenge.slice(-8).map((v) => ({ id: v.id, status: v.status, steps: v.steps, auftrag: v.auftrag.slice(0, 90) })),
     zeitplaene: zeitplaene.map((z) => ({ id: z.id, name: z.name, zeit: z.zeit, tage: z.tage })),

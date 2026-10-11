@@ -309,6 +309,8 @@ let letztesLog = new Map<Komponente, number>();
 /** Erholungen gemeldeter Störungen, die der Melder noch zustellen muss */
 let erholungen: { k: Komponente; dauerMin: number }[] = [];
 let melder: ((text: string) => Promise<void>) | undefined;
+/** Zeitpunkt, an dem «internet» zuletzt von gestört auf ok wechselte */
+let internetWiederAm: number | undefined;
 
 export const gesundheit = {
   /**
@@ -324,6 +326,7 @@ export const gesundheit = {
         const dauer = minuten(jetzt - z.seit);
         console.log(`[gesundheit] ${gross(name)} wieder da (nach ${minText(dauer)}).`);
         if (z.gemeldet) erholungen.push({ k, dauerMin: dauer });
+        if (k === "internet") internetWiederAm = jetzt;
         z.ok = true;
         z.seit = jetzt;
         z.gemeldet = false;
@@ -432,10 +435,14 @@ export const gesundheit = {
       }
       return; // Einzelmeldungen unterdrücken, solange das Internet weg ist
     }
+    // Netz-/Zeitlimit-Fehler, die nur aus der Ausfallzeit stammen, gehören zur Sammelmeldung: Nach der Erholung kommt der
+    // Tick oft vor dem nächsten Versuch (Postausgang, Claude auf Anfrage). Erst ein Fehler ab der Erholung belegt eine eigene Störung.
+    const ausAusfall = (z: Zustand) =>
+      internetWiederAm !== undefined && fehlerAm(z) < internetWiederAm && (z.kurz === "Netzfehler" || z.kurz === "Zeitlimit");
     for (const k of [...zustaende.keys()].sort()) {
       if (k === "internet") continue;
       const z = zustaende.get(k)!;
-      if (!reif(z)) continue;
+      if (!reif(z) || ausAusfall(z)) continue;
       z.gemeldet = true;
       // Nur die Kurzform («HTTP 502»); Aufrufnamen und Roh-JSON aus letzterFehler gehören in Log und /check
       const text = `Sir, ${NAMEN[k].nom} antwortet seit ${minText(minuten(jetzt - z.seit))} nicht${z.kurz ? ` (${z.kurz})` : ""}. Ich versuche es weiter.`;
@@ -449,5 +456,6 @@ export const gesundheit = {
     letztesLog = new Map();
     erholungen = [];
     melder = undefined;
+    internetWiederAm = undefined;
   },
 };

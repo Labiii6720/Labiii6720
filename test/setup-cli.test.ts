@@ -19,8 +19,8 @@ function fahre(dir: string, antworten: string[], extra: string[] = [], sigint = 
 
 /**
  * Wie fahre, aber mit freier Argumentliste (Vorlage immer die Kopie im Temp-Verzeichnis).
- * JARVIS_CHECK_TIMEOUT_MS kürzt die Zeitlimits der Prüfungen in src/check.ts (nur für Tests): hängende Attrappen
- * laufen so nach 300 ms statt 10 s ins Zeitlimit. Der Assistent reicht die Variable an das Prüf-Kind weiter.
+ * JARVIS_CHECK_TIMEOUT_MS=300 verkürzt das Prüf-Zeitlimit je Dienst in src/check.ts (im Betrieb 10 s): scripts/setup.ts reicht
+ * die Umgebung an das Prüf-Kind durch (entfernt nur die Konfigurationsschlüssel aus .env.example).
  */
 function fahreRoh(dir: string, antworten: string[], argumente: string[], sigint = false): Promise<Lauf> {
   return new Promise((fertig) => {
@@ -284,7 +284,8 @@ describe("scripts/setup.ts (End-zu-End)", () => {
       });
       const lauf = await new Promise<Lauf & { kindLief: boolean }>((fertig) => {
         const kind = spawn(process.execPath, ["--import", "tsx", skript, "--beispiel", join(dir, ".env.example"), "--abschnitt", "homeassistant", "--env", env], {
-          cwd: projekt, timeout: 60_000, env: { ...process.env, ANTHROPIC_API_KEY: "", TELEGRAM_BOT_TOKEN: "" },
+          // ohne verkürztes Prüf-Zeitlimit: die Prüfung muss hängen, bis Strg-C kommt (undefined lässt Node weg)
+          cwd: projekt, timeout: 60_000, env: { ...process.env, ANTHROPIC_API_KEY: "", TELEGRAM_BOT_TOKEN: "", JARVIS_CHECK_TIMEOUT_MS: undefined },
         });
         let out = "";
         let err = "";
@@ -347,7 +348,7 @@ describe("scripts/setup.ts (End-zu-End)", () => {
 
   it("Selbsttest am Ende liefert Befunde, auch wenn mehrere Dienste hängen", async () => {
     // Attrappe statt Home Assistant und Frigate: nimmt Verbindungen an und antwortet nie; beide laufen nacheinander ins
-    // Zeitlimit des Selbsttests (im Betrieb je 10 s, hier über JARVIS_CHECK_TIMEOUT_MS auf 300 ms verkürzt)
+    // Zeitlimit des Selbsttests (je 10 s in src/check.ts; kürzer nur, sobald check.ts JARVIS_CHECK_TIMEOUT_MS liest)
     const sockets = new Set<Socket>();
     const server = createServer((s) => { sockets.add(s); s.on("close", () => sockets.delete(s)); });
     await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));

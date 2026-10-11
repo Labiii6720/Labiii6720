@@ -60,21 +60,30 @@ const routinen: Routinen = (() => {
     return { rueckblick: tag("rueckblick"), rechnungen: tag("rechnungen"), zielcheck: tag("zielcheck") };
   } catch (e) {
     // Datei fehlt = erster Start; kaputtes JSON = wie bisher alles offen
-    if ((e as NodeJS.ErrnoException)?.code === "ENOENT") return routinenBeimErststart(new Date());
-    return {};
+    if ((e as NodeJS.ErrnoException)?.code !== "ENOENT") return {};
+    // Sofort speichern: nur der allererste Start wertet die Uhrzeit aus. Sonst hielte ein Neustart im Nachholfenster
+    // einen vorübergehend gescheiterten Lauf für «schon vorbei» und liesse ihn für den Tag ausfallen.
+    const r = routinenBeimErststart(new Date());
+    speichereRoutinen(r);
+    return r;
   }
 })();
 
-/** Merkt sich den Lauf für heute und speichert sofort (atomar); scheitert das Speichern, gilt der Merker bis zum Neustart. */
-function merkeRoutine(schluessel: keyof Routinen, tag: string): void {
-  routinen[schluessel] = tag;
+/** Schreibt den Stand atomar (tmp + rename, 0o600); scheitert das Speichern, gilt der Stand bis zum Neustart. */
+function speichereRoutinen(r: Routinen): void {
   try {
     mkdirSync("data", { recursive: true, mode: 0o700 });
-    writeFileSync(`${ROUTINEN_DATEI}.tmp`, JSON.stringify(routinen, null, 2), { mode: 0o600 });
+    writeFileSync(`${ROUTINEN_DATEI}.tmp`, JSON.stringify(r, null, 2), { mode: 0o600 });
     renameSync(`${ROUTINEN_DATEI}.tmp`, ROUTINEN_DATEI);
   } catch (e) {
     log(e);
   }
+}
+
+/** Merkt sich den Lauf für heute und speichert sofort. */
+function merkeRoutine(schluessel: keyof Routinen, tag: string): void {
+  routinen[schluessel] = tag;
+  speichereRoutinen(routinen);
 }
 
 /** Ist die Verbindung wieder da, darf die nächste Störung wieder eine Log-Zeile bekommen – auch wenn gerade kein Lauf fällig ist. */
@@ -102,22 +111,77 @@ function wartetWeilOffline(was: string): boolean {
   return true;
 }
 
+const schritteText = (n: number) => `${n} Werkzeugschritt${n === 1 ? "" : "en"}`;
+
+/**
+ * Werkzeuge, die nur lesen: feste Stufe `auto`, keine Datei, kein Auftrag, nichts an den Nutzer. Ein Lauf, der nur diese
+ * benutzt hat, darf nach einem vorübergehenden Fehler wiederholt werden. Alles andere (auch unbekannte Namen, Werkzeuge mit
+ * eingabeabhängiger Stufe wie seite_lesen oder mit Senden-Option wie kamera_schauen) zählt als Nebenwirkung – im Zweifel sicher.
+ */
+export const LESENDE_WERKZEUGE: ReadonlySet<string> = new Set([
+  "wetter",
+  "whoop_recovery",
+  "notizen_lesen",
+  "kalender_termine",
+  "mails_suchen",
+  "mail_lesen",
+  "mail_triage",
+  "dateien_auflisten",
+  "datei_lesen",
+  "shop_bestellungen",
+  "shop_produkte",
+  "geraete_status",
+  "zeitplaene_anzeigen",
+  "kamera_liste",
+  "kamera_ereignisse",
+  "wachen_anzeigen",
+  "rechnungen_offen",
+  "zahlung_vorbereiten",
+  "protokolle_anzeigen",
+  "profil_anzeigen",
+]);
+
 /**
  * Führt einen Lauf aus. Rückgabe true = als gelaufen markieren (Erfolg oder dauerhafter Fehler, der einmal gemeldet wird);
  * false = vorübergehender Fehler, der Lauf bleibt offen und wird im Fenster frühestens nach 5 Minuten erneut versucht.
  * Gibt `fn` false zurück, kam der Notaus dazwischen: nichts gemeldet, Lauf bleibt offen und darf nach /weiter sofort (im Fenster) starten.
+ * Ausnahme in beiden Fällen: Hat schon ein Werkzeug mit Nebenwirkung gewirkt (`zaehle` ausserhalb von LESENDE_WERKZEUGE),
+ * wird nicht wiederholt – ein Neustart des ganzen Laufs würde Erinnerungen, Rechnungen, Notizen oder Freigabe-Aufträge
+ * doppelt anlegen. Abhaken und einmal melden. Reine Lesewerkzeuge halten den Lauf offen.
  */
-async function ausfuehren(schluessel: string, titel: string, now: Date, fn: () => Promise<boolean | void>): Promise<boolean> {
+async function ausfuehren(
+  schluessel: string,
+  titel: string,
+  now: Date,
+  fn: (zaehle: (schritt: number, werkzeug?: string) => void) => Promise<boolean | void>,
+): Promise<boolean> {
   laufend.add(schluessel);
+  let schritte = 0;
+  const zaehle = (_schritt: number, werkzeug?: string) => {
+    if (werkzeug !== undefined && LESENDE_WERKZEUGE.has(werkzeug)) return;
+    schritte++;
+  };
+  const abbruchMelden = async (grund: string) => {
+    letzterFehlversuch.delete(schluessel);
+    await abhaengigkeiten
+      .sendeSpaeter(`⚠️ ${titel} brach nach ${schritteText(schritte)} ab (${grund}). Ich wiederhole ihn nicht, um nichts doppelt auszuführen, Sir.`)
+      .catch(log);
+    return true;
+  };
   try {
-    const ergebnis = await fn();
+    const ergebnis = await fn(zaehle);
+    if (ergebnis === false && schritte > 0) return await abbruchMelden("Notaus");
     letzterFehlversuch.delete(schluessel);
     return ergebnis !== false;
   } catch (e) {
     log(e);
-    // Notaus während des Laufs: kein «fehlgeschlagen» melden und nicht abhaken – der Lauf bleibt für nach /weiter offen.
-    if (state.paused) return false;
+    if (state.paused) {
+      if (schritte > 0) return await abbruchMelden("Notaus");
+      // Notaus während des Laufs: kein «fehlgeschlagen» melden und nicht abhaken – der Lauf bleibt für nach /weiter offen.
+      return false;
+    }
     if (voruebergehend(e)) {
+      if (schritte > 0) return await abbruchMelden("Verbindung");
       letzterFehlversuch.set(schluessel, now.getTime());
       return false;
     }
@@ -142,8 +206,8 @@ export async function zeitplanTick(now = new Date()): Promise<void> {
     const schluessel = `zeitplan:${z.id}`;
     if (!bereit(schluessel, now)) continue;
     if (wartetWeilOffline(`Zeitplan «${z.name}»`)) return;
-    const fertig = await ausfuehren(schluessel, `Zeitplan «${z.name}»`, now, async () => {
-      const reply = await abhaengigkeiten.handleMessage(`[Zeitplan «${z.name}», läuft automatisch] ${z.auftrag}`, hooks);
+    const fertig = await ausfuehren(schluessel, `Zeitplan «${z.name}»`, now, async (zaehle) => {
+      const reply = await abhaengigkeiten.handleMessage(`[Zeitplan «${z.name}», läuft automatisch] ${z.auftrag}`, hooks, { onStep: zaehle });
       // Notaus während des Laufs: die Antwort wäre nur «Ich bin pausiert …» – nicht senden, nicht abhaken.
       if (state.paused) return false;
       await abhaengigkeiten.sendeSpaeter(`🕒 ${z.name}\n\n${reply}`);
@@ -174,8 +238,8 @@ export async function rueckblickTick(now = new Date()): Promise<void> {
     "2) Gibt es ein belegtes Entscheidungsmuster (mindestens zwei konkrete Belege, auf Entscheidungen bezogen), halte es mit muster_festhalten fest; sonst nicht. " +
     "3) Hat sich etwas an Zielen oder Werten gezeigt, schlag es mit ziel_setzen oder wert_setzen vor (das wird zum Auftrag). " +
     "4) Antworte mir in höchstens vier Sätzen: Was war heute wichtig, was steht morgen an, und ein ehrlicher Hinweis, falls du einen hast.";
-  const fertig = await ausfuehren("rueckblick", "Der Rückblick", now, async () => {
-    const reply = await abhaengigkeiten.handleMessage(prompt, hooks);
+  const fertig = await ausfuehren("rueckblick", "Der Rückblick", now, async (zaehle) => {
+    const reply = await abhaengigkeiten.handleMessage(prompt, hooks, { onStep: zaehle });
     if (state.paused) return false;
     await abhaengigkeiten.sendeSpaeter(`🌙 Rückblick\n\n${reply}`);
   });
@@ -226,8 +290,8 @@ export async function zielcheckTick(now = new Date()): Promise<void> {
     "[Wöchentlicher Zielcheck, läuft automatisch] Geh jedes offene Ziel durch: Was ist diese Woche dafür passiert (aus Gespräch und notierten Entscheidungen)? " +
     "Nenne pro Ziel einen konkreten nächsten Schritt für die kommende Woche. Wo ein Termin hilft, schlag ihn mit kalender_termin_erstellen vor (wird zum Auftrag). " +
     "Sei ehrlich, wenn ein Ziel stillsteht. Höchstens zehn Sätze.";
-  const fertig = await ausfuehren("zielcheck", "Der Zielcheck", now, async () => {
-    const reply = await abhaengigkeiten.handleMessage(prompt, hooks);
+  const fertig = await ausfuehren("zielcheck", "Der Zielcheck", now, async (zaehle) => {
+    const reply = await abhaengigkeiten.handleMessage(prompt, hooks, { onStep: zaehle });
     if (state.paused) return false;
     await abhaengigkeiten.sendeSpaeter(`🎯 Zielcheck\n\n${reply}`);
   });
