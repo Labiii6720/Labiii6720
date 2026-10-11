@@ -1,6 +1,6 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { anthropic as claude, claudeAufruf, trackUsage } from "./claude.js";
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { chmodSync, constants, copyFileSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { config } from "./config.js";
 import { HttpFehler, mitWiederholung, retryAfterAusHeader, type WiederholOptionen } from "./robust.js";
 
@@ -40,15 +40,24 @@ export interface Camera {
   wachen?: Omit<Wache, "kamera" | "id">[];
 }
 
-function loadJson<T>(file: string, fallback: T): T {
+/** true, wenn cameras.json vorhanden, aber unlesbar war: dann laufen keine Meldungen und keine Wachen aus der Datei. */
+export let camerasNichtGeladen = false;
+
+function ladeKameras(): Record<string, Camera> {
   try {
-    return JSON.parse(readFileSync(file, "utf8")) as T;
-  } catch {
-    return fallback;
+    const roh = JSON.parse(readFileSync("cameras.json", "utf8")) as unknown;
+    if (!roh || typeof roh !== "object" || Array.isArray(roh)) throw new Error("kein Objekt");
+    return roh as Record<string, Camera>;
+  } catch (e) {
+    // Fehlende Datei heisst «keine Kameras»; alles andere laut melden (Inhalt nie ins Log)
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return {};
+    camerasNichtGeladen = true;
+    console.error(`cameras.json unlesbar (${(e as NodeJS.ErrnoException).code ?? "ungültiges JSON"}) – Jarvis startet ohne Kameras, Meldungen und Wachen aus der Datei sind aus.`);
+    return {};
   }
 }
 
-export const cameras: Record<string, Camera> = loadJson("cameras.json", {});
+export const cameras: Record<string, Camera> = ladeKameras();
 export const hasCameras = () => Boolean(config.frigateUrl) && Object.keys(cameras).length > 0;
 
 export function cameraByFrigateName(name: string): [string, Camera] | undefined {
@@ -158,9 +167,76 @@ export async function look(cam: string, question: string, image?: Buffer): Promi
 // ---------- Wachen (dynamisch per Werkzeug, zusätzlich zu cameras.json) ----------
 
 const WACHEN_FILE = "data/wachen.json";
-export const dynamicWachen: Wache[] = loadJson(WACHEN_FILE, []);
+const WACHEN_DEFEKT = `${WACHEN_FILE}.defekt`;
+
+/** Kopiert die unlesbare Wachen-Datei unter einen freien Namen (0o600); eine ältere Sicherung bleibt unberührt. */
+function sichereWachenDefekt(): string | undefined {
+  try {
+    mkdirSync("data", { recursive: true, mode: 0o700 });
+    const stempel = new Date().toISOString().replace(/[:.]/g, "-");
+    for (let n = 0; n < 100; n++) {
+      const nach = n === 0 ? WACHEN_DEFEKT : `${WACHEN_DEFEKT}-${stempel}${n > 1 ? `-${n}` : ""}`;
+      try {
+        copyFileSync(WACHEN_FILE, nach, constants.COPYFILE_EXCL);
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code === "EEXIST") continue;
+        throw e;
+      }
+      chmodSync(nach, 0o600);
+      return nach;
+    }
+    throw new Error("kein freier Name für die Sicherung");
+  } catch (e) {
+    console.error("Wachen-Sicherung fehlgeschlagen:", e instanceof Error ? e.message : e);
+    return undefined;
+  }
+}
+
+/**
+ * true, wenn data/wachen.json vorhanden, aber unlesbar war (Rechte, abgeschnittenes JSON …). Dann laufen die
+ * per Werkzeug angelegten Wachen nicht, und `saveWachen()` verweigert das Schreiben: sonst ersetzte die nächste
+ * neue Wache den ganzen Bestand.
+ */
+export let wachenNichtGeladen = false;
+
+/** Meldung für Anzeigen, Selbsttest und Werkzeuge, solange die Datei beim Start unlesbar war */
+export const WACHEN_UNLESBAR =
+  "⚠️ data/wachen.json war beim Start unlesbar, Sir (Sicherung, sofern möglich, unter data/wachen.json.defekt). Die dort angelegten Wachen laufen nicht, und ich ändere keine, bis die Datei repariert ist und ich neu gestartet bin.";
+
+export const dynamicWachen: Wache[] = (() => {
+  let text: string;
+  try {
+    text = readFileSync(WACHEN_FILE, "utf8");
+  } catch (e) {
+    // Nur eine fehlende Datei heisst «noch keine Wachen»
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return [];
+    wachenNichtGeladen = true;
+    console.error(
+      `Wachen nicht lesbar (${(e as NodeJS.ErrnoException).code ?? "Fehler"}) – Jarvis startet ohne die Wachen aus ${WACHEN_FILE} und speichert keine, bis die Datei wieder lesbar ist und Jarvis neu startet.`,
+    );
+    return [];
+  }
+  try {
+    const roh = JSON.parse(text) as unknown;
+    if (!Array.isArray(roh)) throw new Error("keine Liste");
+    return roh as Wache[];
+  } catch {
+    wachenNichtGeladen = true;
+    const kopie = sichereWachenDefekt();
+    console.error(
+      `Wachen unlesbar – ${kopie ? `Kopie unter ${kopie}` : "Sicherung fehlgeschlagen"}. Jarvis startet ohne die Wachen aus ${WACHEN_FILE} und speichert keine, bis die Datei repariert ist und Jarvis neu startet.`,
+    );
+    return [];
+  }
+})();
+
+/** Vor jeder Änderung an dynamicWachen aufrufen: wirft, solange data/wachen.json beim Start unlesbar war. */
+export function pruefeWachenSchreibbar(): void {
+  if (wachenNichtGeladen) throw new Error(`${WACHEN_FILE} war beim Start unlesbar, Sir. Ich ändere keine Wachen, bis die Datei repariert ist und ich neu gestartet bin – sonst wäre der Bestand weg.`);
+}
 
 export function saveWachen(): void {
+  pruefeWachenSchreibbar();
   mkdirSync("data", { recursive: true, mode: 0o700 });
   writeFileSync(`${WACHEN_FILE}.tmp`, JSON.stringify(dynamicWachen, null, 2), { mode: 0o600 });
   renameSync(`${WACHEN_FILE}.tmp`, WACHEN_FILE);

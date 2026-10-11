@@ -1,4 +1,5 @@
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { mkdirSync, renameSync, writeFileSync } from "node:fs";
+import { gesperrtText, ladeListe } from "./datei.js";
 import { hhmm, imFenster, minutesOfDay, todayKey } from "./time.js";
 
 /** Wiederkehrende Aufgaben, die Jarvis von selbst erledigt und per Telegram meldet. */
@@ -17,9 +18,17 @@ export interface Zeitplan {
 }
 
 const FILE = "data/zeitplaene.json";
-export const zeitplaene: Zeitplan[] = (() => {
-  try { return JSON.parse(readFileSync(FILE, "utf8")) as Zeitplan[]; } catch { return []; }
-})();
+const geladen = ladeListe<Zeitplan>(FILE, "Zeitpläne");
+export const zeitplaene: Zeitplan[] = geladen.liste;
+/** true, wenn data/zeitplaene.json vorhanden, aber unlesbar war: keine Zeitpläne, und nichts wird gespeichert. */
+export const zeitplaeneNichtGeladen = geladen.nichtGeladen;
+export const ZEITPLAENE_UNLESBAR =
+  "⚠️ data/zeitplaene.json war beim Start unlesbar, Sir (Sicherung, sofern möglich, unter data/zeitplaene.json.defekt). Die Zeitpläne laufen nicht, und ich ändere keine, bis die Datei repariert ist und ich neu gestartet bin.";
+
+/** Vor jeder Änderung an zeitplaene aufrufen: wirft, solange die Datei beim Start unlesbar war. */
+export function pruefeZeitplaeneSchreibbar(): void {
+  if (zeitplaeneNichtGeladen) throw new Error(gesperrtText(FILE, "keine Zeitpläne"));
+}
 
 /** IDs, die schon gespeichert waren (Stand beim Laden bzw. beim letzten Speichern) – alles andere ist neu angelegt. */
 let gespeicherteIds = new Set(zeitplaene.map((z) => z.id));
@@ -29,6 +38,7 @@ let gespeicherteIds = new Set(zeitplaene.map((z) => z.id));
  * `angelegt`, damit ein Zeitplan, dessen Uhrzeit heute schon vorbei ist, nicht sofort «nachgeholt» wird.
  */
 export function saveZeitplaene(jetzt = new Date()): void {
+  pruefeZeitplaeneSchreibbar();
   for (const z of zeitplaene) {
     if (!gespeicherteIds.has(z.id) && z.lastRun === undefined && z.angelegt === undefined) z.angelegt = jetzt.toISOString();
   }

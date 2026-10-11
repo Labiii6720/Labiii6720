@@ -105,3 +105,28 @@ describe("profil_vergessen chronik: gescheitertes Archiv-Bereinigen lässt sich 
     }
   });
 });
+
+describe("ziel_setzen: Frist und Freigabe-Text", () => {
+  const ziel = beraterTools.find((t) => t.name === "ziel_setzen")!;
+
+  it("lehnt ungültige Fristen ab und speichert nichts, weder beim Anlegen noch beim Ändern", async () => {
+    profil.ziele = [];
+    for (const frist of ["2026-02-30", "31.12.2026", "2026-1-5", "morgen"]) {
+      await assert.rejects(ziel.run({ text: "Marathon", frist }, ctx), (e: Error) => e.message === "Frist bitte als JJJJ-MM-TT, Sir.");
+    }
+    assert.equal(profil.ziele.length, 0);
+
+    assert.equal(await ziel.run({ text: "Marathon", frist: "2027-04-30" }, ctx), `Ziel #${profil.ziele[0]!.id} gesetzt.`);
+    const id = profil.ziele[0]!.id;
+    await assert.rejects(ziel.run({ id, text: "Halbmarathon", frist: "2027-13-01" }, ctx), /JJJJ-MM-TT/);
+    assert.equal(profil.ziele[0]!.text, "Marathon");
+    assert.equal(profil.ziele[0]!.frist, "2027-04-30");
+  });
+
+  it("die summary zeigt Text, Status und Frist", () => {
+    const neu = ziel.summary!({ text: "Marathon", frist: "2027-04-30" });
+    assert.ok(neu.includes("Marathon") && neu.includes("Status offen") && neu.includes("Frist 2027-04-30"), neu);
+    const aendern = ziel.summary!({ id: 3, status: "erreicht", frist: "2027-05-01" });
+    assert.ok(aendern.includes("#3 ändern") && aendern.includes("(Text unverändert)") && aendern.includes("Status erreicht") && aendern.includes("Frist 2027-05-01"), aendern);
+  });
+});

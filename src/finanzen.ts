@@ -83,6 +83,10 @@ export const rechnungen: Rechnung[] = (() => {
   }
 })();
 
+/** Meldung für alle Anzeigen und Erinnerungen, solange die Datei beim Start unlesbar war */
+export const RECHNUNGEN_UNLESBAR =
+  "⚠️ data/rechnungen.json war beim Start unlesbar, Sir (Sicherung, sofern möglich, unter data/rechnungen.json.defekt). Bis die Datei repariert ist und ich neu gestartet bin, zeige ich keine Rechnungen und erinnere an keine.";
+
 const GESPERRT = `${FILE} war beim Start unlesbar, Sir. Ich speichere keine Rechnungen, bis die Datei repariert ist und ich neu gestartet bin – sonst wäre der Bestand weg.`;
 
 function pruefeSchreibbar(): void {

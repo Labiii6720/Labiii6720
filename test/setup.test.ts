@@ -228,6 +228,12 @@ describe("Prüffunktionen", () => {
   it("pruefeChatId", () => { ok(s.pruefeChatId, "12345", "-1001234567890"); nok(s.pruefeChatId, "abc", "1234", "12a45"); });
   it("pruefePin", () => { ok(s.pruefePin, "1234", "ab cd".replace(" ", "")); nok(s.pruefePin, "123", "12 34", "ab\tcd"); });
   it("pruefeUrl", () => { ok(s.pruefeUrl, "http://192.168.1.10:8123", "https://x.ch/pfad"); nok(s.pruefeUrl, "192.168.1.10", "ftp://x", "mqtt://x:1883", ""); });
+  it("pruefeUrl lehnt Zugangsdaten in der URL ab, ohne sie zu wiederholen", () => {
+    nok(s.pruefeUrl, "http://jarvis:geheim@192.168.1.20:5000", "https://nur-benutzer@x.ch", "http://:pw@x.ch");
+    const grund = s.pruefeUrl("http://jarvis:geheim@192.168.1.20:5000") ?? "";
+    assert.match(grund, /Zugangsdaten nicht in die URL/);
+    assert.ok(!grund.includes("geheim"));
+  });
   it("pruefeZeit", () => { ok(s.pruefeZeit, "00:00", "23:59", "05:45", "off"); nok(s.pruefeZeit, "24:00", "7:30", "12:60", "on", ""); });
   it("pruefeUhrzeit (kein off)", () => { ok(s.pruefeUhrzeit, "00:00", "23:59", "05:45"); nok(s.pruefeUhrzeit, "off", "24:00", "7:30", "12:60", ""); });
   it("BRIEFING_PREP_FROM kennt kein off, die Zeitpläne schon", () => {

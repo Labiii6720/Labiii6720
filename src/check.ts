@@ -1,7 +1,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { existsSync } from "node:fs";
 import { config, opt } from "./config.js";
-import { gesundheit } from "./robust.js";
+import { gesundheit, schwaerze } from "./robust.js";
 import { pruefeZeitfenster } from "./setup.js";
 import { state } from "./state.js";
 
@@ -31,7 +31,8 @@ async function pruefe(name: string, eingerichtet: boolean, test: () => Promise<s
   try {
     return { name, status: "ok", info: await test() };
   } catch (e) {
-    return { name, status: "fehler", info: (e instanceof Error ? e.message : String(e)).slice(0, 140) };
+    // Erst schwärzen, dann kürzen: Fehlertexte können URLs mit Zugangsdaten enthalten und gehen per /check nach Telegram.
+    return { name, status: "fehler", info: schwaerze(e instanceof Error ? e.message : String(e)).slice(0, 140) };
   }
 }
 
@@ -142,6 +143,17 @@ export async function selbsttest(nur?: string[], beiBefund?: (b: Befund) => void
     if (fenster !== "off" && von === bis) throw new Error(`ALEXA_NACHT «${config.alexaNacht}»: Fenster leer (Beginn gleich Ende); Nachtstimme nur im Nachtmodus`);
     const nacht = fenster === "off" ? "nur im Nachtmodus" : `${fenster} und im Nachtmodus`;
     return `Skill-ID gesetzt, leise Nachtstimme ${nacht}; Erreichbarkeit über den Tunnel im Alexa-Test-Tab prüfen`;
+  });
+  await lauf("Finanzen", true, async () => {
+    const f = await import("./finanzen.js");
+    if (f.rechnungenNichtGeladen) throw new Error("data/rechnungen.json unlesbar (Sicherung .defekt), bitte reparieren und neu starten");
+    return `${f.rechnungen.length} Rechnung(en) erfasst`;
+  });
+  await lauf("Wachen", true, async () => {
+    const k = await import("./cameras.js");
+    if (k.wachenNichtGeladen) throw new Error("data/wachen.json unlesbar (Sicherung .defekt), Wachen aus – bitte reparieren und neu starten");
+    if (k.camerasNichtGeladen) throw new Error("cameras.json unlesbar, Kameras, Meldungen und Wachen aus der Datei sind aus");
+    return `${k.allWachen().length} Wache(n) aktiv`;
   });
   await lauf("Protokolle", true, async () => `${Object.keys((await import("./protokolle.js")).protokolle).length} Protokoll(e)`);
   await lauf("Sicherheit", true, async () => {

@@ -9,6 +9,7 @@ import { activeTools, currentMode, stufeOf, type ToolContext, type ToolOutput } 
 import { ROOT } from "./workspace.js";
 import { persona } from "./persona.js";
 import { beraterPrompt } from "./berater.js";
+import { schwaerze } from "./robust.js";
 
 type Msg = Anthropic.MessageParam;
 
@@ -227,7 +228,8 @@ async function execute(use: Anthropic.ToolUseBlock, hooks: AgentHooks): Promise<
     audit("werkzeug", { tool: tool.name, input: brief, ok: true });
     return { content: toContent(out) };
   } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
+    // Fehlermeldungen tragen teils URLs mit Zugangsdaten (z. B. FRIGATE_URL): geschwärzt in Audit, Historie und API
+    const msg = schwaerze(e instanceof Error ? e.message : String(e));
     audit("werkzeug", { tool: tool.name, input: brief, ok: false, fehler: msg.slice(0, 200) });
     return { content: `Fehler: ${msg}`, is_error: true };
   }

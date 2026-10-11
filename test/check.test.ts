@@ -24,6 +24,8 @@ globalThis.fetch = (async (eingabe: string | URL | Request) => {
     throw Object.assign(new Error("This operation was aborted"), { name: "AbortError" });
   }
   aufrufe++;
+  // Wie Node/undici bei einer URL mit Zugangsdaten (FRIGATE_URL=http://user:pw@…)
+  if (/^\w+:\/\/[^/@\s]+@/.test(String(eingabe))) throw new TypeError(`Request cannot be constructed from a URL that includes credentials: ${eingabe}`);
   assert.ok(String(eingabe).startsWith("https://api.telegram.org/bot"), `unerwarteter Aufruf: ${eingabe}`);
   return new Response(JSON.stringify({ ok: true, result: { username: "jarvis_test_bot" } }), { headers: { "content-type": "application/json" } });
 }) as typeof fetch;
@@ -31,6 +33,13 @@ globalThis.fetch = (async (eingabe: string | URL | Request) => {
 const { nurAusArgv, selbsttest } = await import("../src/check.js");
 
 describe("selbsttest(nur)", () => {
+  it("Finanzen ohne rechnungen.json: ok mit Anzahl, ohne Netz", async () => {
+    aufrufe = 0;
+    const b = await selbsttest(["Finanzen"]);
+    assert.deepEqual(b, [{ name: "Finanzen", status: "ok", info: "0 Rechnung(en) erfasst" }]);
+    assert.equal(aufrufe, 0);
+  });
+
   it("nur Telegram: ein Befund, ok, genau ein fetch-Aufruf", async () => {
     aufrufe = 0;
     const b = await selbsttest(["Telegram"]);
@@ -115,6 +124,27 @@ describe("selbsttest: Alexa-Skill wertet ALEXA_NACHT wie die Laufzeit (nachtFens
     } finally {
       config.alexaNacht = vorher;
       delete process.env.ALEXA_SKILL_ID;
+    }
+  });
+});
+
+describe("selbsttest: Fehlertexte geschwärzt (gehen per /check nach Telegram)", () => {
+  it("FRIGATE_URL mit Passwort: Befund fehler, Passwort und Benutzer nicht im info", async () => {
+    const { config } = await import("../src/config.js");
+    const vorher = config.frigateUrl;
+    config.frigateUrl = "http://admin:geheimpw123@192.168.1.20:5000";
+    aufrufe = 0;
+    try {
+      const b = await selbsttest(["Frigate"]);
+      assert.equal(b.length, 1);
+      assert.equal(b[0].status, "fehler");
+      assert.equal(aufrufe, 1);
+      assert.match(b[0].info, /credentials/);
+      assert.doesNotMatch(b[0].info, /geheimpw123/);
+      assert.doesNotMatch(b[0].info, /admin:/);
+      assert.match(b[0].info, /<geheim>@192\.168\.1\.20/);
+    } finally {
+      config.frigateUrl = vorher;
     }
   });
 });

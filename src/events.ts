@@ -115,7 +115,8 @@ async function briefingNachliefern(schonZugestellt: boolean): Promise<void> {
  *                                                     mit kopie "telegram" zusätzlich als Text an Telegram. Nie über den Tunnel.
  *                                                     Nicht fertig → { ok: false, bereit: false, text: "" }, Nachlieferung per Telegram.
  *                                                     Notaus/Notfall → { ok: false, bereit: false, text: "", gesperrt: true }, kein Abruf.
- *   { "event": "nachricht", "text": "…" }           → Text 1:1 per Telegram
+ *   { "event": "nachricht", "text": "…" }           → Text 1:1 per Telegram (über den Postausgang: im Notfall
+ *                                                     zurückgehalten bis /entwarnung, bei Störung nachgereicht)
  *   { "event": "frage", "text": "…" }               → Jarvis bearbeitet den Text mit allen Werkzeugen, Antwort per Telegram
  *   { "event": "frage_sync", "text": "…", "budget": 25000, "kanal": "stimme" }
  *                                                   → Antwort kommt direkt zurück (Gesten-Konsole, Siri-Kurzbefehl); dauert es
@@ -199,7 +200,8 @@ export async function handleEvent(req: Request, res: Response): Promise<void> {
       }
       case "nachricht":
         if (!text) throw new Error("text fehlt");
-        await sendText(text);
+        // Über den Postausgang: im Notfall wartet die Hausmeldung bis /entwarnung, bei Störung wird sie nachgereicht
+        await sendeSpaeter(text);
         break;
       case "frage": {
         if (!text) throw new Error("text fehlt");

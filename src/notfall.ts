@@ -1,6 +1,6 @@
 import type { Request, Response } from "express";
 import { timingSafeEqual } from "node:crypto";
-import { audit } from "./audit.js";
+import { audit, throttled } from "./audit.js";
 import { config } from "./config.js";
 import { save, state } from "./state.js";
 import { fehlerDetail } from "./robust.js";
@@ -78,6 +78,9 @@ export async function handlePanic(req: Request, res: Response): Promise<void> {
   const token = config.panicToken;
   const given = (req.header("authorization") ?? "").replace(/^Bearer\s+/i, "");
   if (!token || given.length !== token.length || !timingSafeEqual(Buffer.from(given), Buffer.from(token))) {
+    // Spur sichern, höchstens einmal pro Minute (der Endpunkt hängt am Tunnel). Bewusst kein abuseSignal und keine
+    // Telegram-Meldung: sonst könnte jeder aus dem Internet den Notfall auslösen oder den Chat fluten.
+    if (throttled("notfall_abgewiesen", 1 / 60)) audit("notfall_abgewiesen", { ip: String(req.header("cf-connecting-ip") ?? req.ip ?? "") });
     res.status(401).json({ ok: false });
     return;
   }

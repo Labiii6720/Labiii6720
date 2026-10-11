@@ -170,6 +170,8 @@ sudo systemctl enable --now jarvis
 journalctl -u jarvis -f
 ```
 
+Der Dienst läuft mit `NODE_ENV=production` (nur der Prozess). Abhängigkeiten installierst du wie oben mit `npm ci` ohne diese Variable, denn `npm start` braucht `tsx` aus den devDependencies. Nach einer Änderung an `jarvis.service`: `sudo cp jarvis.service /etc/systemd/system/ && sudo systemctl daemon-reload && sudo systemctl restart jarvis`.
+
 ## 8. Interaktiver Jarvis per Telegram
 
 Schreib deinem Bot, und Jarvis antwortet mit Werkzeugen: Kalender, Mails, Code und Websites, Shopify, Smart Home, Websuche, Erinnerungen und Notizen. Es braucht nur `TELEGRAM_BOT_TOKEN` und `TELEGRAM_CHAT_ID` aus Etappe 1; alles andere ist optional und schaltet sich frei, sobald die Werte in `.env` stehen.
@@ -180,8 +182,8 @@ Jedes Werkzeug hat eine Stufe. Das ist die Freigabe-Warteschlange aus dem Reel, 
 
 | Stufe | Beispiele | Was passiert |
 |---|---|---|
-| auto | lesen, Wetter, Dateien im Arbeitsordner, Mail-Entwurf, Licht schalten | läuft sofort |
-| extern | Mail senden, Termin anlegen, Garage, Shell-Befehl | Jarvis legt einen Auftrag an, du tippst ✅ oder ❌ |
+| auto | lesen, Wetter, Dateien im Arbeitsordner, Mail-Entwurf, Licht schalten, kurze Eingabe ins Suchfeld ohne Absenden | läuft sofort |
+| extern | Mail senden, Termin anlegen, Garage, Shell-Befehl, Formular absenden oder Klick im Browser, Zeitplan oder Wache anlegen und löschen | Jarvis legt einen Auftrag an, du tippst ✅ oder ❌ |
 | sensibel | Shop-Preis ändern, Schloss, Alarmanlage | wie extern, zusätzlich fragt Jarvis deine PIN (`JARVIS_PIN`) |
 
 Jarvis sagt dir im Chat, dass ein Auftrag wartet, und meldet nach der Freigabe das Ergebnis. Die PIN-Nachricht löscht er danach aus dem Chat.
@@ -237,7 +239,7 @@ Ohne Installation liest Jarvis Webseiten mit `seite_lesen` (schnell, ohne JavaSc
 sudo apt install chromium        # Raspberry Pi OS / Debian
 ```
 
-Jarvis findet Chromium selbst; sonst `BROWSER_PATH` setzen. Danach kann er Seiten öffnen, in Suchfelder tippen, klicken, zurück und Screenshots machen, die er selbst anschaut und dir auf Wunsch aufs Handy schickt. Der Browser läuft mit frischem Profil: keine Logins, keine Cookies, keine Downloads. Trotzdem gilt: Jarvis darf nie Logins, Bestellungen oder persönliche Daten in Formulare tippen, das steht in seinen Regeln. Chromium braucht einige hundert MB RAM; auf einem Pi mit 4 GB geht das, ein Mini-PC ist entspannter. Playwright ist auf seine eigene Chromium-Version abgestimmt; das System-Chromium funktioniert meist, bei Problemen `BROWSER_PATH` auf eine andere Chrome/Chromium-Installation zeigen lassen.
+Jarvis findet Chromium selbst; sonst `BROWSER_PATH` setzen. Danach kann er Seiten öffnen, in Suchfelder tippen, klicken, zurück und Screenshots machen, die er selbst anschaut und dir auf Wunsch aufs Handy schickt. Der Browser läuft mit frischem Profil: keine Logins, keine Cookies, keine Downloads. Trotzdem gilt: Jarvis darf nie Logins, Bestellungen oder persönliche Daten in Formulare tippen, das steht in seinen Regeln. Zusätzlich braucht jedes Absenden (Enter), jeder Klick und jede Eingabe über 60 Zeichen deine Freigabe; ohne Rückfrage tippt er nur kurze Suchbegriffe, ohne abzusenden. Links öffnet er direkt über ihre Adresse. Chromium braucht einige hundert MB RAM; auf einem Pi mit 4 GB geht das, ein Mini-PC ist entspannter. Playwright ist auf seine eigene Chromium-Version abgestimmt; das System-Chromium funktioniert meist, bei Problemen `BROWSER_PATH` auf eine andere Chrome/Chromium-Installation zeigen lassen.
 
 Beispiele: «Such mir die nächste Verbindung von Muttenz nach Basel», «Was kostet der Mini-PC X bei Digitec, mach mir einen Screenshot», «Lies diesen Artikel und fass ihn zusammen: …».
 
@@ -261,7 +263,7 @@ Eine echte Freisprech-Stimme im Raum (Wakeword, Mikrofon, Lautsprecher) bleibt d
 
 ### Selbständige Zeitpläne
 
-«Richte mir werktags um 7 eine Zusammenfassung der wichtigsten News zu Zutrittskontrolle ein» – Jarvis legt einen Zeitplan an, erledigt den Auftrag zur Zeit von selbst (mit allen Werkzeugen, inklusive Browser) und schickt das Ergebnis per Telegram. Verwalten mit «Zeig mir meine Zeitpläne» und «Lösch Zeitplan 2». Jeder Zeitplan läuft höchstens einmal pro Tag.
+«Richte mir werktags um 7 eine Zusammenfassung der wichtigsten News zu Zutrittskontrolle ein» – Jarvis legt einen Zeitplan an, erledigt den Auftrag zur Zeit von selbst (mit allen Werkzeugen, inklusive Browser) und schickt das Ergebnis per Telegram. Verwalten mit «Zeig mir meine Zeitpläne» und «Lösch Zeitplan 2»; Anlegen und Löschen warten auf dein Tippen. Jeder Zeitplan läuft höchstens einmal pro Tag.
 
 ## 10. Erstes eigenes Gerät: Jarvis Node 1
 
@@ -320,7 +322,7 @@ Home Assistant kann Jarvis anstossen. Dafür in `.env` ein Geheimnis setzen (`JA
 - Person im Raum (Frigate über Home Assistant) → Kamera-Meldung an Jarvis (Abschnitt 12). Ohne Frigate löst sie nie aus.
 - Satelliten: 22:00 Nachtmodus an, 06:30 aus, 06:35 Lautstärke 60 («Satellit Nachtmodus», «Lautstärke tagsüber 60», Abschnitt 20). Sie schalten fest `switch.jarvis_satellit_nachtmodus`, `switch.jarvis_satellit_bad_nachtmodus`, `number.jarvis_satellit_lautstarke` und `number.jarvis_satellit_bad_lautstarke`. Ohne Satelliten diese beiden Automationen aus dem Paket löschen, mit nur einem die Entitäten des fehlenden streichen; sonst meldet Home Assistant jeden Abend und Morgen fehlende Entitäten im Log.
 
-Eigene Ereignisse: `{"event": "frage", "text": "…"}` lässt Jarvis mit allen Werkzeugen arbeiten, `{"event": "nachricht", "text": "…"}` schickt einen Text 1:1. So wird aus jedem Sensor ein Auslöser für Jarvis.
+Eigene Ereignisse: `{"event": "frage", "text": "…"}` lässt Jarvis mit allen Werkzeugen arbeiten, `{"event": "nachricht", "text": "…"}` schickt einen Text 1:1. Der Text geht über den Postausgang. Während eines Notfalls wird er zurückgehalten und erst nach `/entwarnung` zugestellt. Bei einer Telegram-Störung wird er nachgereicht (Präfix «(nachgereicht, HH:MM)»). So wird aus jedem Sensor ein Auslöser für Jarvis.
 
 ### Weitere Geräte
 
@@ -362,7 +364,7 @@ Frigate läuft als Docker-Container oder als Home-Assistant-Add-on. `frigate/con
 
 ### Jarvis anbinden
 
-In `.env`: `FRIGATE_URL=http://FRIGATE-IP:5000`, für Live-Meldungen `MQTT_URL`, `MQTT_USER`, `MQTT_PASSWORD` (derselbe Broker wie bei Frigate), optional `HA_PRESENCE_ENTITY=person.DEINNAME` für «nur wenn abwesend». Dann `cameras.example.json` nach `cameras.json` kopieren und anpassen:
+In `.env`: `FRIGATE_URL=http://FRIGATE-IP:5000` (ohne Benutzer und Passwort in der Adresse, fetch kann sie nicht nutzen; `npm run setup` lehnt das bei allen HTTP-Adressen ab), für Live-Meldungen `MQTT_URL`, `MQTT_USER`, `MQTT_PASSWORD` (derselbe Broker wie bei Frigate), optional `HA_PRESENCE_ENTITY=person.DEINNAME` für «nur wenn abwesend». Dann `cameras.example.json` nach `cameras.json` kopieren und anpassen:
 
 ```json
 "raum": {
@@ -468,7 +470,7 @@ Einmal pro Woche schickt Jarvis dir eine Finanz-Übersicht nach Telegram, standa
 
 Damit die Zahlungen im richtigen Monat landen, merkt sich Jarvis seit 0.18 beim Abhaken («Hak #3 als bezahlt ab») das Datum (`bezahltAm`); setzt du eine Rechnung wieder auf ignoriert, verschwindet es. Ältere bezahlte Rechnungen ohne Datum zählen im Monat ihrer Fälligkeit (ohne Frist: wann sie erkannt wurde), erscheinen aber nicht unter «bezahlt letzte Woche».
 
-Sofort: `/finanzen` in Telegram. Fürs Dashboard liefert `GET /api/finanzen` (nur Heimnetz/Tailscale, Token wie bei allen `/api/*`) dieselbe Übersicht als JSON; die Rechnungen darin enthalten nur Nummer, Empfänger, Betrag, Währung, Fälligkeit, Zahldatum und Status, keine IBAN und keine Referenz.
+Sofort: `/finanzen` in Telegram. War `data/rechnungen.json` beim Start unlesbar, sagt `/finanzen` das (Sicherung unter `data/rechnungen.json.defekt`), ebenso Erinnerung und Wochenbericht einmal am Tag, das Werkzeug `rechnungen_offen`, `npm run check` (Befund «Finanzen») und das Dashboard (`/api/finanzen` mit HTTP 503); gespeichert wird nichts, bis die Datei repariert und Jarvis neu gestartet ist. Fürs Dashboard liefert `GET /api/finanzen` (nur Heimnetz/Tailscale, Token wie bei allen `/api/*`) dieselbe Übersicht als JSON; die Rechnungen darin enthalten nur Nummer, Empfänger, Betrag, Währung, Fälligkeit, Zahldatum und Status, keine IBAN und keine Referenz.
 
 Der Bericht kommt ohne Claude aus, kostet also keine Tokens, und die Rechnungsdaten verlassen den Pi nur Richtung Telegram. Ohne erfasste Rechnungen bleibt es still. Notaus und Notfall halten ihn an (nach `/weiter` holt Jarvis ihn im Nachholfenster `ZEITPLAN_NACHHOLEN_MIN` nach). Im Notfall gibt Jarvis keine Finanzdaten heraus, weder per `/finanzen` noch über den Endpunkt; kommt der Notfall mitten im Versand, geht der Rest weder hinaus noch in den Postausgang. **Bezahlt wird nie etwas:** der Bericht zeigt nur, du zahlst selbst in der Bank-App.
 
@@ -513,11 +515,13 @@ Von Hand: `/verdichten` verdichtet sofort und antwortet mit dem Bericht, `/verdi
 
 ### Notfall-Protokoll (defensiv, legal)
 
-Auslöser: `/notfall` in Telegram, der Panik-Endpunkt `POST /notfall` fürs Handy (eigener Token `JARVIS_PANIC_TOKEN`), oder automatisch bei fünf unbefugten Zugriffen in fünf Minuten (fremde Chats, falsche Tokens). Dann macht Jarvis Folgendes:
+Auslöser: `/notfall` in Telegram, der Panik-Endpunkt `POST /notfall` fürs Handy (eigener Token `JARVIS_PANIC_TOKEN`), oder automatisch bei fünf unbefugten Zugriffen in fünf Minuten (fremde Chats, falsche Tokens, falsche PINs; eine falsche PIN über Telegram zählt wie im Dashboard). Ein falscher Token an `POST /notfall` zählt bewusst nicht dazu, sonst könnte jeder aus dem Internet den Notfall auslösen: Jarvis antwortet mit 401 und hält den Versuch höchstens einmal pro Minute als `notfall_abgewiesen` im Audit fest (IP, nie der Token). Dann macht Jarvis Folgendes:
 
 1. **Isolieren:** Notaus an. Keine Werkzeuge, keine Zeitpläne, keine Wachen, keine Freigaben. Jarvis gibt keine Daten mehr heraus.
 2. **Alarmieren:** sofortige Telegram-Nachricht mit dem Grund und der Checkliste zum Sperren aller Schlüssel (ist Telegram gestört, vorn im Postausgang und nachgereicht; älterer Postausgang bleibt bis zur Entwarnung liegen).
 3. **Spuren:** alles steht in `data/audit.log`.
+
+Im Notfall gesperrt sind in Telegram `/vorgaenge`, `/finanzen`, `/protokoll`, `/check` und der Clip-Knopf; `/auftraege` nennt nur Anzahl und Nummern, `/status` keine Einzelheiten. Datei-, Bild-, Clip- und Sprach-Uploads gehen im Notfall nie hinaus, auch nicht, wenn er erst während eines laufenden Downloads kommt.
 
 `/entwarnung` hebt den Notfall auf, bewusst nur über Telegram. Im Notfall hebt nur `/entwarnung` auf; `/weiter` lehnt ab, und Jarvis verweist bei jeder Anfrage auf `/entwarnung`.
 
@@ -581,7 +585,7 @@ Damit ist der Kern aus dem Film komplett: der Ort, an dem du siehst, was Jarvis 
 
 ### Selbsttest
 
-`npm run check` auf dem Pi oder `/check` in Telegram prüft jede eingerichtete Anbindung mit einem echten, billigen Aufruf und sagt, was läuft (✅), was fehlt (➖) und was kaputt ist (❌): Claude-Modelle gültig, Telegram, WHOOP, beide Kalender, Gmail, Home Assistant, Frigate, MQTT, Shopify, Browser, Werkstatt, Drucker, Slicer, Stimme, Alexa, und ein Sicherheits-Check (PIN, Token, Heimnetz-Sperre, Freigaben, Panik-Token). Das ist dein erster Griff nach jeder Einrichtung und bei jeder Störung. Es kostet keine Tokens.
+`npm run check` auf dem Pi oder `/check` in Telegram prüft jede eingerichtete Anbindung mit einem echten, billigen Aufruf und sagt, was läuft (✅), was fehlt (➖) und was kaputt ist (❌): Claude-Modelle gültig, Telegram, WHOOP, beide Kalender, Gmail, Home Assistant, Frigate, MQTT, Shopify, Browser, Werkstatt, Drucker, Slicer, Stimme, Alexa, Protokolle, Finanzen (meldet eine unlesbare `data/rechnungen.json`), und ein Sicherheits-Check (PIN, Token, Heimnetz-Sperre, Freigaben, Panik-Token). Das ist dein erster Griff nach jeder Einrichtung und bei jeder Störung. Es kostet keine Tokens. Im Notfall ist `/check` in Telegram gesperrt (der Test fragt alle Dienste mit womöglich kompromittierten Zugängen ab und nennt Anwesenheit, Recovery und Termine).
 
 Nur einzelne Anbindungen: `npm run check -- --nur Telegram,Frigate` (Namen wie in der Ausgabe, Gross-/Kleinschreibung egal; ein unbekannter Name erscheint als ❌ «unbekannte Prüfung»). Die anderen Prüfungen laufen dann gar nicht, also auch ohne Netzaufruf. So prüft der Einrichtungs-Assistent nach jedem Abschnitt.
 
@@ -613,7 +617,9 @@ Netz und Dienste fallen aus, Jarvis nicht. Seit 0.16 ordnet er jeden Fehler ein 
 
 **Internetausfall.** Das Telegram-Polling geht in den Backoff, Claude-Aufrufe scheitern leise, die Gesundheit merkt sich die Störung. Zeitpläne, Rückblick, Rechnungs-Erinnerung, Zielcheck und Verdichtung markieren einen Lauf erst **nach** Erfolg als erledigt. Schlägt er vorübergehend fehl oder ist das Internet weg, bleibt er offen und wird im **Nachholfenster** erneut versucht (frühestens alle 5 Minuten, eine Log-Zeile pro Störung). Hat ein Lauf schon etwas bewirkt (Notiz, Erinnerung, Freigabe-Auftrag), wird er nicht wiederholt, sondern einmal gemeldet; reine Lesewerkzeuge (Wetter, Kalender, Gerätestatus …) zählen dabei nicht. `ZEITPLAN_NACHHOLEN_MIN` (Standard 60) legt fest, wie viele Minuten nach der Uhrzeit das noch gilt; `0` heisst nur zur Minute wie früher. Ein Zeitplan um 07:00 kommt also bei einem Ausfall bis 07:40 noch, bei einem bis 08:30 nicht mehr. Ein dauerhafter Fehler (etwa ein abgelehnter Schlüssel) wird einmal gemeldet und der Lauf als erledigt markiert, sonst würde er bis zum Fensterende alle 5 Minuten scheitern. Beim ersten Start ohne `data/routinen.json` (Update auf 0.16) gilt jede Routine, deren Uhrzeit heute schon vorbei ist, für heute als erledigt – lieber einmal nichts als doppelt.
 
-**Postausgang.** Meldungen, die Jarvis von selbst schickt (Zeitpläne, Rückblick, Rechnungen, Zielcheck, Erinnerungen, Wachen-Texte, Watchdog, Notfall-Alarm samt Checkliste), landen in `data/postausgang.json`, wenn Telegram trotz Wiederholung nicht erreichbar ist (höchstens 100, die ältesten fliegen raus). Jede Minute probiert Jarvis es erneut und reicht sie in Reihenfolge nach, mit dem Vermerk «(nachgereicht, 14:32)». Bilder gehen direkt mit Wiederholung; ein Clip-Knopf Stunden später hilft ohnehin nicht mehr. Beim Start steht im Log, wie viele Nachrichten warten. Der Notfall-Alarm und Antworten auf Freigaben haben Vorrang: Sie gehen sofort raus, auch wenn etwas wartet, und landen bei einer Störung vorn statt hinter dem Rückstand. Während eines Notfalls reicht Jarvis nur nach, was seit der Auslösung abgelegt wurde; Älteres bleibt bis `/entwarnung` liegen. Ergebnisse von Vorgängen und Freigaben enthalten Daten: Im Notfall gehen sie weder hinaus noch in den Postausgang, und ein Notfall mitten im Versand hält die restlichen Teile zurück.
+**Postausgang.** Meldungen, die Jarvis von selbst schickt (Zeitpläne, Rückblick, Rechnungen, Zielcheck, Erinnerungen, Wachen-Texte, Watchdog, Notfall-Alarm samt Checkliste, Hausmeldungen aus Home Assistant über `/events` `nachricht`), landen in `data/postausgang.json`, wenn Telegram trotz Wiederholung nicht erreichbar ist (höchstens 100, die ältesten fliegen raus). Jede Minute probiert Jarvis es erneut und reicht sie in Reihenfolge nach, mit dem Vermerk «(nachgereicht, 14:32)». Bilder gehen direkt mit Wiederholung; ein Clip-Knopf Stunden später hilft ohnehin nicht mehr. Beim Start steht im Log, wie viele Nachrichten warten. Der Notfall-Alarm und Antworten auf Freigaben haben Vorrang: Sie gehen sofort raus, auch wenn etwas wartet, und landen bei einer Störung vorn statt hinter dem Rückstand. Während eines Notfalls gehen nur der Alarm und die neutrale Freigabe-Meldung hinaus (Vorrang, nach der Auslösung fällig). Alles andere wartet im Postausgang bis `/entwarnung`, auch gewöhnliche Meldungen, die erst nach der Auslösung entstehen (Watchdog, «Vorgang angehalten», abgebrochene Zeitpläne, Verdichtungsbericht). Ergebnisse von Vorgängen und Freigaben enthalten Daten: Im Notfall gehen sie weder hinaus noch in den Postausgang, und ein Notfall mitten im Versand hält die restlichen Teile zurück.
+
+**Unlesbare Dateien.** Ist eine der Listen in `data/` beim Start vorhanden, aber unlesbar (abgeschnittenes JSON nach einem Stromausfall, falsche Rechte), startet Jarvis ohne sie, statt sie beim nächsten Speichern zu überschreiben. Das gilt für `wachen.json`, `zeitplaene.json`, `erinnerungen.json`, `vorgaenge.json` und `postausgang.json` (dazu `rechnungen.json`, `profil.json` und `state.json`, siehe dort). Kaputtes JSON wird zuerst nach `<datei>.defekt` kopiert (Rechte 600, eine ältere Sicherung bleibt, die neue bekommt einen Zeitstempel); das Log nennt nur die Datei, nie den Inhalt. Bis die Datei repariert ist und Jarvis neu startet, ändert er dort nichts: `wache_erstellen`, `wache_loeschen`, `zeitplan_erstellen`, `zeitplan_loeschen`, `erinnerung` und `/vorgang` lehnen mit einem Hinweis ab, die Anzeigen (`wachen_anzeigen`, `zeitplaene_anzeigen`, `/vorgaenge`) sagen es, statt eine leere Liste zu zeigen. Nur der Postausgang speichert dann still nicht und hält neue Meldungen im Speicher, damit bei einer Störung nichts verloren geht. Beim Start meldet Jarvis jede betroffene Datei einmal per Telegram (mit Vorrang), `/status` zeigt die Hinweise, `/status.json` liefert `wachenUnlesbar`, `camerasUnlesbar`, `zeitplaeneUnlesbar` und `vorgaengeUnlesbar`, und `npm run check` hat den Befund «Wachen» (❌ bei unlesbarer `wachen.json` oder `cameras.json`).
 
 **Watchdog.** Jede überwachte Anbindung (Claude, Telegram senden und empfangen, Home Assistant, Frigate, MQTT, WHOOP, Wetter, Kalender, Shopify, Stimme, OctoPrint) hat einen Gesundheitszustand; Gmail läuft noch ohne (Lesen ohne Wiederholung, Senden bewusst nicht), ein Fehler dort zeigt sich nur in der jeweiligen Antwort und in `/check`. Ist sie `WATCHDOG_MINUTEN` lang (Standard 10, `0` = aus) am Stück gestört, meldet Jarvis das genau einmal: «Sir, Home Assistant antwortet seit 12 Minuten nicht (HTTP 502). Ich versuche es weiter.» Kommt sie zurück: «Home Assistant ist wieder erreichbar (Ausfall 25 Minuten).» Bei einem Internetausfall gibt es eine Sammelmeldung («Sir, die Internetverbindung ist seit 10 Minuten gestört.») statt einer je Anbindung; die Meldungen gehen über den Postausgang, kommen also nach, sobald Telegram wieder geht. Im Log steht der erste Fehler einer Störung und danach höchstens alle 10 Minuten eine Zeile, nicht jeder Versuch. `/check` in Telegram hängt den Stand an («❌ homeassistant seit 12 Min: HTTP 502»), das Dashboard liefert ihn unter `/status.json` als `gesundheit`. Fehlertexte werden vor dem Loggen geschwärzt (Bot-Token, Schlüssel, Zugangsdaten in URLs).
 
@@ -688,7 +694,7 @@ Ziel ist nicht «unhackbar», das gibt es nicht. Ziel ist: Wer eine Schicht durc
 |---|---|
 | Angreifer aus dem Internet | Kein offener Port. Über den Cloudflare Tunnel erreicht nur `/alexa` den Pi, und dort wird jede Anfrage auf Amazons Signatur, Zeitstempel und deine Skill-ID geprüft. `/events` und `/gesture` antworten von aussen mit 404 (`EVENTS_VIA_TUNNEL=off`, Standard). Dashboard und /api/* antworten über den Tunnel immer mit 404, auch mit EVENTS_VIA_TUNNEL=on. |
 | Gestohlene Geheimnisse (`.env`, `data/`) | Eigener Systembenutzer ohne Login, Dateirechte 600, gehärteter Dienst, Festplattenverschlüsselung, Widerrufsplan unten. Die Tokens in `data/state.json` sind die Kronjuwelen: Gmail und WHOOP verlangen bei Verlust nur einen Klick zum Widerruf. |
-| Eingeschleuste Anweisungen in Mails, Webseiten, Terminen | Inhalte sind für Jarvis Daten. Alles, was nach aussen geht (Mail senden, Preise, Geräte, lange Adressen mit eingebetteten Daten, dauerhafte Zeitpläne und Wachen), wird zum Auftrag und wartet auf dein Tippen. Der schlimmste Fall ist ein Vorschlag, den du ablehnst. |
+| Eingeschleuste Anweisungen in Mails, Webseiten, Terminen | Inhalte sind für Jarvis Daten. Alles, was nach aussen geht (Mail senden, Preise, Geräte, lange Adressen mit eingebetteten Daten, Formulare und Klicks im Browser, dauerhafte Zeitpläne und Wachen anlegen oder löschen), wird zum Auftrag und wartet auf dein Tippen. Der schlimmste Fall ist ein Vorschlag, den du ablehnst. |
 | Übernahme deines Telegram-Kontos | Nur deine Chat-ID, PIN für sensible Aufträge, Notaus `/pause`, Alarm bei fremden Chats. Dazu auf deiner Seite: Telegram-Zweifaktor und Passcode-Sperre. |
 | Dienste in der Cloud (Anthropic, Google, Amazon) | Datensparsamkeit: WHOOP-Rohwerte, Outlook-Titel und Kamerabilder gehen nur dann an die API, wenn du es ausdrücklich willst. Laut Anthropics API-Bedingungen werden Eingaben standardmässig nicht zum Training genutzt; prüf das selbst und bleib bei der API, nicht bei einem Abo-Login. |
 | Jemand mit physischem Zugang zum Pi | Verschlüsselte Platte, kein Autologin, Backups verschlüsselt. |

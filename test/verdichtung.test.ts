@@ -673,6 +673,23 @@ describe("verdichteJetzt", () => {
     assert.ok(text.includes("2026-06 (2 Entscheidungen):"), text);
   });
 
+  it("nurVorschau: Notaus während des Modellaufrufs gibt keine Vorschau heraus", async () => {
+    try {
+      const r = await v.verdichteJetzt({
+        heute: HEUTE,
+        nurVorschau: true,
+        frage: async () => {
+          state.paused = true;
+          return JSON.stringify(gueltig());
+        },
+      });
+      assert.deepEqual(r, { fehler: "Notaus aktiv, nichts geändert." });
+      assert.equal(datei(ARCHIV), undefined);
+    } finally {
+      state.paused = false;
+    }
+  });
+
   it("nurVorschau mit ungültigem Vorschlag: Vorschau und Grund, trotzdem nichts geschrieben", async () => {
     const x = gueltig();
     x.chronik.push({ monat: "2026-09", text: "zu neu", entscheidungen: 1 });

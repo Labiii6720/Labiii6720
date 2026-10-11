@@ -64,7 +64,10 @@ export function pruefePin(wert: string): string | undefined {
 export function pruefeUrl(wert: string): string | undefined {
   try {
     const u = new URL(wert);
-    return u.protocol === "http:" || u.protocol === "https:" ? undefined : "nur http:// oder https://";
+    if (u.protocol !== "http:" && u.protocol !== "https:") return "nur http:// oder https://";
+    // Alle Felder hier gehen an fetch, und fetch lehnt solche URLs ab (MQTT_URL läuft nicht über diese Prüfung)
+    if (u.username || u.password) return "Zugangsdaten nicht in die URL (fetch kann sie nicht nutzen)";
+    return undefined;
   } catch {
     return "keine gültige URL (http://host:port)";
   }

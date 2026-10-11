@@ -118,4 +118,13 @@ describe("Protokolle: Notaus und Notfall", () => {
     assert.deepEqual(aufrufe, []);
     assert.match(out, /✓ pause/);
   });
+
+  it("Fehlertext eines Schritts mit Zugangsdaten in der URL wird geschwärzt", async () => {
+    vorAntwort = () => { throw new TypeError("Request cannot be constructed from a URL that includes credentials: http://u:pw-geheim@ha.test:8123/api/services/light/turn_on"); };
+    const out = await runProtokoll("werkstatt", ctx);
+    assert.match(out, /✗ geraet_schalten: /);
+    assert.match(out, /<geheim>@ha\.test/);
+    assert.doesNotMatch(out, /pw-geheim/);
+    assert.doesNotMatch(out, /u:pw/);
+  });
 });

@@ -6,7 +6,7 @@ import { hooks, sendeSpaeter } from "./telegram.js";
 import { state } from "./state.js";
 import { hhmm, imFenster, minutesOfDay, todayKey } from "./time.js";
 import { faelligIm, saveZeitplaene, zeitplaene } from "./zeitplaene.js";
-import { finanzUebersicht, formatRechnung, offeneRechnungen, rechnungen, wochenberichtText } from "./finanzen.js";
+import { finanzUebersicht, formatRechnung, offeneRechnungen, RECHNUNGEN_UNLESBAR, rechnungen, rechnungenNichtGeladen, wochenberichtText } from "./finanzen.js";
 import { profil } from "./profil.js";
 import { gesundheit, schwaerze, voruebergehend } from "./robust.js";
 import { berichtText, hatAenderungen, verdichteJetzt, verdichtungLaeuft } from "./verdichtung.js";
@@ -81,14 +81,16 @@ const routinen: Routinen = (() => {
   }
 })();
 
-/** Schreibt den Stand atomar (tmp + rename, 0o600); scheitert das Speichern, gilt der Stand bis zum Neustart. */
-function speichereRoutinen(r: Routinen): void {
+/** Schreibt den Stand atomar (tmp + rename, 0o600); scheitert das Speichern, gilt der Stand bis zum Neustart. Rückgabe: gespeichert? */
+function speichereRoutinen(r: Routinen): boolean {
   try {
     mkdirSync("data", { recursive: true, mode: 0o700 });
     writeFileSync(`${ROUTINEN_DATEI}.tmp`, JSON.stringify(r, null, 2), { mode: 0o600 });
     renameSync(`${ROUTINEN_DATEI}.tmp`, ROUTINEN_DATEI);
+    return true;
   } catch (e) {
     log(e);
+    return false;
   }
 }
 
@@ -99,13 +101,18 @@ function merkeRoutine(schluessel: RoutinenTag, tag: string): void {
   speichereRoutinen(routinen);
 }
 
-/** Startvermerk setzen und sofort speichern; Vermerke anderer Tage fallen dabei weg. */
-function merkeBegonnen(schluessel: string, tag: string): void {
-  const begonnen = routinen.begonnen ?? {};
-  for (const [k, v] of Object.entries(begonnen)) if (v !== tag) delete begonnen[k];
+/**
+ * Startvermerk setzen und sofort speichern; Vermerke anderer Tage fallen dabei weg (die aus der Zeit vor dem Neustart hat
+ * `unterbrocheneAbarbeiten` dann schon gemeldet), ausser der Lauf dazu ist noch in Arbeit. Rückgabe false: nicht auf der Platte –
+ * der Speicherstand bleibt dann unverändert, denn ein Vermerk nur im Speicher schützt nach einem Absturz vor nichts.
+ */
+function merkeBegonnen(schluessel: string, tag: string): boolean {
+  const begonnen: Record<string, string> = {};
+  for (const [k, v] of Object.entries(routinen.begonnen ?? {})) if (v === tag || laufend.has(k)) begonnen[k] = v;
   begonnen[schluessel] = tag;
+  if (!speichereRoutinen({ ...routinen, begonnen })) return false;
   routinen.begonnen = begonnen;
-  speichereRoutinen(routinen);
+  return true;
 }
 
 function vergissBegonnen(schluessel: string): void {
@@ -127,6 +134,66 @@ async function nachNeustartAbhaken(schluessel: string, titel: string, today: str
     .sendeSpaeter(`⚠️ ${titel} wurde durch einen Neustart unterbrochen, das Ergebnis ist unklar. Ich wiederhole ihn nicht, um nichts doppelt auszuführen – bitte prüfen Sie es, Sir.`)
     .catch(log);
   return true;
+}
+
+/** «2026-10-19» → «19.10.2026» */
+const datumCH = (tag: string) => tag.split("-").reverse().join(".");
+
+/** Bei Läufen mit Werkzeugen: Ist der Lauf für `tag` schon abgehakt? Dann hat ihn der alte Prozess beendet, nur der Vermerk blieb stehen. */
+function schonAbgehakt(schluessel: string, tag: string): boolean {
+  if (schluessel === "rueckblick" || schluessel === "zielcheck") return (routinen[schluessel] ?? "") >= tag;
+  const z = zeitplanZu(schluessel);
+  return z !== undefined && (z.lastRun ?? "") >= tag;
+}
+
+function zeitplanZu(schluessel: string) {
+  const m = /^zeitplan:(\d+)$/.exec(schluessel);
+  return m ? zeitplaene.find((z) => z.id === Number(m[1])) : undefined;
+}
+
+/**
+ * Einmal pro Prozess, beim ersten Tick und unabhängig vom Nachholfenster: Jeder Startvermerk, der jetzt noch dasteht, stammt
+ * aus der Zeit vor dem Neustart (in diesem Prozess hat noch kein Lauf begonnen). Sonst bliebe ein Abbruch ungemeldet, wenn der
+ * Dienst erst nach dem Fenster wieder läuft. Abhaken für den Tag des Vermerks, einmal melden, Vermerk löschen – nie wiederholen.
+ */
+async function unterbrocheneAbarbeiten(now: Date): Promise<void> {
+  const today = todayKey(now);
+  for (const [schluessel, tag] of Object.entries(routinen.begonnen ?? {})) {
+    if (schonAbgehakt(schluessel, tag)) {
+      vergissBegonnen(schluessel);
+      continue;
+    }
+    const z = zeitplanZu(schluessel);
+    let titel: string;
+    if (schluessel === "rueckblick" || schluessel === "zielcheck") {
+      titel = schluessel === "rueckblick" ? "Der Rückblick" : "Der Zielcheck";
+      merkeRoutine(schluessel, tag);
+    } else if (z) {
+      titel = `Zeitplan «${z.name}»`;
+      z.lastRun = tag;
+      try {
+        saveZeitplaene();
+      } catch (e) {
+        log(e);
+      }
+    } else {
+      // Zeitplan inzwischen gelöscht (oder unbekannter Lauf): nichts abzuhaken, aber melden
+      titel = schluessel.startsWith("zeitplan:") ? `Zeitplan #${schluessel.slice("zeitplan:".length)}` : `Der Lauf «${schluessel}»`;
+    }
+    vergissBegonnen(schluessel);
+    audit("lauf_unterbrochen", { lauf: schluessel, tag });
+    const wann = tag === today ? "" : ` vom ${datumCH(tag)}`;
+    await abhaengigkeiten
+      .sendeSpaeter(`⚠️ ${titel}${wann} wurde durch einen Neustart unterbrochen, das Ergebnis ist unklar. Ich wiederhole ihn nicht, um nichts doppelt auszuführen – bitte prüfen Sie es, Sir.`)
+      .catch(log);
+  }
+}
+
+let unterbrocheneGeprueft: Promise<void> | undefined;
+/** Alle Ticks mit Startvermerk warten auf dieselbe einmalige Prüfung – auch wenn sie in derselben Minute gleichzeitig starten. */
+function nachNeustartPruefen(now: Date): Promise<void> {
+  unterbrocheneGeprueft ??= unterbrocheneAbarbeiten(now).catch(log);
+  return unterbrocheneGeprueft;
 }
 
 /** Ist die Verbindung wieder da, darf die nächste Störung wieder eine Log-Zeile bekommen – auch wenn gerade kein Lauf fällig ist. */
@@ -201,7 +268,12 @@ async function ausfuehren(
   fn: (zaehle: (schritt: number, werkzeug?: string) => void) => Promise<boolean | void>,
   startvermerk = false,
 ): Promise<boolean> {
-  if (startvermerk) merkeBegonnen(schluessel, todayKey(now));
+  if (startvermerk && !merkeBegonnen(schluessel, todayKey(now))) {
+    // Ohne gespeicherten Startvermerk nicht starten: ein Absturz mitten im Lauf liesse ihn sonst nach dem Neustart wiederholen.
+    console.error(`[scheduler] Startvermerk für ${titel} nicht gespeichert – Lauf wartet und wird im Fenster erneut versucht.`);
+    letzterFehlversuch.set(schluessel, now.getTime());
+    return false;
+  }
   const fertig = await ausfuehrenOhneVermerk(schluessel, titel, now, fn);
   if (startvermerk && !fertig) vergissBegonnen(schluessel);
   return fertig;
@@ -255,6 +327,7 @@ async function ausfuehrenOhneVermerk(
 /** Prüft jede Minute, ob ein Zeitplan dran ist (auch im Nachholfenster), und lässt Jarvis den Auftrag erledigen. */
 export async function zeitplanTick(now = new Date()): Promise<void> {
   offlineNachfuehren();
+  await nachNeustartPruefen(now);
   if (state.paused) return;
   const today = todayKey(now);
   for (const z of zeitplaene) {
@@ -296,6 +369,7 @@ export async function zeitplanTick(now = new Date()): Promise<void> {
  */
 export async function rueckblickTick(now = new Date()): Promise<void> {
   offlineNachfuehren();
+  await nachNeustartPruefen(now);
   if (config.rueckblick === "off" || state.paused) return;
   const today = todayKey(now);
   if (routinen.rueckblick === today || !imFenster(config.rueckblick, now, config.zeitplanNachholenMin)) return;
@@ -323,6 +397,24 @@ export async function rueckblickTick(now = new Date()): Promise<void> {
   if (fertig) merkeRoutine("rueckblick", today);
 }
 
+/**
+ * Unlesbare data/rechnungen.json: eine leere Liste hiesse sonst still «nichts fällig». Einmal am Tag melden, den Tag erst
+ * nach erfolgreichem Übergeben an sendeSpaeter abhaken; scheitert das, frühestens nach WIEDERHOLUNG_MS erneut.
+ */
+async function rechnungenUnlesbarMelden(schluessel: "rechnungen" | "finanzbericht", today: string, now: Date): Promise<void> {
+  laufend.add(schluessel);
+  try {
+    await abhaengigkeiten.sendeSpaeter(RECHNUNGEN_UNLESBAR, { imNotfallZurueckhalten: true });
+    letzterFehlversuch.delete(schluessel);
+    merkeRoutine(schluessel, today);
+  } catch (e) {
+    log(e);
+    letzterFehlversuch.set(schluessel, now.getTime());
+  } finally {
+    laufend.delete(schluessel);
+  }
+}
+
 /** Täglich: Rechnungen, die in den nächsten Tagen fällig oder schon überfällig sind. Ohne Claude, nur Daten. */
 export async function rechnungsTick(now = new Date()): Promise<void> {
   offlineNachfuehren();
@@ -330,6 +422,7 @@ export async function rechnungsTick(now = new Date()): Promise<void> {
   const today = todayKey(now);
   if (routinen.rechnungen === today || !imFenster(config.rechnungErinnerung, now, config.zeitplanNachholenMin)) return;
   if (!bereit("rechnungen", now)) return;
+  if (rechnungenNichtGeladen) return rechnungenUnlesbarMelden("rechnungen", today, now);
   const grenze = new Date(now.getTime() + config.rechnungVorlauf * 86_400_000).toLocaleDateString("en-CA", { timeZone: "Europe/Zurich" });
   const faellig = offeneRechnungen().filter((r) => r.faellig && r.faellig <= grenze);
   if (faellig.length === 0) {
@@ -354,6 +447,7 @@ export async function rechnungsTick(now = new Date()): Promise<void> {
 /** Wöchentlich: Zielcheck – was ist bei jedem Ziel passiert, was ist der nächste konkrete Schritt. */
 export async function zielcheckTick(now = new Date()): Promise<void> {
   offlineNachfuehren();
+  await nachNeustartPruefen(now);
   if (config.zielcheck === "off" || state.paused) return;
   const { tag, zeit } = zielcheckZeit();
   const today = todayKey(now);
@@ -396,6 +490,7 @@ export async function finanzberichtTick(now = new Date()): Promise<void> {
   const today = todayKey(now);
   if (WOCHENTAGE[now.getDay()] !== tag || routinen.finanzbericht === today || !imFenster(zeit, now, config.zeitplanNachholenMin)) return;
   if (!bereit("finanzbericht", now)) return;
+  if (rechnungenNichtGeladen) return rechnungenUnlesbarMelden("finanzbericht", today, now);
   if (rechnungen.length === 0) {
     merkeRoutine("finanzbericht", today);
     return;

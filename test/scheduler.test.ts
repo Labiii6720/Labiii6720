@@ -767,7 +767,7 @@ describe("Neustart mitten im Lauf: Startvermerk statt zweitem Lauf", () => {
   it("Rückblick und Zielcheck: nach Neustart mitten im Lauf keine doppelten Einträge", async () => {
     profil.ziele.push({ id: 50, text: "Marathon", status: "offen", angelegt: "2026-10-01" });
     try {
-      // Vortag: ein alter Vermerk, der beim nächsten Vermerk wegfällt
+      // Vortag: ein alter Vermerk; der nächste Prozess meldet ihn beim ersten Tick (mit Datum) und löscht ihn erst dann
       abhaengigkeiten.handleMessage = wirktUndHaengt("entscheidung_notieren");
       const vortag = await neuGestartet(11);
       void vortag.rueckblickTick(new Date(2026, 10, 14, 22, 30, 0, 0));
@@ -778,6 +778,9 @@ describe("Neustart mitten im Lauf: Startvermerk statt zweitem Lauf", () => {
       void vorNeustart.zielcheckTick(new Date(2026, 10, 15, 18, 0, 0, 0)); // 15.11.2026 Sonntag
       await new Promise((r) => setImmediate(r));
       assert.deepEqual(liesRoutinen().begonnen, { zielcheck: "2026-11-15" });
+      assert.equal(liesRoutinen().rueckblick, "2026-11-14");
+      assert.deepEqual(gesendet, ["⚠️ Der Rückblick vom 14.11.2026 wurde durch einen Neustart unterbrochen, das Ergebnis ist unklar. Ich wiederhole ihn nicht, um nichts doppelt auszuführen – bitte prüfen Sie es, Sir."]);
+      gesendet = [];
       abhaengigkeiten.handleMessage = wirktUndHaengt("muster_festhalten");
       vorNeustart.abhaengigkeiten.handleMessage = abhaengigkeiten.handleMessage;
       void vorNeustart.rueckblickTick(new Date(2026, 10, 15, 22, 30, 0, 0));
@@ -813,6 +816,91 @@ describe("Neustart mitten im Lauf: Startvermerk statt zweitem Lauf", () => {
     assert.equal(prompts.length, 2);
     assert.equal(z.lastRun, "2026-10-24");
     assert.deepEqual(gesendet, ["🕒 Plan 51\n\nErledigt, Sir."]);
+  });
+
+  const unterbrochen = (titel: string) =>
+    `⚠️ ${titel} wurde durch einen Neustart unterbrochen, das Ergebnis ist unklar. Ich wiederhole ihn nicht, um nichts doppelt auszuführen – bitte prüfen Sie es, Sir.`;
+
+  it("Dienst erst nach dem Nachholfenster wieder da: Vermerke beim ersten Tick gemeldet und abgehakt, nichts ausgeführt", async () => {
+    const z = plan(70, "07:00");
+    writeFileSync(ROUTINEN_DATEI, JSON.stringify({ begonnen: { "zeitplan:70": "2026-10-28", rueckblick: "2026-10-28" } }));
+    const neu = await neuGestartet(20);
+    await neu.zeitplanTick(am(28, 8, 30)); // 07:00 + 60 min vorbei
+    assert.equal(prompts.length, 0);
+    assert.deepEqual(gesendet, [unterbrochen("Zeitplan «Plan 70»"), unterbrochen("Der Rückblick")]);
+    assert.equal(z.lastRun, "2026-10-28");
+    assert.equal((JSON.parse(readFileSync(ZEITPLAENE_DATEI, "utf8")) as { id: number; lastRun?: string }[]).find((p) => p.id === 70)?.lastRun, "2026-10-28");
+    assert.equal(liesRoutinen().rueckblick, "2026-10-28");
+    assert.deepEqual(liesRoutinen().begonnen, {});
+    // einmal gemeldet, nicht wiederholt – auch nicht im Fenster des Rückblicks
+    await neu.zeitplanTick(am(28, 8, 31));
+    await neu.rueckblickTick(am(28, 22, 30));
+    await neu.zielcheckTick(am(28, 22, 31));
+    assert.equal(prompts.length, 0);
+    assert.equal(gesendet.length, 2);
+    // am nächsten Tag wieder normal
+    await neu.zeitplanTick(am(29, 7, 0));
+    assert.equal(prompts.length, 1);
+    assert.equal(z.lastRun, "2026-10-29");
+  });
+
+  it("Vermerk vom Vortag: mit Datum gemeldet, der heutige Lauf startet trotzdem; Erledigtes und Gelöschtes", async () => {
+    const z = plan(71, "07:00");
+    zeitplaene.push({ id: 72, name: "Plan 72", zeit: "07:00", tage: "taeglich", auftrag: "x", lastRun: "2026-10-28" });
+    // 72: schon abgehakt, nur der Vermerk blieb stehen → still weg; 99: Zeitplan inzwischen gelöscht → trotzdem melden
+    writeFileSync(ROUTINEN_DATEI, JSON.stringify({ begonnen: { "zeitplan:71": "2026-10-28", "zeitplan:72": "2026-10-28", "zeitplan:99": "2026-10-28" } }));
+    const neu = await neuGestartet(21);
+    await neu.zeitplanTick(am(29, 7, 5));
+    assert.equal(gesendet[0], unterbrochen("Zeitplan «Plan 71» vom 28.10.2026"));
+    assert.equal(gesendet[1], unterbrochen("Zeitplan #99 vom 28.10.2026"));
+    assert.equal(gesendet.length, 4);
+    assert.deepEqual(gesendet.slice(2), ["🕒 Plan 71\n\nErledigt, Sir.", "🕒 Plan 72\n\nErledigt, Sir."]);
+    assert.equal(prompts.length, 2);
+    assert.equal(z.lastRun, "2026-10-29");
+    assert.deepEqual(liesRoutinen().begonnen, {});
+  });
+
+  it("Startvermerk lässt sich nicht speichern: Lauf startet nicht, nach 5 Minuten erneut", async () => {
+    const z = plan(73, "08:00");
+    writeFileSync(ROUTINEN_DATEI, "{}");
+    const neu = await neuGestartet(22);
+    // routinen.json.tmp als Verzeichnis: writeFileSync scheitert (EISDIR) wie bei voller oder schreibgeschützter Platte
+    const sperre = `${ROUTINEN_DATEI}.tmp`;
+    mkdirSync(sperre);
+    try {
+      await neu.zeitplanTick(am(30, 8, 0));
+      assert.equal(prompts.length, 0);
+      assert.equal(z.lastRun, undefined);
+      assert.ok(logs.some((l) => l.includes("Startvermerk für Zeitplan «Plan 73» nicht gespeichert")));
+      assert.equal(liesRoutinen().begonnen, undefined);
+      await neu.zeitplanTick(am(30, 8, 3));
+      assert.equal(prompts.length, 0); // noch keine 5 Minuten
+    } finally {
+      rmSync(sperre, { recursive: true, force: true });
+    }
+    await neu.zeitplanTick(am(30, 8, 5));
+    assert.equal(prompts.length, 1);
+    assert.equal(z.lastRun, "2026-10-30");
+    // kein falsches «unterbrochen» aus einem Vermerk, der nur im Speicher stand
+    assert.deepEqual(gesendet, ["🕒 Plan 73\n\nErledigt, Sir."]);
+    assert.deepEqual(liesRoutinen().begonnen, {});
+  });
+
+  it("Rückblick: ohne gespeicherten Startvermerk kein Claude-Aufruf", async () => {
+    writeFileSync(ROUTINEN_DATEI, "{}");
+    const neu = await neuGestartet(23);
+    const sperre = `${ROUTINEN_DATEI}.tmp`;
+    mkdirSync(sperre);
+    try {
+      await neu.rueckblickTick(am(30, 22, 30));
+      assert.equal(prompts.length, 0);
+      assert.deepEqual(gesendet, []);
+    } finally {
+      rmSync(sperre, { recursive: true, force: true });
+    }
+    await neu.rueckblickTick(am(30, 22, 35));
+    assert.equal(prompts.length, 1);
+    assert.equal(liesRoutinen().rueckblick, "2026-10-30");
   });
 });
 

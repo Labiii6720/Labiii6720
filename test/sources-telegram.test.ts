@@ -42,6 +42,7 @@ after(() => { globalThis.fetch = echteFetch; });
 
 const sources = await import("../src/sources.js");
 const { gesundheit, HttpFehler } = await import("../src/robust.js");
+const { state } = await import("../src/state.js");
 
 function fangeLogs(): { fehler: string[]; info: string[]; ende: () => void } {
   const fehler: string[] = [];
@@ -61,6 +62,8 @@ beforeEach(() => {
   gesundheit._reset();
   sources._testOptionen.warten = async (ms) => { gewartet.push(ms); };
   sources._testOptionen.zufall = () => 0.5;
+  delete state.paused;
+  delete state.notfall;
   logs = fangeLogs();
 });
 afterEach(() => logs.ende());
@@ -113,6 +116,49 @@ describe("Briefing an Telegram (sources.sendTelegram)", () => {
     const z = gesundheit.zustand("telegram");
     assert.equal(z?.ok, false);
     assert.equal(z?.fehler, 4);
+  });
+
+  it("Notfall zwischen den Versuchen (während der Wartezeit): kein weiterer Versuch, letzter echter Fehler", async () => {
+    antworten = [http(502), okAntwort()];
+    sources._testOptionen.warten = async (ms) => {
+      gewartet.push(ms);
+      state.notfall = { aktiv: true, seit: new Date().toISOString(), grund: "Test" };
+    };
+    await assert.rejects(sources.sendTelegram("Briefing mit Terminen"), (e: unknown) => e instanceof HttpFehler && e.status === 502);
+    assert.equal(aufrufe.length, 1);
+    assert.deepEqual(gewartet, [1000]);
+  });
+
+  it("Notaus nach einem Fehlversuch: keine Wiederholung", async () => {
+    antworten = [http(502), okAntwort()];
+    const echt = globalThis.fetch;
+    globalThis.fetch = (async (...a: Parameters<typeof fetch>) => {
+      try { return await echt(...a); } finally { state.paused = true; }
+    }) as typeof fetch;
+    try {
+      await assert.rejects(sources.sendTelegram("Briefing"), (e: unknown) => e instanceof HttpFehler && e.status === 502);
+    } finally {
+      globalThis.fetch = echt;
+    }
+    assert.equal(aufrufe.length, 1);
+    assert.deepEqual(gewartet, []);
+  });
+
+  it("Notaus oder Notfall schon vor dem Start: nichts senden, Fehler (Kopie gilt nicht als zugestellt)", async () => {
+    antworten = [okAntwort()];
+    state.notfall = { aktiv: true, seit: new Date().toISOString(), grund: "Test" };
+    await assert.rejects(sources.sendTelegram("Briefing"), /zurückgehalten/);
+    delete state.notfall;
+    state.paused = true;
+    await assert.rejects(sources.sendTelegram("Briefing"), /zurückgehalten/);
+    assert.equal(aufrufe.length, 0);
+  });
+
+  it("Notfall vorbei (aktiv: false): Versand normal", async () => {
+    antworten = [okAntwort()];
+    state.notfall = { aktiv: false, seit: new Date().toISOString(), grund: "Test" };
+    await sources.sendTelegram("Briefing");
+    assert.equal(aufrufe.length, 1);
   });
 
   it("ohne Token/Chat-ID: nichts senden, kein Fehler", async () => {

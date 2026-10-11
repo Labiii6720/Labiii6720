@@ -1,7 +1,7 @@
 import { google } from "googleapis";
 import ICAL from "ical.js";
 import { config, env, opt, TZ } from "./config.js";
-import { HttpFehler, mitWiederholung, retryAfterAusHeader, type WiederholOptionen } from "./robust.js";
+import { HttpFehler, mitWiederholung, retryAfterAusHeader, voruebergehend, type WiederholOptionen } from "./robust.js";
 import { day, save, state, type Recovery, type Workout } from "./state.js";
 import { dayBounds, todayKey } from "./time.js";
 
@@ -359,36 +359,57 @@ interface TelegramAntwort {
   parameters?: { retry_after?: number };
 }
 
-/** Briefing an Telegram: wie telegram.ts vier Versuche (1 s → 15 s), nie bei client/auth; Fehler als HttpFehler mit Status und Retry-After. */
+/** Notaus oder Notfall: dann geht keine Briefing-Kopie mehr hinaus (der Chat könnte übernommen sein). */
+const gesperrt = (): boolean => Boolean(state.paused) || Boolean(state.notfall?.aktiv);
+
+/**
+ * Briefing an Telegram: wie telegram.ts vier Versuche (1 s → 15 s), nie bei client/auth; Fehler als HttpFehler mit Status und Retry-After.
+ * Notaus/Notfall wird vor jedem Versuch geprüft, auch nach der Wartezeit: dann Abbruch mit dem letzten echten Fehler, nichts zugestellt.
+ */
 export async function sendTelegram(text: string): Promise<void> {
   const token = opt("TELEGRAM_BOT_TOKEN");
   const chatId = opt("TELEGRAM_CHAT_ID");
   if (!token || !chatId) return;
+  if (gesperrt()) throw new Error("Notaus oder Notfall aktiv: Briefing-Kopie zurückgehalten.");
+  let letzter: unknown;
   await mitWiederholung("telegram.sendMessage", async () => {
-    const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ chat_id: chatId, text }),
-      signal: AbortSignal.timeout(8000),
-    });
-    let json: TelegramAntwort | undefined;
+    if (letzter !== undefined && gesperrt()) throw letzter;
     try {
-      json = (await res.json()) as TelegramAntwort;
-    } catch {
-      json = undefined; // kein JSON (z. B. Proxy-Seite) → Status entscheidet
+      await briefingSenden(token, chatId, text);
+    } catch (e) {
+      letzter = e;
+      throw e;
     }
-    if (!json || typeof json !== "object") {
-      if (!res.ok) throw new HttpFehler(`Telegram HTTP ${res.status}`, res.status, retryAfterAusHeader(res.headers));
-      return;
-    }
-    if (!res.ok || !json.ok) {
-      const status = typeof json.error_code === "number" ? json.error_code : res.status;
-      const retryAfter = json.parameters?.retry_after;
-      throw new HttpFehler(
-        `Telegram HTTP ${status}${json.description ? ` (${json.description})` : ""}`,
-        status,
-        typeof retryAfter === "number" && retryAfter > 0 ? retryAfter * 1000 : undefined,
-      );
-    }
-  }, { versuche: 4, basisMs: 1000, maxMs: 15_000, komponente: "telegram", ..._testOptionen });
+  }, {
+    versuche: 4, basisMs: 1000, maxMs: 15_000, komponente: "telegram", ..._testOptionen,
+    wiederholen: (e) => voruebergehend(e) && !gesperrt(),
+  });
+}
+
+async function briefingSenden(token: string, chatId: string, text: string): Promise<void> {
+  const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ chat_id: chatId, text }),
+    signal: AbortSignal.timeout(8000),
+  });
+  let json: TelegramAntwort | undefined;
+  try {
+    json = (await res.json()) as TelegramAntwort;
+  } catch {
+    json = undefined; // kein JSON (z. B. Proxy-Seite) → Status entscheidet
+  }
+  if (!json || typeof json !== "object") {
+    if (!res.ok) throw new HttpFehler(`Telegram HTTP ${res.status}`, res.status, retryAfterAusHeader(res.headers));
+    return;
+  }
+  if (!res.ok || !json.ok) {
+    const status = typeof json.error_code === "number" ? json.error_code : res.status;
+    const retryAfter = json.parameters?.retry_after;
+    throw new HttpFehler(
+      `Telegram HTTP ${status}${json.description ? ` (${json.description})` : ""}`,
+      status,
+      typeof retryAfter === "number" && retryAfter > 0 ? retryAfter * 1000 : undefined,
+    );
+  }
 }

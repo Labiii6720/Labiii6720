@@ -28,6 +28,8 @@ let aufrufe: string[] = [];
 globalThis.fetch = (async (eingabe: string | URL | Request) => {
   const url = String(eingabe instanceof Request ? eingabe.url : eingabe);
   aufrufe.push(url);
+  // Wie Node/undici bei einer URL mit Zugangsdaten (FRIGATE_URL=http://user:pw@…)
+  if (/^\w+:\/\/[^/@\s]+@/.test(url)) throw new TypeError(`Request cannot be constructed from a URL that includes credentials: ${url}`);
   if (url.startsWith("http://frigate.attrappe/")) return new Response(new Uint8Array([0xff, 0xd8, 0xff, 0xd9]), { headers: { "content-type": "image/jpeg" } });
   if (url.startsWith("https://api.telegram.org/bot")) return new Response(JSON.stringify({ ok: true, result: { message_id: 1 } }), { headers: { "content-type": "application/json" } });
   throw new Error(`unerwarteter Netzaufruf: ${url}`);
@@ -40,6 +42,10 @@ const { rechnungen } = await import("../src/finanzen.js");
 const { profil } = await import("../src/profil.js");
 const { auftraege, createAuftrag } = await import("../src/queue.js");
 const { state } = await import("../src/state.js");
+const { config } = await import("../src/config.js");
+const { _testOptionen } = await import("../src/cameras.js");
+_testOptionen.warten = async () => undefined;
+_testOptionen.zufall = () => 0;
 
 type Req = Parameters<typeof statusJson>[0];
 type Res = Parameters<typeof statusJson>[1];
@@ -101,6 +107,22 @@ describe("Dashboard im Notfall", () => {
     await kameraBild(req({ params: { name: "einfahrt" } }) as never, res as never);
     assert.equal(res.statusCode, 200);
     assert.ok(aufrufe.some((u) => u.startsWith("http://frigate.attrappe/")));
+  });
+
+  it("/api/kamera schwärzt Zugangsdaten im 502-Fehlertext", async () => {
+    const vorher = config.frigateUrl;
+    config.frigateUrl = "http://jarvis:GeheimesFrigatePw@frigate.attrappe";
+    try {
+      const res = antwort();
+      await kameraBild(req({ params: { name: "einfahrt" } }) as never, res as never);
+      assert.equal(res.statusCode, 502);
+      const roh = JSON.stringify(res.body);
+      assert.ok(!roh.includes("GeheimesFrigatePw"), "Passwort gehört nicht ins Dashboard");
+      assert.ok(!roh.includes("jarvis:"), "Benutzer samt Passwort geschwärzt");
+      assert.match(roh, /<geheim>@frigate\.attrappe/);
+    } finally {
+      config.frigateUrl = vorher;
+    }
   });
 
   it("/api/kamera ist im Notfall gesperrt und fragt Frigate nicht an", async () => {

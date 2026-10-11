@@ -1,16 +1,17 @@
 import { createHash, timingSafeEqual } from "node:crypto";
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { closeSync, constants, mkdirSync, openSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { audit, throttled } from "./audit.js";
 import { basename } from "node:path";
 import { addSystemNote, handleMessage, pausiertText, resetHistory, runAuftrag } from "./agent.js";
 import { config } from "./config.js";
 import { getAuftrag, offeneAuftraege, saveAuftraege, setStatus, type Auftrag } from "./queue.js";
-import { save, state, type Mode } from "./state.js";
-import { activeTools, reminders, saveReminders } from "./tools.js";
+import { save, state, zustandsHinweis, type Mode } from "./state.js";
+import { activeTools, ERINNERUNGEN_UNLESBAR, erinnerungenNichtGeladen, reminders, saveReminders } from "./tools.js";
+import { ZEITPLAENE_UNLESBAR, zeitplaeneNichtGeladen } from "./zeitplaene.js";
 import { forSpeech, speak, transcribe } from "./voice.js";
 import { safePath } from "./workspace.js";
-import { eventClip } from "./cameras.js";
-import { listVorgaenge, startVorgang } from "./vorgaenge.js";
+import { camerasNichtGeladen, eventClip, WACHEN_UNLESBAR, wachenNichtGeladen } from "./cameras.js";
+import { listVorgaenge, startVorgang, VORGAENGE_UNLESBAR, vorgaengeNichtGeladen } from "./vorgaenge.js";
 import { verbrauchBericht } from "./claude.js";
 import { aufheben, ausloesen, notfallAktiv } from "./notfall.js";
 import { createAuftrag } from "./queue.js";
@@ -20,7 +21,8 @@ import { abuseSignal } from "./notfall.js";
 import { HttpFehler, fehlerArt, fehlerDetail, gesundheit, mitWiederholung, nutzerText, schwaerze, voruebergehend, wartezeit } from "./robust.js";
 import { clock } from "./time.js";
 import { berichtText, verdichteJetzt, vorschauText } from "./verdichtung.js";
-import { finanzUebersicht, rechnungen, wochenberichtText } from "./finanzen.js";
+import { ladeListe } from "./datei.js";
+import { finanzUebersicht, RECHNUNGEN_UNLESBAR, rechnungen, rechnungenNichtGeladen, wochenberichtText } from "./finanzen.js";
 
 const API = () => `https://api.telegram.org/bot${config.telegramToken}`;
 /** Claude und die Verdichtung sind hier ersetzbar (Tests mit Attrappen); im Betrieb die echten Funktionen. */
@@ -33,6 +35,17 @@ function pinStimmt(eingabe: string | undefined): boolean {
   if (!config.pin || eingabe === undefined) return false;
   const h = (s: string) => createHash("sha256").update(s).digest();
   return timingSafeEqual(h(eingabe), h(config.pin));
+}
+
+/**
+ * Zählt eine Eingabe während des PIN-Dialogs als PIN-Versuch? Befehle und Sätze mit Leerzeichen nicht, ausser die
+ * PIN selbst sieht so aus. Sonst löste schon fünfmal «/auftraege» in fünf Minuten den Notfall aus.
+ */
+function pinVersuch(eingabe: string): boolean {
+  const pin = config.pin ?? "";
+  if (eingabe.startsWith("/") && !pin.startsWith("/")) return false;
+  if (/\s/.test(eingabe) && !/\s/.test(pin)) return false;
+  return true;
 }
 
 /** Hinweis bei gesperrter Aktion: im Notfall hebt nur /entwarnung auf, nicht /weiter. */
@@ -160,19 +173,22 @@ interface Postausgang {
   vorrang?: true;
 }
 
-function ladePostausgang(): Postausgang[] {
-  try {
-    const roh = JSON.parse(readFileSync(POSTAUSGANG_FILE, "utf8")) as unknown;
-    if (!Array.isArray(roh)) return [];
-    return roh.filter((e): e is Postausgang => typeof e === "object" && e !== null && typeof (e as Postausgang).text === "string" && typeof (e as Postausgang).ts === "string");
-  } catch {
-    return [];
-  }
-}
+const postausgangGeladen = ladeListe<unknown>(POSTAUSGANG_FILE, "Postausgang");
+/**
+ * true, wenn data/postausgang.json vorhanden, aber unlesbar war (Sicherung .defekt). Anders als bei den übrigen Dateien
+ * wirft das Speichern dann nicht – sonst ginge jede Meldung bei einer Störung verloren. Neue Einträge warten nur im
+ * Speicher, die Datei bleibt unberührt, bis sie repariert ist und Jarvis neu startet.
+ */
+export const postausgangNichtGeladen = postausgangGeladen.nichtGeladen;
+export const POSTAUSGANG_UNLESBAR =
+  "⚠️ data/postausgang.json war beim Start unlesbar, Sir (Sicherung, sofern möglich, unter data/postausgang.json.defekt). Was dort auf Zustellung wartete, kommt nicht; neue Meldungen warten bis zum Neustart nur im Speicher.";
 
-const postausgang: Postausgang[] = ladePostausgang();
+const postausgang: Postausgang[] = postausgangGeladen.liste.filter(
+  (e): e is Postausgang => typeof e === "object" && e !== null && typeof (e as Postausgang).text === "string" && typeof (e as Postausgang).ts === "string",
+);
 
 function speicherePostausgang(): void {
+  if (postausgangNichtGeladen) return;
   mkdirSync("data", { recursive: true, mode: 0o700 });
   writeFileSync(`${POSTAUSGANG_FILE}.tmp`, JSON.stringify(postausgang, null, 2), { mode: 0o600 });
   renameSync(`${POSTAUSGANG_FILE}.tmp`, POSTAUSGANG_FILE);
@@ -291,13 +307,33 @@ export async function postausgangTick(): Promise<void> {
   }
 }
 
+/**
+ * Dateien, Bilder, Clips und Sprache sind immer Daten: im Notfall geht nichts davon hinaus, auch nicht, wenn er erst
+ * während eines langen Abrufs (Clip, Kamerabild mit Beschreibung) kam. Geprüft unmittelbar vor dem Hochladen und
+ * zwischen den Wiederholungen. Der Alarm selbst ist Text und läuft über sendeSpaeter.
+ */
+const NOTFALL_KEIN_UPLOAD = "Notfall aktiv, nichts gesendet.";
+function hochladen(method: string, form: FormData): Promise<unknown> {
+  if (notfallAktiv()) return Promise.reject(new Error(NOTFALL_KEIN_UPLOAD));
+  return apiRobust(method, form, notfallAktiv);
+}
+
 export async function sendFile(path: string, caption?: string): Promise<void> {
+  if (notfallAktiv()) throw new Error(NOTFALL_KEIN_UPLOAD);
   const full = safePath(path);
   const form = new FormData();
   form.append("chat_id", owner());
   if (caption) form.append("caption", caption.slice(0, 1000));
-  form.append("document", new Blob([readFileSync(full)]), basename(full));
-  await apiRobust("sendDocument", form);
+  // Nie über eine Verknüpfung lesen: zwischen safePath und dem Lesen könnte die Datei gegen einen Link getauscht sein
+  const fd = openSync(full, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+  let inhalt: Buffer;
+  try {
+    inhalt = readFileSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+  form.append("document", new Blob([new Uint8Array(inhalt)]), basename(full));
+  await hochladen("sendDocument", form);
 }
 
 export async function sendPhoto(image: Buffer, caption?: string, extra: Record<string, unknown> = {}): Promise<void> {
@@ -306,7 +342,7 @@ export async function sendPhoto(image: Buffer, caption?: string, extra: Record<s
   if (caption) form.append("caption", caption.slice(0, 1000));
   for (const [k, v] of Object.entries(extra)) form.append(k, typeof v === "string" ? v : JSON.stringify(v));
   form.append("photo", new Blob([new Uint8Array(image)]), "bild.jpg");
-  await apiRobust("sendPhoto", form);
+  await hochladen("sendPhoto", form);
 }
 
 export async function sendVideo(video: Buffer, caption?: string): Promise<void> {
@@ -314,14 +350,14 @@ export async function sendVideo(video: Buffer, caption?: string): Promise<void> 
   form.append("chat_id", owner());
   if (caption) form.append("caption", caption.slice(0, 1000));
   form.append("video", new Blob([new Uint8Array(video)]), "clip.mp4");
-  await apiRobust("sendVideo", form);
+  await hochladen("sendVideo", form);
 }
 
 async function sendVoice(audio: Buffer): Promise<void> {
   const form = new FormData();
   form.append("chat_id", owner());
   form.append("voice", new Blob([new Uint8Array(audio)]), "jarvis.ogg");
-  await apiRobust("sendVoice", form);
+  await hochladen("sendVoice", form);
 }
 
 /** Antwort zusätzlich als Sprachnachricht, falls TTS eingerichtet ist */
@@ -491,8 +527,16 @@ async function onCallback(cb: { id: string; data?: string; message?: { message_i
   if (action === "clip") {
     // Notfall: womöglich übernommenes Konto, keine Aufnahmen aus dem Haus
     if (notfallAktiv()) return void await sendText("Im Notfall gebe ich keine Aufnahmen heraus, Sir. Erst /entwarnung.");
+    let clip: Buffer;
     try {
-      await sendVideo(await eventClip(idStr ?? ""), `🎬 Clip ${idStr}`);
+      clip = await eventClip(idStr ?? "");
+    } catch (e) {
+      return void await sendText(`Clip noch nicht da oder nicht gefunden (${schwaerze(e instanceof Error ? e.message : String(e))}).`);
+    }
+    // Der Download dauert bis zu einer Minute: kam der Notfall inzwischen, bleibt der Clip hier.
+    if (notfallAktiv()) return void await sendText("Im Notfall gebe ich keine Aufnahmen heraus, Sir. Erst /entwarnung.");
+    try {
+      await sendVideo(clip, `🎬 Clip ${idStr}`);
     } catch (e) {
       await sendText(`Clip noch nicht da oder nicht gefunden (${schwaerze(e instanceof Error ? e.message : String(e))}).`);
     }
@@ -552,6 +596,9 @@ async function onCommand(cmd: string, arg: string): Promise<void> {
       return void await sendText("Gespräch vergessen. Clean Slate.");
     case "/vorgang": {
       if (!arg.trim()) return void await sendText("Benutzung: /vorgang <Auftrag>. Läuft im Hintergrund mit dem starken Modell; /vorgaenge zeigt den Stand.");
+      // Notaus/Notfall: runLoop bräche sofort ab; kein Eintrag, keine Systemnotiz, keine nachgereichte Anhalte-Meldung.
+      if (state.paused) return void await sendText(notausHinweis());
+      if (vorgaengeNichtGeladen) return void await sendText(VORGAENGE_UNLESBAR);
       const v = startVorgang(arg.trim(), hooks);
       return void await sendText(`🧠 Vorgang #${v.id} gestartet. Fortschritt und Ergebnis folgen hier, der Chat bleibt währenddessen frei.`);
     }
@@ -563,6 +610,8 @@ async function onCommand(cmd: string, arg: string): Promise<void> {
     case "/finanzen":
       // Notfall: womöglich kompromittierter Chat, keine Finanzdaten herausgeben
       if (notfallAktiv()) return void await sendText("Im Notfall gebe ich keine Finanzdaten heraus, Sir. Erst /entwarnung.");
+      // Leere Liste heisst hier nicht «keine Rechnungen»: der Bestand liegt in der unlesbaren Datei.
+      if (rechnungenNichtGeladen) return void await sendText(RECHNUNGEN_UNLESBAR);
       if (rechnungen.length === 0) return void await sendText("Noch keine Rechnungen erfasst, Sir. Nichts zu berichten.");
       return void await sendText(wochenberichtText(finanzUebersicht()));
     case "/protokoll": {
@@ -600,13 +649,16 @@ async function onCommand(cmd: string, arg: string): Promise<void> {
     case "/verdichten":
       return verdichtenBefehl(arg.trim().toLowerCase());
     case "/check":
+      // Notfall: der Selbsttest fragt alle Dienste mit womöglich kompromittierten Zugängen ab und nennt Anwesenheit,
+      // Recovery, Termine und Chat-ID – nichts davon in einen womöglich übernommenen Chat.
+      if (notfallAktiv()) return void await sendText("Im Notfall gebe ich keine Daten heraus, Sir. Erst /entwarnung.");
       await sendText("Prüfe alle Anbindungen …");
       return void await sendText(formatBefund(await selbsttest()));
     case "/status":
       // Notfall: keine Einzelheiten (Werkzeuge, Modus) in einen womöglich kompromittierten Chat
-      if (notfallAktiv()) return void await sendText(`🚨 NOTFALL AKTIV\nOffene Aufträge: ${offeneAuftraege().length}\nAufheben nur mit /entwarnung.`);
+      if (notfallAktiv()) return void await sendText(`🚨 NOTFALL AKTIV\n${dateiHinweise().map((h) => `${h}\n`).join("")}Offene Aufträge: ${offeneAuftraege().length}\nAufheben nur mit /entwarnung.`);
       return void await sendText(
-        `${notfallAktiv() ? "🚨 NOTFALL AKTIV\n" : state.paused ? "⛔ PAUSIERT\n" : ""}Modus: ${state.mode ?? "normal"}\nOffene Aufträge: ${offeneAuftraege().length}\nErinnerungen: ${reminders.length}\nWerkzeuge: ${activeTools().map((t) => t.name).join(", ")}`,
+        `${notfallAktiv() ? "🚨 NOTFALL AKTIV\n" : state.paused ? "⛔ PAUSIERT\n" : ""}${dateiHinweise().map((h) => `${h}\n`).join("")}Modus: ${state.mode ?? "normal"}\nOffene Aufträge: ${offeneAuftraege().length}\nErinnerungen: ${reminders.length}\nWerkzeuge: ${activeTools().map((t) => t.name).join(", ")}`,
       );
     default:
       return void await sendText("Kenne ich nicht. /hilfe zeigt die Befehle.");
@@ -642,8 +694,16 @@ async function verdichtenBefehl(arg: string): Promise<void> {
     await sendText(antwort).catch(log);
     return;
   }
+  // Notaus oder Notfall kam während des Modellaufrufs: keine Profil-Fakten (Vorschau) und kein Fehlertext mehr in den
+  // Chat. Der Bericht enthält nur Zahlen und geht über den Postausgang, der ihn im Notfall zurückhält.
+  if (state.paused && !r.bericht) {
+    await sendText(pausiertText()).catch(log);
+    return;
+  }
   if (vorschau && r.vorschau && r.eingabe) {
-    await sendText(`${vorschauText(r.vorschau, r.eingabe)}${r.fehler ? `\n\n⚠️ So würde ich ihn nicht anwenden – ${r.fehler}` : ""}`).catch(log);
+    // Ein Notaus während des Versands hält die übrigen Teile zurück.
+    const v = await sendeTeile(`${vorschauText(r.vorschau, r.eingabe)}${r.fehler ? `\n\n⚠️ So würde ich ihn nicht anwenden – ${r.fehler}` : ""}`, {}, () => Boolean(state.paused));
+    if (!v.ok && !v.abgebrochen) log(v.fehler);
     return;
   }
   if (r.fehler) {
@@ -719,6 +779,15 @@ export async function handleUpdate(u: Update): Promise<void> {
   // ohnehin neu kommen), der Befehl läuft normal – sonst würde er gelöscht und der Notaus bliebe stehen.
   const ersterBefehl = text.split(/\s+/)[0]?.toLowerCase() ?? "";
   if (pendingPin && state.paused && AUFHEBEND.has(ersterBefehl)) pendingPin = undefined;
+  // Ein anderer Befehl (etwa /auftraege) ist ebenfalls kein PIN-Versuch: die Freigabe verfällt ohne Ablehnung und
+  // ohne Missbrauchszählung, der Befehl läuft normal.
+  if (pendingPin && !istDringend(u) && text.startsWith("/") && !pinVersuch(text)) {
+    const id = pendingPin.id;
+    pendingPin = undefined;
+    if (ersterBefehl !== "/auftraege" && getAuftrag(id)?.status === "offen") {
+      await sendText(`#${id} wartet nicht mehr auf die PIN, Sir. /auftraege zeigt ihn wieder.`).catch(log);
+    }
+  }
   // /pause und /notfall sind nie die PIN und greifen sofort; eine danach getippte PIN fängt der Notaus-Check unten ab.
   if (pendingPin && !istDringend(u)) {
     const p = pendingPin;
@@ -730,8 +799,16 @@ export async function handleUpdate(u: Update): Promise<void> {
     if (state.paused) return void await sendText(notausHinweis(NOCHMAL_FREIGEBEN));
     if (inArbeit.has(a.id)) return void await sendText(laeuftBereits(a));
     if (!pinStimmt(text)) {
+      // Ein Satz statt der PIN: weder ablehnen noch als Missbrauch zählen. Gelöscht bleibt er trotzdem, er könnte
+      // eine vertippte PIN enthalten, die weder in den Chat noch an Claude gehört.
+      if (!pinVersuch(text)) {
+        audit("pin_abgebrochen", { id: a.id, tool: a.tool });
+        return void await sendText(`Das war keine PIN, Sir. #${a.id} wartet nicht mehr; /auftraege zeigt ihn wieder.`);
+      }
       audit("pin_falsch", { id: a.id, tool: a.tool });
       setStatus(a, "abgelehnt", "falsche PIN");
+      // Wie im Dashboard: zählt als Missbrauch, sonst liesse sich die PIN über /protokoll und den Knopf durchprobieren.
+      abuseSignal("pin");
       return void await sendText(`Falsche PIN. #${a.id} abgelehnt.`);
     }
     const hindernis = await execute(a);
@@ -1052,6 +1129,31 @@ async function poll(): Promise<void> {
       await (wartenFn ?? schlafen)(pollWartezeit(e, fehlversuche, zufallFn));
     }
   }
+}
+
+export const CAMERAS_UNLESBAR =
+  "⚠️ cameras.json war beim Start unlesbar, Sir. Kameras, Meldungen und Wachen aus der Datei sind aus, bis sie repariert ist und ich neu gestartet bin.";
+
+/** Hinweise auf beim Start unlesbare Dateien (Zustand zuerst); ohne Dateiinhalt, dürfen also auch im Notfall hinaus. */
+export function dateiHinweise(): string[] {
+  const zustand = zustandsHinweis();
+  return [
+    ...(zustand ? [zustand] : []),
+    ...(wachenNichtGeladen ? [WACHEN_UNLESBAR] : []),
+    ...(camerasNichtGeladen ? [CAMERAS_UNLESBAR] : []),
+    ...(zeitplaeneNichtGeladen ? [ZEITPLAENE_UNLESBAR] : []),
+    ...(erinnerungenNichtGeladen ? [ERINNERUNGEN_UNLESBAR] : []),
+    ...(vorgaengeNichtGeladen ? [VORGAENGE_UNLESBAR] : []),
+    ...(postausgangNichtGeladen ? [POSTAUSGANG_UNLESBAR] : []),
+  ];
+}
+
+/**
+ * Einmal beim Start (server.ts nach startTelegram): jede unlesbare Datei melden. Mit Vorrang, denn sicherheitsrelevante
+ * Wachen könnten aus sein; scheitert der Versand, wartet die Meldung vorn im Postausgang.
+ */
+export async function dateiHinweiseMelden(): Promise<void> {
+  for (const h of dateiHinweise()) await sendeSpaeter(h, { vorrang: true }).catch(log);
 }
 
 /** Startet Telegram, falls Token und Chat-ID gesetzt sind. */

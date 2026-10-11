@@ -27,15 +27,19 @@ const freierPort = () =>
     });
   });
 
-interface Antwort { status: number }
-const anfrage = (port: number, methode: string, pfad: string, kopf: Record<string, string> = {}) =>
+const PANIK = "panik-token-nur-attrappe-0123456789";
+
+interface Antwort { status: number; text: string; kopf: Record<string, string | string[] | undefined> }
+const anfrage = (port: number, methode: string, pfad: string, kopf: Record<string, string> = {}, inhalt?: string) =>
   new Promise<Antwort>((ok, fehler) => {
     const r = request({ host: "127.0.0.1", port, method: methode, path: pfad, headers: { "content-type": "application/json", ...kopf } }, (res) => {
-      res.resume();
-      res.on("end", () => ok({ status: res.statusCode ?? 0 }));
+      let text = "";
+      res.setEncoding("utf8");
+      res.on("data", (d: string) => (text += d));
+      res.on("end", () => ok({ status: res.statusCode ?? 0, text, kopf: res.headers }));
     });
     r.on("error", fehler);
-    r.end(methode === "POST" ? "{}" : undefined);
+    r.end(inhalt ?? (methode === "POST" ? "{}" : undefined));
   });
 
 let kind: ChildProcess | undefined;
@@ -47,7 +51,7 @@ before(async () => {
   kind = spawn(process.execPath, ["--import", import.meta.resolve("tsx"), "--import", pathToFileURL(attrappe).href, join(projekt, "src/server.ts")], {
     cwd: temp,
     // Bewusst ohne ALEXA_SKILL_ID und ohne Telegram: der Dienst muss trotzdem starten
-    env: { PATH: process.env.PATH ?? "", HOME: temp, PORT: String(port), LISTEN_HOST: "127.0.0.1", JARVIS_EVENT_TOKEN: TOKEN, EVENTS_VIA_TUNNEL: "on" },
+    env: { PATH: process.env.PATH ?? "", HOME: temp, PORT: String(port), LISTEN_HOST: "127.0.0.1", JARVIS_EVENT_TOKEN: TOKEN, JARVIS_PANIC_TOKEN: PANIK, EVENTS_VIA_TUNNEL: "on" },
     stdio: ["ignore", "pipe", "pipe"],
   });
   kind.stdout?.on("data", (d: Buffer) => (ausgabe += d.toString()));
@@ -97,9 +101,44 @@ describe("server.ts: Start und Netzsperren", () => {
     assert.equal((await anfrage(port, "GET", "/api/finanzen")).status, 401);
   });
 
+  it("/dashboard aus dem Heimnetz: Sicherheits-Header zusätzlich zur CSP im Meta-Tag", async () => {
+    const r = await anfrage(port, "GET", "/dashboard");
+    assert.equal(r.status, 200);
+    const csp = String(r.kopf["content-security-policy"] ?? "");
+    for (const teil of ["frame-ancestors 'none'", "base-uri 'none'", "form-action 'none'"]) assert.ok(csp.includes(teil), csp);
+    assert.equal(r.kopf["x-content-type-options"], "nosniff");
+    assert.equal(r.kopf["referrer-policy"], "no-referrer");
+    assert.match(r.text, /http-equiv="Content-Security-Policy"/);
+  });
+
   it("/events folgt weiterhin EVENTS_VIA_TUNNEL=on (Token-Prüfung statt 404)", async () => {
     assert.equal((await anfrage(port, "POST", "/events", { "cf-ray": "8a1b2c3d4e5f-ZRH" })).status, 401);
     assert.equal((await anfrage(port, "OPTIONS", "/events", { "cf-ray": "8a1b2c3d4e5f-ZRH" })).status, 204);
     assert.equal((await anfrage(port, "GET", "/gesture", { "cf-connecting-ip": "203.0.113.7" })).status, 200);
+  });
+
+  it("ungültiges JSON an /notfall über den Tunnel: 401 ohne Stacktrace, Parser läuft nicht vor dem Token", async () => {
+    const r = await anfrage(port, "POST", "/notfall", { "cf-ray": "8a1b2c3d4e5f-ZRH" }, "{");
+    assert.equal(r.status, 401);
+    assert.doesNotMatch(r.text, /SyntaxError|node_modules|at parse|<pre>/);
+    assert.doesNotMatch(r.text, new RegExp(temp.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  });
+
+  it("ungültiges JSON an /events ohne Token: 401 statt Parser-Fehler, ohne Stacktrace", async () => {
+    const r = await anfrage(port, "POST", "/events", { "cf-ray": "8a1b2c3d4e5f-ZRH" }, "{");
+    assert.equal(r.status, 401);
+    assert.doesNotMatch(r.text, /SyntaxError|node_modules|at parse|<pre>/);
+  });
+
+  it("ungültiges JSON an /events mit Token: 400 als JSON, ohne Stacktrace (eigener Fehlerhandler)", async () => {
+    const r = await anfrage(port, "POST", "/events", { authorization: `Bearer ${TOKEN}` }, "{");
+    assert.equal(r.status, 400);
+    assert.deepEqual(JSON.parse(r.text), { ok: false });
+    assert.doesNotMatch(r.text, /SyntaxError|node_modules|at parse/);
+  });
+
+  it("ungültiges JSON an /api/* mit Token aus dem Heimnetz: ebenfalls ohne Stacktrace", async () => {
+    const r = await anfrage(port, "POST", "/api/chat", { authorization: `Bearer ${TOKEN}` }, "{");
+    assert.doesNotMatch(r.text, /SyntaxError|node_modules|at parse/);
   });
 });

@@ -1698,3 +1698,243 @@ describe("Gesamtprüfung Runde 1: Notfall gibt nichts heraus, PIN, Sprachnachric
     }
   });
 });
+
+describe("Gesamtprüfung Runde 2: /check, PIN-Durchprobieren, Notfall während Modellaufruf und Download", () => {
+  const nachricht = (id: number, text: string) => ({ update_id: id, message: { message_id: id, chat: { id: 12345 }, text } });
+  const knopf = (data: string) => ({ update_id: 1, callback_query: { id: "cb", data, from: { id: 12345 } } });
+  const gesendet = () => aufrufe.filter((x) => x.method === "sendMessage").map((x) => x.text ?? "");
+  const origHandle = abhaengigkeiten.handleMessage;
+  const origVerdichte = abhaengigkeiten.verdichteJetzt;
+  const origErr = console.error;
+  const origFrigate = config.frigateUrl;
+  const notfallAn = () => {
+    state.notfall = { aktiv: true, seit: new Date().toISOString(), grund: "Test" };
+    state.paused = true;
+  };
+  /** Zeichnet Aufrufe ausserhalb von Telegram auf (Dienste, Frigate); `vorher` darf eingreifen */
+  const fremdAufzeichnen = (vorher?: (url: string) => Promise<Response | undefined>) => {
+    const fremd: string[] = [];
+    globalThis.fetch = (async (eingabe, init) => {
+      const url = String(eingabe instanceof Request ? eingabe.url : eingabe);
+      if (!url.startsWith("https://api.telegram.org/bot")) {
+        fremd.push(url);
+        const r = await vorher?.(url);
+        if (r) return r;
+        throw new Error(`unerwarteter Aufruf: ${url}`);
+      }
+      return fetchAttrappe(eingabe, init);
+    }) as typeof fetch;
+    return fremd;
+  };
+  beforeEach(() => {
+    console.error = () => undefined;
+    state.paused = false;
+    state.notfall = { aktiv: false };
+    reminders.splice(0, reminders.length);
+  });
+  afterEach(async () => {
+    abhaengigkeiten.handleMessage = origHandle;
+    abhaengigkeiten.verdichteJetzt = origVerdichte;
+    console.error = origErr;
+    globalThis.fetch = fetchAttrappe;
+    config.frigateUrl = origFrigate;
+    state.paused = false;
+    state.notfall = { aktiv: false };
+    reminders.splice(0, reminders.length);
+    await leeren();
+  });
+
+  it("/check im Notfall: kein Selbsttest, kein Aufruf an Dienste, nur der Sperrtext", async () => {
+    notfallAn();
+    const fremd = fremdAufzeichnen();
+    aufrufe = [];
+    await handleUpdate(nachricht(9801, "/check"));
+    assert.deepEqual(fremd, []);
+    assert.deepEqual(gesendet(), ["Im Notfall gebe ich keine Daten heraus, Sir. Erst /entwarnung."]);
+  });
+
+  it("falsche PIN über Telegram zählt als Missbrauch: spätestens die fünfte löst den Notfall aus", async () => {
+    abhaengigkeiten.handleMessage = async () => { assert.fail("die PIN-Eingabe geht nie an Claude"); };
+    let versuche = 0;
+    while (!state.notfall?.aktiv && versuche < 5) {
+      versuche++;
+      const a = createAuftrag({ tool: "erinnerung", input: { zeit: new Date(Date.now() + 3_600_000).toISOString(), text: "PIN" }, stufe: "sensibel", summary: "sensibel" });
+      await handleUpdate(knopf(`ok:${a.id}`));
+      aufrufe = [];
+      await handleUpdate(nachricht(9810 + versuche, "0000"));
+      assert.equal(getAuftrag(a.id)?.status, "abgelehnt");
+      assert.ok(gesendet().includes(`Falsche PIN. #${a.id} abgelehnt.`));
+    }
+    assert.equal(state.notfall?.aktiv, true, "fünf falsche PINs in fünf Minuten lösen den Notfall aus");
+    assert.equal(state.paused, true);
+    assert.equal(reminders.length, 0, "nichts ausgeführt");
+  });
+
+  it("/verdichten vorschau, Notfall während des Modellaufrufs: keine Profil-Fakten im Chat", async () => {
+    const { ausloesen } = await import("../src/notfall.js");
+    const eingabe = {
+      fakten: [{ id: 3, text: "Garagencode 4711", seit: "2026-09-01", quelle: "chat" as const }, { id: 4, text: "Garagencode ist 4711, Tresor 9988", seit: "2026-09-02", quelle: "chat" as const }],
+      notizen: [], entscheidungenAlt: [], muster: [], heute: "2026-10-11", tage: 90,
+    };
+    const vorschau = { fakten: { zusammenfuehren: [{ ids: [3, 4], text: "Garagencode 4711, Tresor 9988" }], veraltet: [] }, notizen: { behalten: [], verdichtet: [] }, chronik: [] };
+    abhaengigkeiten.verdichteJetzt = async () => {
+      await ausloesen("Panik während der Verdichtung");
+      return { vorschau, eingabe };
+    };
+    aufrufe = [];
+    await handleUpdate(nachricht(9821, "/verdichten vorschau"));
+    const texte = gesendet();
+    for (const t of texte) assert.doesNotMatch(t, /Garagencode|Tresor|4711|9988|Vorschau/);
+    assert.ok(texte.some((t) => /^🚨 NOTFALL ausgelöst/.test(t)));
+    assert.equal(texte.at(-1), "Notfall aktiv, Sir. Aufheben nur mit /entwarnung in Telegram.");
+  });
+
+  it("/verdichten vorschau ohne Notfall: die Vorschau kommt weiterhin", async () => {
+    const eingabe = { fakten: [{ id: 1, text: "Wohnt in Basel", seit: "2026-09-01", quelle: "chat" as const }], notizen: [], entscheidungenAlt: [], muster: [], heute: "2026-10-11", tage: 90 };
+    const vorschau = { fakten: { zusammenfuehren: [], veraltet: [{ id: 1, grund: "umgezogen" }] }, notizen: { behalten: [], verdichtet: [] }, chronik: [] };
+    abhaengigkeiten.verdichteJetzt = async () => ({ vorschau, eingabe });
+    aufrufe = [];
+    await handleUpdate(nachricht(9822, "/verdichten vorschau"));
+    assert.ok(gesendet().some((t) => t.includes("Wohnt in Basel")));
+  });
+
+  it("Clip-Knopf: Notfall während des Downloads bei Frigate → kein Video, nur die Ablehnung", async () => {
+    const { ausloesen } = await import("../src/notfall.js");
+    config.frigateUrl = "http://frigate.test";
+    const fremd = fremdAufzeichnen(async (url) => {
+      if (!url.startsWith("http://frigate.test/")) return undefined;
+      await ausloesen("Panik während des Clip-Downloads");
+      return new Response(new Uint8Array([0, 0, 0, 24]));
+    });
+    aufrufe = [];
+    await handleUpdate(knopf("clip:ev77"));
+    assert.deepEqual(fremd, ["http://frigate.test/api/events/ev77/clip.mp4"]);
+    assert.ok(!aufrufe.some((x) => x.method === "sendVideo"));
+    assert.equal(gesendet().at(-1), "Im Notfall gebe ich keine Aufnahmen heraus, Sir. Erst /entwarnung.");
+  });
+
+  it("Werkzeug-Hüllen (kamera_clip, kamera_schauen, datei_senden): im Notfall kein Upload an Telegram", async () => {
+    const { hooks } = await import("../src/telegram.js");
+    notfallAn();
+    aufrufe = [];
+    await assert.rejects(hooks.sendVideo(Buffer.from([1, 2, 3]), "🎬 ev1"), /Notfall aktiv, nichts gesendet/);
+    await assert.rejects(hooks.sendPhoto(Buffer.from([1, 2, 3]), "📷 Garten"), /Notfall aktiv, nichts gesendet/);
+    await assert.rejects(hooks.sendFile("bericht.txt", "Bericht"), /Notfall aktiv, nichts gesendet/);
+    assert.deepEqual(aufrufe, []);
+  });
+
+  it("Werkzeug kamera_clip: Notfall während des Frigate-Abrufs → kein sendVideo", async () => {
+    const { ausloesen } = await import("../src/notfall.js");
+    const { hooks } = await import("../src/telegram.js");
+    const { eventClip } = await import("../src/cameras.js");
+    config.frigateUrl = "http://frigate.test";
+    fremdAufzeichnen(async (url) => {
+      if (!url.startsWith("http://frigate.test/")) return undefined;
+      await ausloesen("Panik während kamera_clip");
+      return new Response(new Uint8Array([0, 0, 0, 24]));
+    });
+    aufrufe = [];
+    // wie tools.ts kamera_clip: ctx.sendVideo(await eventClip(id), …)
+    await assert.rejects(async () => hooks.sendVideo(await eventClip("ev88"), "🎬 ev88"), /Notfall aktiv/);
+    assert.ok(!aufrufe.some((x) => x.method === "sendVideo"));
+  });
+});
+
+describe("Gesamtprüfung Runde 3: nur echte PIN-Versuche zählen, /vorgang im Notaus", () => {
+  const nachricht = (id: number, text: string) => ({ update_id: id, message: { message_id: id, chat: { id: 12345 }, text } });
+  const knopf = (data: string) => ({ update_id: 1, callback_query: { id: "cb", data, from: { id: 12345 } } });
+  const gesendet = () => aufrufe.filter((x) => x.method === "sendMessage").map((x) => x.text ?? "");
+  const sensibel = () => createAuftrag({ tool: "erinnerung", input: { zeit: new Date(Date.now() + 3_600_000).toISOString(), text: "PIN" }, stufe: "sensibel", summary: "sensibel" });
+  const AUDIT = join(temp, "data", "audit.log");
+  const missbrauchsSignale = () => (existsSync(AUDIT) ? readFileSync(AUDIT, "utf8").split("\n").filter((z) => z.includes('"event":"abuse_signal"')).length : 0);
+  const VORGAENGE = join(temp, "data", "vorgaenge.json");
+  const vorgangsAnzahl = () => (existsSync(VORGAENGE) ? (JSON.parse(readFileSync(VORGAENGE, "utf8")) as unknown[]).length : 0);
+  const origHandle = abhaengigkeiten.handleMessage;
+  const origErr = console.error;
+  beforeEach(() => {
+    console.error = () => undefined;
+    state.paused = false;
+    state.notfall = { aktiv: false };
+    reminders.splice(0, reminders.length);
+  });
+  afterEach(async () => {
+    abhaengigkeiten.handleMessage = origHandle;
+    console.error = origErr;
+    state.paused = false;
+    state.notfall = { aktiv: false };
+    reminders.splice(0, reminders.length);
+    await leeren();
+  });
+
+  it("fünfmal /auftraege während der PIN-Abfrage: kein Missbrauch, kein Notfall, der Befehl läuft", async () => {
+    abhaengigkeiten.handleMessage = async () => { assert.fail("ein Befehl geht nicht an Claude"); };
+    const vorher = missbrauchsSignale();
+    for (let i = 0; i < 5; i++) {
+      const a = sensibel();
+      await handleUpdate(knopf(`ok:${a.id}`));
+      aufrufe = [];
+      await handleUpdate(nachricht(9901 + i, "/auftraege"));
+      assert.equal(getAuftrag(a.id)?.status, "offen", "nicht abgelehnt");
+      assert.ok(!aufrufe.some((x) => x.method === "deleteMessage"), "der Befehl wird nicht gelöscht");
+      assert.ok(!gesendet().some((t) => t.startsWith("Falsche PIN")));
+      assert.ok(gesendet().some((t) => t.includes(`Auftrag #${a.id}`)), "/auftraege zeigt den Auftrag wieder");
+    }
+    assert.equal(missbrauchsSignale(), vorher);
+    assert.notEqual(state.notfall?.aktiv, true);
+    assert.equal(state.paused, false);
+    assert.equal(reminders.length, 0, "nichts ausgeführt");
+  });
+
+  it("anderer Befehl während der PIN-Abfrage: Hinweis, Befehl läuft, eine spätere PIN führt nichts aus", async () => {
+    const a = sensibel();
+    await handleUpdate(knopf(`ok:${a.id}`));
+    aufrufe = [];
+    await handleUpdate(nachricht(9911, "/modus fokus"));
+    assert.deepEqual(gesendet(), [`#${a.id} wartet nicht mehr auf die PIN, Sir. /auftraege zeigt ihn wieder.`, "Modus: fokus."]);
+    assert.equal(getAuftrag(a.id)?.status, "offen");
+    state.mode = "normal";
+    // die Freigabe wartet nicht mehr: die PIN wird gelöscht, nichts läuft
+    aufrufe = [];
+    await handleUpdate(nachricht(9912, "4711"));
+    assert.deepEqual(gesendet(), ["Keine Freigabe wartet auf eine PIN, Sir. Nachricht gelöscht."]);
+    assert.equal(getAuftrag(a.id)?.status, "offen");
+    assert.equal(reminders.length, 0);
+  });
+
+  it("ein Satz statt der PIN: gelöscht, nie an Claude, nicht abgelehnt, kein Missbrauch", async () => {
+    abhaengigkeiten.handleMessage = async () => { assert.fail("geht nicht an Claude"); };
+    const vorher = missbrauchsSignale();
+    const a = sensibel();
+    await handleUpdate(knopf(`ok:${a.id}`));
+    aufrufe = [];
+    await handleUpdate(nachricht(9921, "Wie wird das Wetter?"));
+    assert.ok(aufrufe.some((x) => x.method === "deleteMessage"));
+    assert.deepEqual(gesendet(), [`Das war keine PIN, Sir. #${a.id} wartet nicht mehr; /auftraege zeigt ihn wieder.`]);
+    assert.equal(getAuftrag(a.id)?.status, "offen");
+    assert.equal(missbrauchsSignale(), vorher);
+  });
+
+  it("eine falsche PIN-artige Eingabe zählt weiterhin als Missbrauch und lehnt ab", async () => {
+    const vorher = missbrauchsSignale();
+    const a = sensibel();
+    await handleUpdate(knopf(`ok:${a.id}`));
+    aufrufe = [];
+    await handleUpdate(nachricht(9931, "nein"));
+    assert.equal(getAuftrag(a.id)?.status, "abgelehnt");
+    assert.ok(gesendet().includes(`Falsche PIN. #${a.id} abgelehnt.`));
+    assert.equal(missbrauchsSignale(), vorher + 1);
+  });
+
+  it("/vorgang im Notaus und im Notfall: kein Vorgang, keine «gestartet»-Meldung, nur der Hinweis", async () => {
+    const vorher = vorgangsAnzahl();
+    state.paused = true;
+    aufrufe = [];
+    await handleUpdate(nachricht(9941, "/vorgang Website bauen"));
+    assert.deepEqual(gesendet(), ["⛔ Notaus aktiv. Erst /weiter."]);
+    state.notfall = { aktiv: true, seit: new Date().toISOString(), grund: "Test" };
+    aufrufe = [];
+    await handleUpdate(nachricht(9942, "/vorgang Website bauen"));
+    assert.deepEqual(gesendet(), ["🚨 Notfall aktiv, Sir. Erst /entwarnung."]);
+    assert.equal(vorgangsAnzahl(), vorher, "kein Eintrag in data/vorgaenge.json");
+  });
+});

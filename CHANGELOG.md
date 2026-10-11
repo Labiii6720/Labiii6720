@@ -2,6 +2,22 @@
 
 Kurz und nur das Wichtigste. Details stehen im README.
 
+## 0.21.2
+- Falsche PIN im Dashboard lehnt den Auftrag ab wie in Telegram (kein zweiter Versuch); in beiden zählt sie als unbefugter Zugriff, fünf in fünf Minuten lösen den Notfall aus.
+- Notfall gibt nichts heraus: Telegram `/auftraege` nur Anzahl und Nummern, `/vorgaenge`, `/check` und Clip-Knopf gesperrt, `/status` ohne Einzelheiten; Dashboard `/status.json` mit leeren Listen, `/api/kamera`, `/api/geraete` und `/api/audit` mit HTTP 423. Alexa sagt im Notaus und Notfall weder Briefing noch Cardio an. Erinnerungen bleiben bis `/entwarnung` liegen.
+- Datei-, Bild-, Clip- und Sprach-Uploads gehen im Notfall nie hinaus, auch nicht nach einem laufenden Download; `sendFile` liest nie über eine Verknüpfung.
+- Die PIN als Sprachnachricht wird gelöscht, nicht zurückgeschrieben und geht nie an Claude; wartet gerade eine PIN, geht die Sprachnachricht auch nicht zum STT-Anbieter.
+- Eine unlesbare `data/rechnungen.json` wird nach `data/rechnungen.json.defekt` kopiert; Speichern ist gesperrt. `/finanzen`, Erinnerung und Wochenbericht (einmal am Tag), `rechnungen_offen`, `/api/finanzen` (HTTP 503) und `npm run check` (Befund «Finanzen») melden das, statt eine leere Liste zu zeigen.
+- Browser: Absenden (Enter), Klicks und lange Eingaben brauchen Freigabe; Zeitpläne und Wachen löschen nur nach Freigabe (Schutz vor eingeschleusten Anweisungen).
+- Fehlertexte im Dashboard (`/api/kamera`, `/api/geraete`) geschwärzt; `npm run setup` lehnt HTTP-Adressen mit Zugangsdaten ab. `/verdichten vorschau` gibt nach einem Notaus während des Modellaufrufs nichts heraus.
+- Vorgänge, die ein Neustart unterbricht, werden beim Start als «fehler» mit «durch Neustart unterbrochen, Ergebnis unklar» abgeschlossen, einmal per Telegram gemeldet und nicht wiederholt; `data/vorgaenge.json` merkt sich dafür die Prozessnummer (`pid`).
+- Datei-Werkzeuge (`datei_lesen`, `datei_schreiben`, `datei_senden`, `dateien_auflisten`) nehmen keine Verknüpfungen oder harten Links und nichts, was über den echten Pfad ausserhalb des Arbeitsordners liegt; die Liste zeigt Verknüpfungen nur als «(Verknüpfung)».
+- Unlesbare `data/wachen.json`, `zeitplaene.json`, `erinnerungen.json`, `vorgaenge.json` und `postausgang.json` werden nach `<datei>.defekt` gesichert statt beim nächsten Speichern überschrieben; Ändern ist bis zum Neustart gesperrt (der Postausgang hält Neues nur im Speicher). Meldung beim Start per Telegram, Hinweis in `/status`, Befund «Wachen» in `npm run check`.
+- `ziel_setzen` prüft die Frist (JJJJ-MM-TT, echtes Datum); die Freigabe zeigt Text, Status und Frist.
+- `/dashboard` sendet zusätzlich Sicherheits-Header (`frame-ancestors 'none'`, `nosniff`, `no-referrer`); `jarvis.service` setzt `NODE_ENV=production`.
+- `/events` nachricht: im Notfall zurückgehalten, bei Störung nachgereicht (Postausgang).
+- Eine unlesbare `data/state.json` wird nach `data/state.json.defekt` kopiert; Jarvis startet im Notfall und speichert keinen Zustand (auch keine Tokens), bis die Datei repariert und Jarvis neu gestartet ist; `/entwarnung` gilt nur bis zum nächsten Neustart. `npm run whoop:auth` und `npm run google:auth` brechen dann vor dem Token-Tausch ab.
+
 ## 0.21.1
 - Sicherheit: `EVENTS_VIA_TUNNEL` öffnet nur noch `/events` und `/gesture`; Dashboard, `/status.json` und `/api/*` nie über den Tunnel. Der Dienst startet ohne `ALEXA_SKILL_ID` (`/alexa` aus).
 - Home Assistant: Zusatzdaten dürfen kein eigenes Ziel setzen (`entity_id`, `target`, `area_id` …), `entity_id` lässt sich nicht mehr überschreiben. Auto-Stufe nur für gewöhnliche Bedien-Dienste; `scene.apply/create` brauchen die Freigabe, Schloss oder Alarm irgendwo im Aufruf die PIN.

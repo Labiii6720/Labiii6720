@@ -622,6 +622,8 @@ export async function verdichteJetzt(
     }
     const gruende = pruefeVorschlag(v, e);
     const ablehnung = gruende.length ? `Vorschlag abgelehnt: ${gruende.slice(0, 3).join("; ")}${gruende.length > 3 ? ` (+${gruende.length - 3} weitere)` : ""}. Nichts geändert.` : undefined;
+    // Notaus/Notfall während des Modellaufrufs: auch keine Vorschau mehr herausgeben (jeder Aufrufer, nicht nur Telegram)
+    if (state.paused) return { fehler: "Notaus aktiv, nichts geändert." };
     if (opts.nurVorschau) return { vorschau: v, eingabe: e, ...(ablehnung ? { fehler: ablehnung } : {}) };
     if (ablehnung) {
       audit("verdichtung_abgelehnt", { gruende });

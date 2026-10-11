@@ -1,4 +1,5 @@
 import { appendFileSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { gesperrtText, ladeListe } from "./datei.js";
 import { relative } from "node:path";
 import { config } from "./config.js";
 import { createDraft, readMail, searchMails, sendMail } from "./gmail.js";
@@ -10,9 +11,9 @@ import { state } from "./state.js";
 import { clock } from "./time.js";
 import { listFiles, readFile, ROOT, runCommand, safePath, writeFile } from "./workspace.js";
 import * as browser from "./browser.js";
-import { saveZeitplaene, zeitplaene } from "./zeitplaene.js";
-import { cameras, describeCameras, dynamicWachen, eventClip, formatEvents, hasCameras, look, recentEvents, saveWachen, allWachen } from "./cameras.js";
-import { addRechnung, erkenneRechnung, formatRechnung, offeneRechnungen, rechnungen, setzeStatus } from "./finanzen.js";
+import { pruefeZeitplaeneSchreibbar, saveZeitplaene, ZEITPLAENE_UNLESBAR, zeitplaene, zeitplaeneNichtGeladen } from "./zeitplaene.js";
+import { cameras, describeCameras, dynamicWachen, eventClip, formatEvents, hasCameras, look, pruefeWachenSchreibbar, recentEvents, saveWachen, allWachen, WACHEN_UNLESBAR, wachenNichtGeladen } from "./cameras.js";
+import { addRechnung, erkenneRechnung, formatRechnung, offeneRechnungen, RECHNUNGEN_UNLESBAR, rechnungen, rechnungenNichtGeladen, setzeStatus } from "./finanzen.js";
 import { readMail as gmailRead, searchMails as gmailSearch } from "./gmail.js";
 import { beraterTools } from "./berater.js";
 import { profil, saveProfil } from "./profil.js";
@@ -67,10 +68,17 @@ const num = (desc: string) => ({ type: "number", description: desc });
 
 export interface Reminder { at: string; text: string }
 const REMINDER_FILE = "data/erinnerungen.json";
-export const reminders: Reminder[] = (() => {
-  try { return JSON.parse(readFileSync(REMINDER_FILE, "utf8")) as Reminder[]; } catch { return []; }
-})();
+const erinnerungenGeladen = ladeListe<Reminder>(REMINDER_FILE, "Erinnerungen");
+export const reminders: Reminder[] = erinnerungenGeladen.liste;
+/** true, wenn data/erinnerungen.json vorhanden, aber unlesbar war: keine Erinnerungen, und nichts wird gespeichert. */
+export const erinnerungenNichtGeladen = erinnerungenGeladen.nichtGeladen;
+export const ERINNERUNGEN_UNLESBAR =
+  "⚠️ data/erinnerungen.json war beim Start unlesbar, Sir (Sicherung, sofern möglich, unter data/erinnerungen.json.defekt). Die Erinnerungen darin kommen nicht, und ich lege keine neuen an, bis die Datei repariert ist und ich neu gestartet bin.";
+export function pruefeErinnerungenSchreibbar(): void {
+  if (erinnerungenNichtGeladen) throw new Error(gesperrtText(REMINDER_FILE, "keine Erinnerungen"));
+}
 export function saveReminders(): void {
+  pruefeErinnerungenSchreibbar();
   mkdirSync("data", { recursive: true, mode: 0o700 });
   writeFileSync(`${REMINDER_FILE}.tmp`, JSON.stringify(reminders, null, 2), { mode: 0o600 });
   renameSync(`${REMINDER_FILE}.tmp`, REMINDER_FILE);
@@ -136,6 +144,7 @@ const allgemein: Tool[] = [
     input_schema: { type: "object", properties: { zeit: str("Zeitpunkt als ISO-8601, z. B. 2026-10-05T14:30:00+02:00"), text: str("Erinnerungstext") }, required: ["zeit", "text"] },
     stufe: "auto",
     run: async (i) => {
+      pruefeErinnerungenSchreibbar();
       const at = new Date(i.zeit);
       if (Number.isNaN(at.getTime())) throw new Error("Ungültige Zeit.");
       reminders.push({ at: at.toISOString(), text: String(i.text) });
@@ -342,6 +351,19 @@ function geraetDaten(daten: unknown): Record<string, unknown> {
   return daten as Record<string, unknown>;
 }
 
+/**
+ * Wie urlStufe für Formulare: Ein abgesendetes Formular schickt den Text an den Server der geöffneten Seite.
+ * Ohne Freigabe nur kurze Eingaben, die nichts absenden.
+ */
+export const TIPPEN_AUTO_MAX = 60;
+export function tippenStufe(i: Input): Stufe {
+  return i.enter || String(i.text ?? "").length > TIPPEN_AUTO_MAX ? "extern" : "auto";
+}
+
+/** Was seit dem letzten Öffnen ohne Absenden getippt wurde: Ein Klick kann es abschicken, die Freigabe zeigt es. */
+const browserEingaben: string[] = [];
+const eingabenHinweis = (): string => (browserEingaben.length ? `\nKann ein Formular mit diesen Eingaben absenden: ${browserEingaben.join("; ")}` : "");
+
 const web: Tool[] = [
   {
     name: "seite_lesen",
@@ -357,7 +379,11 @@ const web: Tool[] = [
     input_schema: { type: "object", properties: { url: str("Adresse der Seite") }, required: ["url"] },
     stufe: (i) => urlStufe(String(i.url)),
     summary: (i) => `Seite im Browser öffnen (ungewöhnlich lange Adresse): ${String(i.url).slice(0, 200)}`,
-    run: (i) => browser.open(String(i.url)),
+    run: async (i) => {
+      const seite = await browser.open(String(i.url));
+      browserEingaben.length = 0;
+      return seite;
+    },
   },
   {
     name: "browser_lesen",
@@ -368,17 +394,28 @@ const web: Tool[] = [
   },
   {
     name: "browser_klicken",
-    description: "Klickt auf einen Link oder Button mit diesem Text.",
+    description: "Klickt auf einen Link oder Button mit diesem Text. Braucht immer Freigabe (ein Button kann ein Formular absenden); für Links lieber browser_oeffnen mit der Adresse aus der Linkliste.",
     input_schema: { type: "object", properties: { text: str("Sichtbarer Text des Links oder Buttons") }, required: ["text"] },
-    stufe: "auto",
+    // Ob der Text ein Link oder ein Absende-Button ist, zeigt erst die Seite; die Stufe muss vorher feststehen
+    stufe: "extern",
+    summary: (i) => `Im Browser klicken: «${String(i.text).slice(0, 200)}»${eingabenHinweis()}`,
     run: (i) => browser.click(String(i.text)),
   },
   {
     name: "browser_tippen",
-    description: "Schreibt in ein Eingabefeld (z. B. Suche) und drückt optional Enter. Nie für Logins, Bestellungen oder persönliche Daten.",
+    description: `Schreibt in ein Eingabefeld (z. B. Suche) und drückt optional Enter. Kurzer Text ohne Enter läuft sofort; Absenden (enter) oder mehr als ${TIPPEN_AUTO_MAX} Zeichen brauchen Freigabe. Nie für Logins, Bestellungen oder persönliche Daten.`,
     input_schema: { type: "object", properties: { feld: str("Beschriftung, Platzhalter oder name des Felds"), text: str("Eingabe"), enter: { type: "boolean", description: "Enter drücken" } }, required: ["feld", "text"] },
-    stufe: "auto",
-    run: (i) => browser.type(String(i.feld), String(i.text), Boolean(i.enter)),
+    stufe: (i) => tippenStufe(i),
+    summary: (i) => `Im Browser tippen${i.enter ? " und absenden" : ""}: «${String(i.text).slice(0, 200)}» in ${String(i.feld).slice(0, 100)}`,
+    run: async (i) => {
+      const seite = await browser.type(String(i.feld), String(i.text), Boolean(i.enter));
+      if (i.enter) browserEingaben.length = 0;
+      else {
+        browserEingaben.push(`${String(i.feld).slice(0, 60)}: «${String(i.text).slice(0, 80)}»`);
+        browserEingaben.splice(0, Math.max(0, browserEingaben.length - 5));
+      }
+      return seite;
+    },
   },
   {
     name: "browser_zurueck",
@@ -412,6 +449,7 @@ const plaene: Tool[] = [
     stufe: "extern", // etwas Dauerhaftes anlegen braucht dein OK
     summary: (i) => `Zeitplan «${i.name}» ${i.tage} um ${i.zeit}: ${String(i.auftrag).slice(0, 200)}`,
     run: async (i) => {
+      pruefeZeitplaeneSchreibbar();
       if (!/^\d{2}:\d{2}$/.test(String(i.zeit))) throw new Error("Zeit als HH:MM angeben.");
       const id = (zeitplaene.at(-1)?.id ?? 0) + 1;
       zeitplaene.push({ id, name: String(i.name), zeit: String(i.zeit), tage: String(i.tage), auftrag: String(i.auftrag), angelegt: new Date().toISOString() });
@@ -424,14 +462,20 @@ const plaene: Tool[] = [
     description: "Zeigt alle wiederkehrenden Aufgaben.",
     input_schema: { type: "object", properties: {} },
     stufe: "auto",
-    run: async () => zeitplaene.map((z) => `#${z.id} ${z.name} · ${z.tage} ${z.zeit} · ${z.auftrag}`).join("\n") || "Keine Zeitpläne.",
+    // Unlesbare Datei: leere Liste hiesse sonst fälschlich «keine Zeitpläne»
+    run: async () => (zeitplaeneNichtGeladen ? ZEITPLAENE_UNLESBAR : zeitplaene.map((z) => `#${z.id} ${z.name} · ${z.tage} ${z.zeit} · ${z.auftrag}`).join("\n") || "Keine Zeitpläne."),
   },
   {
     name: "zeitplan_loeschen",
     description: "Löscht eine wiederkehrende Aufgabe.",
     input_schema: { type: "object", properties: { id: num("Nummer des Zeitplans") }, required: ["id"] },
-    stufe: "auto",
+    stufe: "extern", // eine eingeschleuste Anweisung darf keinen Zeitplan still entfernen
+    summary: (i) => {
+      const z = zeitplaene.find((x) => x.id === Number(i.id));
+      return z ? `Zeitplan #${z.id} «${z.name}» löschen (${z.tage} um ${z.zeit})` : `Zeitplan #${i.id} löschen (nicht gefunden)`;
+    },
     run: async (i) => {
+      pruefeZeitplaeneSchreibbar();
       const idx = zeitplaene.findIndex((z) => z.id === Number(i.id));
       if (idx < 0) throw new Error("Zeitplan nicht gefunden.");
       zeitplaene.splice(idx, 1);
@@ -484,6 +528,7 @@ const kameras: Tool[] = [
     stufe: "extern", // dauerhafte Wache braucht dein OK
     summary: (i) => `Wache auf «${i.kamera}» alle ${i.alle_minuten} min: ${String(i.frage).slice(0, 200)}`,
     run: async (i) => {
+      pruefeWachenSchreibbar();
       if (!cameras[String(i.kamera)]) throw new Error("Kamera unbekannt.");
       const id = (dynamicWachen.at(-1)?.id ?? 0) + 1;
       dynamicWachen.push({ id, kamera: String(i.kamera), frage: String(i.frage), alle_minuten: Math.max(1, Number(i.alle_minuten)), nur_wenn: i.nur_wenn });
@@ -496,14 +541,23 @@ const kameras: Tool[] = [
     description: "Zeigt alle Kamera-Wachen.",
     input_schema: { type: "object", properties: {} },
     stufe: "auto",
-    run: async () => allWachen().map((w) => `${w.id ? "#" + w.id : "(cameras.json)"} ${w.kamera} · alle ${w.alle_minuten} min · ${w.frage} · ${w.nur_wenn ?? "immer"}`).join("\n") || "Keine Wachen.",
+    run: async () => {
+      const liste = allWachen().map((w) => `${w.id ? "#" + w.id : "(cameras.json)"} ${w.kamera} · alle ${w.alle_minuten} min · ${w.frage} · ${w.nur_wenn ?? "immer"}`).join("\n");
+      // Unlesbare Datei: eine kurze Liste hiesse sonst fälschlich «das sind alle Wachen»
+      return wachenNichtGeladen ? `${WACHEN_UNLESBAR}\n${liste}`.trimEnd() : liste || "Keine Wachen.";
+    },
   },
   {
     name: "wache_loeschen",
     description: "Löscht eine per Werkzeug angelegte Wache.",
     input_schema: { type: "object", properties: { id: num("Nummer der Wache") }, required: ["id"] },
-    stufe: "auto",
+    stufe: "extern", // eine Wache abzuschalten ist sicherheitsrelevant, genau wie sie anzulegen
+    summary: (i) => {
+      const w = dynamicWachen.find((x) => x.id === Number(i.id));
+      return w ? `Wache #${w.id} löschen: ${w.kamera} – ${String(w.frage).slice(0, 200)}` : `Wache #${i.id} löschen (nicht gefunden)`;
+    },
     run: async (i) => {
+      pruefeWachenSchreibbar();
       const idx = dynamicWachen.findIndex((w) => w.id === Number(i.id));
       if (idx < 0) throw new Error("Wache nicht gefunden (Wachen aus cameras.json löschst du in der Datei).");
       dynamicWachen.splice(idx, 1);
@@ -530,7 +584,8 @@ const finanzen: Tool[] = [
     description: "Zeigt alle offenen Rechnungen, nach Fälligkeit sortiert.",
     input_schema: { type: "object", properties: {} },
     stufe: "auto",
-    run: async () => offeneRechnungen().map(formatRechnung).join("\n") || "Keine offenen Rechnungen.",
+    // Unlesbare Datei: leere Liste hiesse sonst fälschlich «keine offenen Rechnungen»
+    run: async () => (rechnungenNichtGeladen ? RECHNUNGEN_UNLESBAR : offeneRechnungen().map(formatRechnung).join("\n") || "Keine offenen Rechnungen."),
   },
   {
     name: "rechnung_status",
@@ -538,6 +593,7 @@ const finanzen: Tool[] = [
     input_schema: { type: "object", properties: { id: num("Nummer der Rechnung"), status: str("bezahlt oder ignoriert") }, required: ["id", "status"] },
     stufe: "auto",
     run: async (i) => {
+      if (rechnungenNichtGeladen) throw new Error(RECHNUNGEN_UNLESBAR);
       const r = rechnungen.find((x) => x.id === Number(i.id));
       if (!r) throw new Error("Rechnung nicht gefunden.");
       if (!["bezahlt", "ignoriert"].includes(String(i.status))) throw new Error("Status: bezahlt oder ignoriert.");
@@ -551,6 +607,7 @@ const finanzen: Tool[] = [
     input_schema: { type: "object", properties: { id: num("Nummer der Rechnung") }, required: ["id"] },
     stufe: "auto",
     run: async (i) => {
+      if (rechnungenNichtGeladen) throw new Error(RECHNUNGEN_UNLESBAR);
       const r = rechnungen.find((x) => x.id === Number(i.id));
       if (!r) throw new Error("Rechnung nicht gefunden.");
       const zeilen = [

@@ -1,10 +1,11 @@
 import express from "express";
+import { timingSafeEqual } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { ExpressAdapter } from "ask-sdk-express-adapter";
 import { config, opt } from "./config.js";
 import { buildSkill } from "./alexa.js";
 import { morningTick } from "./brain.js";
-import { startTelegram } from "./telegram.js";
+import { dateiHinweiseMelden, startTelegram } from "./telegram.js";
 import { startScheduler } from "./scheduler.js";
 import { closeBrowser } from "./browser.js";
 import { handleEvent } from "./events.js";
@@ -54,12 +55,20 @@ if (config.eventToken) {
     res.set({ "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Headers": "Authorization, Content-Type", "Access-Control-Allow-Methods": "POST, OPTIONS" });
     next();
   };
+  // Token vor dem Body-Parser: Unbefugte erreichen den Parser nie. Abweisen (Audit, abuseSignal, 401) bleibt Sache von handleEvent.
+  const tokenZuerst = (req: express.Request, res: express.Response, next: express.NextFunction) => {
+    const token = config.eventToken ?? "";
+    const given = (req.header("authorization") ?? "").replace(/^Bearer\s+/i, "");
+    if (token && given.length === token.length && timingSafeEqual(Buffer.from(given), Buffer.from(token))) return next();
+    sicher(handleEvent)(req, res);
+  };
   app.options("/events", lanOnly, cors, (_req, res) => void res.sendStatus(204));
-  app.post("/events", lanOnly, cors, express.json({ limit: "64kb" }), sicher(handleEvent));
+  app.post("/events", lanOnly, cors, tokenZuerst, express.json({ limit: "64kb" }), sicher(handleEvent));
 }
 
-// Panik-Auslöser fürs Handy (eigener Token), auch über den Tunnel erreichbar – im Notfall zählt Erreichbarkeit
-if (config.panicToken) app.post("/notfall", express.json({ limit: "4kb" }), sicher(handlePanic));
+// Panik-Auslöser fürs Handy (eigener Token), auch über den Tunnel erreichbar – im Notfall zählt Erreichbarkeit.
+// Ohne Body-Parser: handlePanic braucht keinen Body, und ein Parser vor der Token-Prüfung wäre Angriffsfläche aus dem Internet.
+if (config.panicToken) app.post("/notfall", sicher(handlePanic));
 
 // Gesten- und Sprachkonsole (Webcam-Handtracking im Browser)
 app.get("/gesture", lanOnly, (_req, res) => {
@@ -69,7 +78,15 @@ app.get("/gesture", lanOnly, (_req, res) => {
 // Kommandozentrale: der Kern. Seite und API nur aus dem Heimnetz/Tailscale (nie über den Tunnel), API zusätzlich mit Token.
 if (config.dashboard && config.eventToken) {
   const json = express.json({ limit: "64kb" });
-  app.get("/dashboard", lanOnly, (_req, res) => res.sendFile(fileURLToPath(new URL("../web/dashboard.html", import.meta.url))));
+  app.get("/dashboard", lanOnly, (_req, res) => {
+    // Ergänzt die CSP im Meta-Tag (gilt kumulativ): frame-ancestors wirkt nur als Header. script-src bleibt im Meta-Tag,
+    // so laufen Hash und Skript nie auseinander.
+    res.setHeader("Content-Security-Policy", "frame-ancestors 'none'; base-uri 'none'; form-action 'none'; object-src 'none'");
+    res.setHeader("X-Content-Type-Options", "nosniff");
+    res.setHeader("Referrer-Policy", "no-referrer");
+    res.setHeader("X-Frame-Options", "DENY");
+    res.sendFile(fileURLToPath(new URL("../web/dashboard.html", import.meta.url)));
+  });
   app.get("/status.json", lanOnly, dashboardAuth, statusJson);
   app.post("/api/auftrag", lanOnly, dashboardAuth, json, sicher(auftragAction));
   app.post("/api/chat", lanOnly, dashboardAuth, json, sicher(chat));
@@ -81,12 +98,23 @@ if (config.dashboard && config.eventToken) {
   app.get("/api/finanzen", lanOnly, dashboardAuth, finanzenJson);
 }
 
+// Eigener Fehlerhandler (zuletzt registriert): nie Stacktrace oder Pfade an den Aufrufer, auch ohne NODE_ENV=production.
+app.use((err: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+  const e = (err ?? {}) as { message?: unknown; status?: unknown; statusCode?: unknown };
+  console.error("HTTP-Fehler:", schwaerze(String(e.message ?? err)));
+  const code = Number(e.status ?? e.statusCode);
+  if (res.headersSent) return void res.end();
+  res.status(Number.isInteger(code) && code >= 400 && code < 600 ? code : 500).json({ ok: false });
+});
+
 // Standard: nur lokal lauschen (Alexa kommt über den Cloudflare Tunnel). LISTEN_HOST=0.0.0.0 öffnet das Heimnetz für /events.
 app.listen(config.port, config.listenHost, () => {
   console.log(`Jarvis läuft auf http://${config.listenHost}:${config.port}${config.eventToken ? " (Ereignisse aktiv)" : ""}`);
 });
 
 startTelegram();
+// Unlesbare Dateien (Zustand, Wachen, Kameras, Zeitpläne …) einmal melden; ohne Telegram bleibt es bei console.error und /check
+if (config.telegramToken && config.telegramOwner) void dateiHinweiseMelden();
 if (config.telegramToken && config.telegramOwner) startScheduler();
 if (config.frigateUrl && config.telegramToken) startWatch();
 

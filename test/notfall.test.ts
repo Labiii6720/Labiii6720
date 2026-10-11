@@ -179,6 +179,11 @@ describe("Panik-Endpunkt", () => {
     assert.deepEqual(r.body, { ok: false });
     assert.equal(notfallAktiv(), false);
     assert.equal(gesendet.length, 0);
+    // Spur im Audit, gedrosselt: ein zweiter Fehlversuch in derselben Minute schreibt keine weitere Zeile
+    await handlePanic(anfrage("Bearer falsch-falsch-falsch-falsch"), antwort().res);
+    const zeilen = readFileSync(join(temp, "data", "audit.log"), "utf8").split("\n").filter((z) => z.includes("notfall_abgewiesen"));
+    assert.equal(zeilen.length, 1);
+    assert.ok(!zeilen[0]!.includes("falsch-falsch"), "kein Token im Audit");
   });
 
   it("bereits aktiver Notfall: Antwort ok, kein zweiter Alarm", async () => {

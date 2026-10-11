@@ -5,18 +5,18 @@ import { askWithBudget } from "./agent.js";
 import { audit } from "./audit.js";
 import { cameras, snapshot } from "./cameras.js";
 import { config } from "./config.js";
-import { finanzUebersicht, offeneRechnungen, type Rechnung } from "./finanzen.js";
+import { finanzUebersicht, offeneRechnungen, RECHNUNGEN_UNLESBAR, rechnungenNichtGeladen, type Rechnung } from "./finanzen.js";
 import { haStates } from "./homeassistant.js";
 import { ausloesen, notfallAktiv } from "./notfall.js";
 import { profil } from "./profil.js";
 import { protokolle, protokollGesperrt, runProtokoll } from "./protokolle.js";
 import { createAuftrag, getAuftrag, offeneAuftraege } from "./queue.js";
-import { gesundheit } from "./robust.js";
+import { gesundheit, schwaerze } from "./robust.js";
 import { save, state, type Mode } from "./state.js";
 import { approveAuftrag, denyAuftrag, hooks, sendText } from "./telegram.js";
-import { allWachen } from "./cameras.js";
-import { vorgaenge } from "./vorgaenge.js";
-import { zeitplaene } from "./zeitplaene.js";
+import { allWachen, camerasNichtGeladen, wachenNichtGeladen } from "./cameras.js";
+import { vorgaenge, vorgaengeNichtGeladen } from "./vorgaenge.js";
+import { zeitplaene, zeitplaeneNichtGeladen } from "./zeitplaene.js";
 
 /**
  * Kommandozentrale («der Kern»): Lesen und Handeln über das Dashboard. Nur Heimnetz/Tailscale (lanOnly im Server)
@@ -68,6 +68,12 @@ export function statusJson(_req: Request, res: Response): void {
     notfall: notfallAktiv(),
     auftraege: offeneAuftraege().map((a) => ({ id: a.id, tool: a.tool, stufe: a.stufe, summary: a.summary, seit: a.createdAt, gestartetAm: a.gestartetAm })),
     rechnungen: offeneRechnungen().slice(0, 10).map((r) => ({ id: r.id, empfaenger: r.empfaenger, betrag: r.betrag, waehrung: r.waehrung, faellig: r.faellig })),
+    // Leere Liste heisst dann nicht «keine offenen Rechnungen»
+    rechnungenUnlesbar: rechnungenNichtGeladen,
+    wachenUnlesbar: wachenNichtGeladen,
+    camerasUnlesbar: camerasNichtGeladen,
+    zeitplaeneUnlesbar: zeitplaeneNichtGeladen,
+    vorgaengeUnlesbar: vorgaengeNichtGeladen,
     vorgaenge: vorgaenge.slice(-8).map((v) => ({ id: v.id, status: v.status, steps: v.steps, auftrag: v.auftrag.slice(0, 90) })),
     zeitplaene: zeitplaene.map((z) => ({ id: z.id, name: z.name, zeit: z.zeit, tage: z.tage })),
     wachen: allWachen().map((w) => ({ kamera: w.kamera, frage: w.frage.slice(0, 80), alle_minuten: w.alle_minuten })),
@@ -85,6 +91,8 @@ const kurzeRechnung = (r: Rechnung) => ({ id: r.id, empfaenger: r.empfaenger, be
 /** GET /api/finanzen: Wochenbericht als JSON. Nur lesen, keine Zahlung; im Notfall gesperrt wie alle Daten. */
 export function finanzenJson(_req: Request, res: Response): void {
   if (notfallAktiv()) return void res.status(423).json({ ok: false, error: "notfall" });
+  // Ohne geladenen Bestand wäre jede Zahl falsch (alles 0): Dienst nicht verfügbar statt leerer Bericht
+  if (rechnungenNichtGeladen) return void res.status(503).json({ ok: false, error: "rechnungen_unlesbar", text: RECHNUNGEN_UNLESBAR });
   const u = finanzUebersicht();
   res.json({
     ok: true,
@@ -122,7 +130,8 @@ export async function kameraBild(req: Request, res: Response): Promise<void> {
     const img = await snapshot(name, 480);
     res.set("Content-Type", "image/jpeg").set("Cache-Control", "no-store").send(img);
   } catch (e) {
-    res.status(502).json({ ok: false, error: e instanceof Error ? e.message : String(e) });
+    // Fehlertexte von fetch enthalten die URL samt Zugangsdaten (FRIGATE_URL mit user:pw@)
+    res.status(502).json({ ok: false, error: schwaerze(e instanceof Error ? e.message : String(e)) });
   }
 }
 
@@ -158,7 +167,7 @@ export async function geraete(req: Request, res: Response): Promise<void> {
   try {
     res.json({ ok: true, text: await haStates(req.query.filter ? String(req.query.filter) : undefined) });
   } catch (e) {
-    res.json({ ok: false, text: e instanceof Error ? e.message : String(e) });
+    res.json({ ok: false, text: schwaerze(e instanceof Error ? e.message : String(e)) });
   }
 }
 

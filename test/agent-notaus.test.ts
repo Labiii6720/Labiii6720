@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { after, afterEach, describe, it } from "node:test";
@@ -18,6 +18,7 @@ globalThis.fetch = (async (eingabe: string | URL | Request) => {
 const { anthropic } = await import("../src/claude.js");
 const { runTask, pausiertText } = await import("../src/agent.js");
 const { state } = await import("../src/state.js");
+const { toolByName } = await import("../src/tools.js");
 
 const NOTIZEN = join(temp, "data", "notizen.md");
 const hooks = { onAuftrag: async () => undefined } as unknown as Parameters<typeof runTask>[1];
@@ -115,5 +116,38 @@ describe("runLoop: Notaus während eines Claude-Aufrufs", () => {
     assert.equal(antwort, "Notiert, Sir.");
     assert.equal(aufrufe, 2);
     assert.equal(existsSync(NOTIZEN), true);
+  });
+});
+
+describe("execute: Fehler von Auto-Werkzeugen werden geschwärzt", () => {
+  const client = anthropic();
+  const orig = client.messages.create;
+  const werkzeug = toolByName("notiz_speichern")!;
+  const origRun = werkzeug.run;
+  afterEach(() => {
+    client.messages.create = orig;
+    werkzeug.run = origRun;
+  });
+
+  it("Zugangsdaten in der Fehlermeldung landen weder im Audit noch im tool_result", async () => {
+    werkzeug.run = async () => { throw new Error("fetch failed: http://u:geheim@host:5000/api/events"); };
+    let aufrufe = 0;
+    client.messages.create = (async () => {
+      aufrufe++;
+      if (aufrufe === 1) return mitWerkzeugen();
+      return { ...mitWerkzeugen(), stop_reason: "end_turn", content: [{ type: "text", text: "Das ging schief, Sir.", citations: null }] } as Anthropic.Message;
+    }) as unknown as typeof client.messages.create;
+    const verlauf: Anthropic.MessageParam[] = [];
+    await runTask("Merk dir eins und zwei.", hooks, { history: verlauf });
+    const ergebnisse = verlauf.find((m) => Array.isArray(m.content) && m.content[0]?.type === "tool_result")!.content as Anthropic.ToolResultBlockParam[];
+    assert.equal(ergebnisse.length, 2);
+    for (const r of ergebnisse) {
+      assert.equal(r.is_error, true);
+      assert.doesNotMatch(String(r.content), /geheim@/);
+      assert.match(String(r.content), /<geheim>@host/);
+    }
+    const fehlerZeilen = readFileSync(join(temp, "data", "audit.log"), "utf8").split("\n").filter((z) => z.includes('"ok":false'));
+    assert.ok(fehlerZeilen.length >= 2);
+    for (const z of fehlerZeilen) assert.doesNotMatch(z, /u:geheim/);
   });
 });

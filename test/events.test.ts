@@ -557,3 +557,32 @@ describe("Route /events", () => {
     assert.match(server, /app\.options\("\/events", lanOnly,/);
   });
 });
+
+describe("Ereignis nachricht (Hausmeldung aus Home Assistant)", () => {
+  it("ohne Notfall: Text 1:1 per Telegram", async () => {
+    const a = await sende({ event: "nachricht", text: "Waschmaschine fertig." });
+    assert.deepEqual(a.body, { ok: true });
+    assert.equal(sendungen().length, 1);
+    assert.equal(sendungen()[0].text, "Waschmaschine fertig.");
+  });
+
+  it("im Notfall: kein sendMessage, die Meldung wartet im Postausgang bis zur Entwarnung", async () => {
+    const { postausgangTick } = await import("../src/telegram.js");
+    state.notfall = { aktiv: true, seit: new Date().toISOString(), grund: "Test" };
+    try {
+      const a = await sende({ event: "nachricht", text: "Alarmanlage unscharf, niemand zu Hause." });
+      assert.equal(a.status, 200);
+      assert.equal(sendungen().length, 0, "nichts an den womöglich übernommenen Chat");
+      const abgelegt = JSON.parse(readFileSync("data/postausgang.json", "utf8")) as { text: string }[];
+      assert.ok(abgelegt.some((e) => e.text === "Alarmanlage unscharf, niemand zu Hause."), "im Postausgang abgelegt");
+      await postausgangTick();
+      assert.equal(sendungen().length, 0, "auch der Postausgang hält sie im Notfall zurück");
+    } finally {
+      state.notfall = undefined;
+    }
+    // Nach der Entwarnung nachgereicht (leert zugleich den Postausgang für spätere Tests)
+    await postausgangTick();
+    assert.equal(sendungen().length, 1);
+    assert.ok(sendungen()[0].text?.endsWith("Alarmanlage unscharf, niemand zu Hause."));
+  });
+});

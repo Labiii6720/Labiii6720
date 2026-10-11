@@ -61,6 +61,13 @@ function chronikMonatVon(id: number): string | undefined {
   return undefined;
 }
 
+/** Nur echte Kalenderdaten JJJJ-MM-TT (kein 2026-02-30) */
+function gueltigeFrist(f: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(f)) return false;
+  const d = new Date(f + "T00:00:00Z");
+  return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === f;
+}
+
 const str = (d: string) => ({ type: "string", description: d });
 const num = (d: string) => ({ type: "number", description: d });
 
@@ -71,8 +78,11 @@ export const beraterTools: Tool[] = [
     description: "Hält ein Ziel des Nutzers fest oder markiert es als erreicht/verworfen. Prägt, worauf Jarvis hin berät.",
     input_schema: { type: "object", properties: { text: str("Das Ziel in einem Satz"), frist: str("Zieldatum ISO, optional"), status: str("offen, erreicht oder verworfen; Standard offen"), id: num("vorhandenes Ziel ändern, optional") } },
     stufe: "extern",
-    summary: (i) => `Ziel ${i.id ? "ändern" : "setzen"}: ${i.text ?? "#" + i.id} (${i.status ?? "offen"})`,
+    summary: (i) =>
+      `Ziel ${i.id ? "#" + i.id + " ändern" : "setzen"}: ${i.text ?? "(Text unverändert)"} · Status ${i.status ?? (i.id ? "unverändert" : "offen")}${i.frist ? " · Frist " + i.frist : ""}`,
     run: async (i) => {
+      // Vor jeder Änderung prüfen, damit eine kaputte Frist nichts halb speichert
+      if (i.frist !== undefined && i.frist !== null && i.frist !== "" && !gueltigeFrist(String(i.frist))) throw new Error("Frist bitte als JJJJ-MM-TT, Sir.");
       if (i.id) {
         const z = profil.ziele.find((x) => x.id === Number(i.id));
         if (!z) throw new Error("Ziel nicht gefunden.");

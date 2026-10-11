@@ -2,6 +2,8 @@
 <html lang="de">
 <head>
 <meta charset="utf-8">
+<!-- CSP: nur genau dieses Skript (Hash), keine Inline-Handler, Verbindungen nur zum eigenen Ursprung. Nach jeder Änderung am Skript den Hash neu setzen (test/dashboard-html.test.ts prüft ihn). -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-z3qB2ymx0hrAuFw8nprPczCu9OlNBQWQ9YgPsL1KN8Y='; style-src 'unsafe-inline'; img-src 'self' blob:; connect-src 'self'; base-uri 'none'; form-action 'none'">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>JARVIS // COMMAND CENTER</title>
 <style>
@@ -114,7 +116,8 @@ async function connect(token) {
 $("enter").onclick = () => connect($("token").value.trim());
 $("token").onkeydown = (e) => { if (e.key === "Enter") $("enter").click(); };
 
-const esc = (s) => String(s ?? "").replace(/[<>&]/g, (c) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;" }[c]));
+// Jeder Wert vom Server ist fremd (Ziele, Betreffs, Namen stammen letztlich aus Mails und Claude): immer esc(), auch in Attributen.
+const esc = (s) => String(s ?? "").replace(/[<>&"']/g, (c) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;", '"': "&quot;", "'": "&#39;" }[c]));
 
 function render(d) {
   $("clock").textContent = new Date(d.zeit).toLocaleTimeString("de-CH");
@@ -124,29 +127,30 @@ function render(d) {
   st.textContent = d.notfall ? "NOTFALL" : d.pausiert ? "pausiert" : "bereit";
   document.querySelectorAll(".modes button").forEach((b) => b.classList.toggle("sel", b.dataset.m === d.modus));
 
-  $("qn").textContent = d.auftraege.length;
+  // Im Notfall liefert der Server keine Inhalte, nur die Anzahl offener Aufträge.
+  $("qn").textContent = d.offeneAuftraege ?? d.auftraege.length;
   $("queue").innerHTML = d.auftraege.length ? d.auftraege.map((a) => `
-    <div class="row"><span class="pill ${a.stufe === "sensibel" ? "sens" : "ext"}">${a.stufe}</span> #${a.id}
+    <div class="row"><span class="pill ${a.stufe === "sensibel" ? "sens" : "ext"}">${esc(a.stufe)}</span> #${esc(a.id)}
       <div>${esc(a.summary)}</div>
       <div class="btns">
-        <button class="act ok" onclick="freigeben(${a.id}, '${a.stufe}')">Freigeben</button>
-        <button class="act no" onclick="ablehnen(${a.id})">Ablehnen</button>
-      </div></div>`).join("") : '<div class="muted">Keine offenen Aufträge.</div>';
+        <button class="act ok" data-aktion="freigeben" data-id="${esc(a.id)}" data-stufe="${esc(a.stufe)}">Freigeben</button>
+        <button class="act no" data-aktion="ablehnen" data-id="${esc(a.id)}">Ablehnen</button>
+      </div></div>`).join("") : '<div class="muted">' + (d.notfall && d.offeneAuftraege ? `Notfall: ${Number(d.offeneAuftraege)} offen, Inhalte erst nach /entwarnung.` : "Keine offenen Aufträge.") + '</div>';
 
   $("bills").innerHTML = d.rechnungen.length ? d.rechnungen.map((r) => `
-    <div class="row">#${r.id} ${esc(r.empfaenger)} · ${r.betrag != null ? r.betrag.toFixed(2) + " " + r.waehrung : "Betrag unklar"}
-      <div class="muted">${r.faellig ? "fällig " + r.faellig : ""}</div></div>`).join("") : '<div class="muted">Keine offenen Rechnungen.</div>';
+    <div class="row">#${esc(r.id)} ${esc(r.empfaenger)} · ${r.betrag != null ? esc(r.betrag.toFixed(2) + " " + r.waehrung) : "Betrag unklar"}
+      <div class="muted">${r.faellig ? "fällig " + esc(r.faellig) : ""}</div></div>`).join("") : '<div class="muted">' + (d.rechnungenUnlesbar ? "data/rechnungen.json ist unlesbar: reparieren und Jarvis neu starten." : "Keine offenen Rechnungen.") + '</div>';
 
   $("protos").innerHTML = d.protokolle.length ? d.protokolle.map((p) => `
-    <div class="row"><b>${esc(p.name)}</b> <span class="pill ${p.stufe === "sensibel" ? "sens" : p.stufe === "extern" ? "ext" : ""}">${p.stufe}</span>
+    <div class="row"><b>${esc(p.name)}</b> <span class="pill ${p.stufe === "sensibel" ? "sens" : p.stufe === "extern" ? "ext" : ""}">${esc(p.stufe)}</span>
       <div class="muted">${esc(p.beschreibung)}</div>
-      <div class="btns"><button class="act" onclick="protokoll('${esc(p.name)}')">Ausführen</button></div></div>`).join("") : '<div class="muted">Keine Protokolle.</div>';
+      <div class="btns"><button class="act" data-aktion="protokoll" data-name="${esc(p.name)}">Ausführen</button></div></div>`).join("") : '<div class="muted">Keine Protokolle.</div>';
 
-  $("goals").innerHTML = d.ziele.length ? d.ziele.map((z) => `<div class="row">#${z.id} ${esc(z.text)}${z.frist ? ` <span class="muted">(bis ${z.frist})</span>` : ""}</div>`).join("") : '<div class="muted">Noch keine Ziele.</div>';
+  $("goals").innerHTML = d.ziele.length ? d.ziele.map((z) => `<div class="row">#${esc(z.id)} ${esc(z.text)}${z.frist ? ` <span class="muted">(bis ${esc(z.frist)})</span>` : ""}</div>`).join("") : '<div class="muted">Noch keine Ziele.</div>';
 
-  const ops = [...d.vorgaenge.map((v) => `<div class="row">🧠 #${v.id} ${v.status} · ${v.steps} Schr. · ${esc(v.auftrag)}</div>`),
-               ...d.zeitplaene.map((z) => `<div class="row">🕒 ${esc(z.name)} · ${z.tage} ${z.zeit}</div>`),
-               ...d.wachen.map((w) => `<div class="row">👁 ${esc(w.kamera)} · alle ${w.alle_minuten} min · ${esc(w.frage)}</div>`)];
+  const ops = [...d.vorgaenge.map((v) => `<div class="row">🧠 #${esc(v.id)} ${esc(v.status)} · ${esc(v.steps)} Schr. · ${esc(v.auftrag)}</div>`),
+               ...d.zeitplaene.map((z) => `<div class="row">🕒 ${esc(z.name)} · ${esc(z.tage)} ${esc(z.zeit)}</div>`),
+               ...d.wachen.map((w) => `<div class="row">👁 ${esc(w.kamera)} · alle ${esc(w.alle_minuten)} min · ${esc(w.frage)}</div>`)];
   $("ops").innerHTML = ops.join("") || '<div class="muted">Nichts geplant.</div>';
 
   if ($("cams").dataset.done !== "1" && d.kameras.length) {
@@ -154,7 +158,11 @@ function render(d) {
     $("cams").dataset.done = "1";
     refreshCams();
   }
-  if (!d.kameras.length) $("cams").innerHTML = '<div class="muted">Keine Kameras.</div>';
+  if (!d.kameras.length) {
+    $("cams").innerHTML = '<div class="muted">' + (d.notfall ? "Im Notfall gesperrt." : "Keine Kameras.") + '</div>';
+    // Zurücksetzen, damit die Bilder nach /entwarnung wieder angelegt werden.
+    $("cams").dataset.done = "";
+  }
 }
 
 function refreshCams() {
@@ -180,6 +188,16 @@ window.freigeben = async (id, stufe) => {
 };
 window.ablehnen = async (id) => { const r = await api("/api/auftrag", { method: "POST", body: JSON.stringify({ id, aktion: "nein" }) }); if (r.text) addChat("jv", r.text); tick(); };
 window.protokoll = async (name) => { const r = await api("/api/protokoll", { method: "POST", body: JSON.stringify({ name }) }); addChat("jv", r.text || r.error || ""); tick(); };
+
+// Schaltflächen über data-Attribute statt onclick-Strings: die CSP verbietet Inline-Handler, und Werte landen nie in Code.
+$("grid").onclick = (e) => {
+  const b = e.target && e.target.closest ? e.target.closest("button[data-aktion]") : null;
+  if (!b) return;
+  const { aktion, id, stufe, name } = b.dataset;
+  if (aktion === "freigeben") window.freigeben(Number(id), stufe);
+  else if (aktion === "ablehnen") window.ablehnen(Number(id));
+  else if (aktion === "protokoll") window.protokoll(name);
+};
 
 document.querySelectorAll(".modes button").forEach((b) => b.onclick = () => api("/api/modus", { method: "POST", body: JSON.stringify({ modus: b.dataset.m }) }).then(tick));
 

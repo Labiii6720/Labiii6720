@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { pausiertText, resetHistory } from "./agent.js";
 import type { Stufe } from "./queue.js";
+import { schwaerze } from "./robust.js";
 import { save, state, type Mode } from "./state.js";
 import { notausVermerken } from "./telegram.js";
 import { toolByName, type ToolContext } from "./tools.js";
@@ -94,7 +95,8 @@ export async function runProtokoll(name: string, ctx: ToolContext): Promise<stri
         zeilen.push(s.nachricht);
       }
     } catch (e) {
-      zeilen.push(`✗ ${s.tool ?? s.aktion ?? "Schritt"}: ${e instanceof Error ? e.message : String(e)}`);
+      // Fehlertexte gehen nach Telegram, ins Dashboard, in die Historie und an die API: Zugangsdaten in URLs schwärzen
+      zeilen.push(`✗ ${s.tool ?? s.aktion ?? "Schritt"}: ${schwaerze(e instanceof Error ? e.message : String(e))}`);
     }
   }
   return `Protokoll «${name}» ${abgebrochen ? "abgebrochen" : "ausgeführt"}:\n${zeilen.join("\n")}`;
