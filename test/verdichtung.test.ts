@@ -369,6 +369,23 @@ describe("wendeAn", () => {
     ]);
   });
 
+  it("Ersatz-id nie unter faktIdMax: vergessene oder archivierte ids kommen nicht wieder", () => {
+    const p: Profil = { ...basis(), fakten: basis().fakten.slice(0, 4), faktIdMax: 7 };
+    const x: Vorschlag = { fakten: { zusammenfuehren: [{ ids: [1, 2], text: "Wohnt in Muttenz, früher Basel" }], veraltet: [] }, notizen: { behalten: [], verdichtet: [] }, chronik: [] };
+    const r = v.wendeAn(p, "", x, HEUTE);
+    assert.deepEqual(r.profil.fakten.map((f) => f.id), [8, 3, 4]);
+    assert.equal(r.profil.faktIdMax, 8);
+    assert.deepEqual(r.archiv.fakten.map((f) => f.ersetztDurch), [8, 8]);
+    assert.equal(p.faktIdMax, 7);
+  });
+
+  it("ohne Zusammenführung: faktIdMax bleibt wie vorher bzw. fehlt weiterhin", () => {
+    const leer: Vorschlag = { fakten: { zusammenfuehren: [], veraltet: [] }, notizen: { behalten: [], verdichtet: [] }, chronik: [] };
+    assert.equal(v.wendeAn({ ...basis(), faktIdMax: 7 }, "", leer, HEUTE).profil.faktIdMax, 7);
+    const ohne = v.wendeAn({ ...basis(), fakten: [] }, "", leer, HEUTE).profil;
+    assert.ok(!("faktIdMax" in ohne), JSON.stringify(ohne));
+  });
+
   it("veraltet: markiert, nicht gelöscht", () => {
     const r = v.wendeAn(basis(), NOTIZEN_TEXT, vorschlag(), HEUTE, e);
     assert.deepEqual(r.profil.fakten[0], { id: 1, text: "Wohnt in Basel", seit: "2025-02-01", quelle: "import", veraltet: { seit: HEUTE, grund: "widerspricht #2 vom 2026-03-12" } });
@@ -530,6 +547,37 @@ describe("vorschauText", () => {
 });
 
 // ---------- verdichteJetzt ----------
+
+describe("archivVergessen", () => {
+  beforeEach(() => rmSync(ARCHIV, { force: true }));
+
+  it("entfernt Entscheidungen und Chronik des Monats aus allen Läufen, atomar, 0o600; Rest und kaputte Zeilen bleiben", () => {
+    const l1 = { datum: "2026-09-01", fakten: [], veraltet: [], entscheidungen: [{ id: 1, datum: "2026-06-03T10:00:00.000Z", text: "Kein neues Auto" }, { id: 3, datum: "2026-05-10T09:00:00.000Z", text: "Ferien verschoben" }], notizen: ["- 2026-06-01: Notiz"], chronik: [{ monat: "2026-06", text: "Juni.", entscheidungen: 1 }, { monat: "2026-05", text: "Mai.", entscheidungen: 1 }] };
+    const l2 = { datum: "2026-10-01", fakten: [], veraltet: [], entscheidungen: [{ id: 2, datum: "2026-06-20T18:00:00.000Z", text: "Kurs" }], notizen: [], chronik: [{ monat: "2026-06", text: "Juni nachgetragen.", entscheidungen: 1 }] };
+    const l3 = { datum: "2026-10-05", fakten: [], veraltet: [], entscheidungen: [], notizen: [], chronik: [] };
+    writeFileSync(ARCHIV, `${JSON.stringify(l1)}\n\nkaputt {\n${JSON.stringify(l2)}\n${JSON.stringify(l3)}\n`, { mode: 0o644 });
+    assert.equal(v.archivVergessen("2026-06"), 4);
+    const zeilen = readFileSync(ARCHIV, "utf8").split("\n");
+    assert.equal(zeilen.length, 6);
+    assert.equal(zeilen[1], "");
+    assert.equal(zeilen[2], "kaputt {");
+    assert.equal(zeilen[4], JSON.stringify(l3));
+    assert.deepEqual(JSON.parse(zeilen[0]!), { ...l1, entscheidungen: [l1.entscheidungen[1]], chronik: [l1.chronik[1]] });
+    assert.deepEqual(JSON.parse(zeilen[3]!), { ...l2, entscheidungen: [], chronik: [] });
+    assert.equal(statSync(ARCHIV).mode & 0o777, 0o600);
+    assert.ok(!existsSync(`${ARCHIV}.tmp`));
+  });
+
+  it("nichts zu entfernen: Datei unverändert; fehlendes Archiv: 0; falscher Monat: Fehler", () => {
+    assert.equal(v.archivVergessen("2026-06"), 0);
+    assert.ok(!existsSync(ARCHIV));
+    const inhalt = `${JSON.stringify({ datum: "2026-10-01", entscheidungen: [], chronik: [{ monat: "2026-05", text: "Mai.", entscheidungen: 1 }] })}\n`;
+    writeFileSync(ARCHIV, inhalt, { mode: 0o600 });
+    assert.equal(v.archivVergessen("2026-06"), 0);
+    assert.equal(readFileSync(ARCHIV, "utf8"), inhalt);
+    assert.throws(() => v.archivVergessen("Juni"), /nicht die Form YYYY-MM/);
+  });
+});
 
 describe("verdichteJetzt", () => {
   let fragen: { system: string; user: string }[] = [];

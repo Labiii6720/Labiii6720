@@ -1,8 +1,10 @@
 import { readFileSync } from "node:fs";
 import { config } from "./config.js";
 import { FAKT_MAX_ZEICHEN, gleicherText, neueEntscheidungId, neueFaktId, neuesMusterId, neueZielId, profil, profilFuerAnzeige, profilFuerPrompt, saveProfil } from "./profil.js";
+import { schwaerze } from "./robust.js";
 import { todayKey } from "./time.js";
 import type { Tool } from "./tools.js";
+import { archivVergessen } from "./verdichtung.js";
 
 /**
  * Der Berater-Teil. Zwei feste Leitplanken, die auch spätere Prompts nicht aushebeln sollen:
@@ -181,9 +183,31 @@ export const beraterTools: Tool[] = [
       }
       else if (art === "chronik") {
         const monat = String(i.text ?? "").trim();
-        const vorher = profil.chronik.length;
-        profil.chronik = profil.chronik.filter((c) => c.monat !== monat);
-        if (profil.chronik.length === vorher) throw new Error("Nicht gefunden.");
+        const imProfil = profil.chronik.some((c) => c.monat === monat);
+        if (!imProfil && !/^\d{4}-(0[1-9]|1[0-2])$/.test(monat)) throw new Error("Nicht gefunden.");
+        if (imProfil) {
+          const vorher = profil.chronik;
+          profil.chronik = vorher.filter((c) => c.monat !== monat);
+          try {
+            saveProfil();
+          } catch (e) {
+            // Speicher und Datei bleiben gleich, sonst fände ein zweiter Versuch den Monat nicht mehr
+            profil.chronik = vorher;
+            throw e;
+          }
+        }
+        // Vergessen gilt auch für die Details im Archiv. Auch ohne Monat im Profil versuchen: so holt ein
+        // zweiter Aufruf ein früher gescheitertes Bereinigen des Archivs nach.
+        let imArchiv: number;
+        try {
+          imArchiv = archivVergessen(monat);
+        } catch (e) {
+          const grund = schwaerze(e instanceof Error ? e.message : String(e));
+          if (!imProfil) throw new Error(`Die Details im Archiv liessen sich nicht entfernen (${grund}). Bitte später nochmals, Sir.`);
+          return `Chronik ${monat} vergessen. Die Details im Archiv liessen sich nicht entfernen (${grund}). Ein erneuter Versuch holt das nach, Sir.`;
+        }
+        if (!imProfil && imArchiv === 0) throw new Error("Nicht gefunden.");
+        return imProfil ? "Vergessen." : "Vergessen (Archiv nachgeholt).";
       }
       else if (art === "wert") profil.werte = profil.werte.filter((w) => w !== String(i.text));
       else if (art === "fakt") {

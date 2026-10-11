@@ -2,7 +2,7 @@ import { appendFileSync, mkdirSync, readFileSync, renameSync, writeFileSync } fr
 import { audit } from "./audit.js";
 import { anthropic, claudeAufruf, trackUsage } from "./claude.js";
 import { config } from "./config.js";
-import { aktuelleFakten, FAKT_MAX_ZEICHEN, profil, profilNichtGeladen, saveProfil, type Chronik, type Entscheidung, type Fakt, type Muster, type Profil } from "./profil.js";
+import { aktuelleFakten, FAKT_MAX_ZEICHEN, hoechsteFaktId, profil, profilNichtGeladen, saveProfil, type Chronik, type Entscheidung, type Fakt, type Muster, type Profil } from "./profil.js";
 import { schwaerze } from "./robust.js";
 import { state } from "./state.js";
 import { todayKey } from "./time.js";
@@ -344,7 +344,8 @@ export function wendeAn(
   const darf = (id: number) => !erlaubtFakt || erlaubtFakt.has(id);
 
   // Fakten zusammenführen
-  let naechsteId = neu.fakten.reduce((m, f) => Math.max(m, f.id), 0) + 1;
+  // Nie eine schon vergebene id: auch zusammengeführte (Archiv) und vergessene Fakten zählen über faktIdMax
+  let naechsteId = hoechsteFaktId(neu) + 1;
   let zusammengefuehrt = 0;
   for (const g of v.fakten.zusammenfuehren) {
     const ids = [...new Set(g.ids)];
@@ -358,6 +359,7 @@ export function wendeAn(
     archiv.fakten.push(...originale.map((f) => ({ ...f, ersetztDurch: ersatz.id })));
     zusammengefuehrt += originale.length;
   }
+  if (naechsteId > 1) neu.faktIdMax = naechsteId - 1;
 
   // Veraltete markieren
   let veraltet = 0;
@@ -501,6 +503,57 @@ export function vorschauText(v: VerdichtungVorschlag, e: VerdichtungEingabe): st
   }
   if (!zeilen.length) return "🧠 Vorschau: Der Vorschlag ändert nichts, Sir.";
   return `🧠 Vorschau der Verdichtung (noch nichts geändert):\n\n${zeilen.join("\n")}`;
+}
+
+// ---------- Vergessen im Archiv ----------
+
+/**
+ * Entfernt einen vergessenen Chronik-Monat auch aus dem Archiv: die Entscheidungen dieses Monats und seine Chronik-Texte.
+ * Vergessen heisst vergessen, auch auf der Festplatte. Alles andere bleibt; unlesbare Zeilen bleiben unverändert stehen.
+ * Atomar (tmp + rename, 0o600). Gibt die Zahl der entfernten Einträge zurück.
+ */
+export function archivVergessen(monat: string): number {
+  if (!MONAT.test(monat)) throw new Error(`Monat «${monat.slice(0, 20)}» hat nicht die Form YYYY-MM`);
+  let text: string;
+  try {
+    text = readFileSync(ARCHIV_DATEI, "utf8");
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException)?.code === "ENOENT") return 0;
+    throw e;
+  }
+  let entfernt = 0;
+  const zeilen = alleZeilen(text).map((z) => {
+    if (!z.trim()) return z;
+    let lauf: unknown;
+    try {
+      lauf = JSON.parse(z);
+    } catch {
+      return z;
+    }
+    if (!istObj(lauf)) return z;
+    let geaendert = false;
+    if (Array.isArray(lauf.entscheidungen)) {
+      const rest = lauf.entscheidungen.filter((x: unknown) => !(istObj(x) && String(x.datum ?? "").slice(0, 7) === monat));
+      if (rest.length !== lauf.entscheidungen.length) {
+        entfernt += lauf.entscheidungen.length - rest.length;
+        lauf.entscheidungen = rest;
+        geaendert = true;
+      }
+    }
+    if (Array.isArray(lauf.chronik)) {
+      const rest = lauf.chronik.filter((x: unknown) => !(istObj(x) && x.monat === monat));
+      if (rest.length !== lauf.chronik.length) {
+        entfernt += lauf.chronik.length - rest.length;
+        lauf.chronik = rest;
+        geaendert = true;
+      }
+    }
+    return geaendert ? JSON.stringify(lauf) : z;
+  });
+  if (entfernt === 0) return 0;
+  writeFileSync(`${ARCHIV_DATEI}.tmp`, `${zeilen.join("\n")}\n`, { mode: 0o600 });
+  renameSync(`${ARCHIV_DATEI}.tmp`, ARCHIV_DATEI);
+  return entfernt;
 }
 
 // ---------- Ablauf ----------

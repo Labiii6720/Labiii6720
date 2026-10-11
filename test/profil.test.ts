@@ -364,6 +364,53 @@ describe("Werkzeuge fakt_merken und profil_vergessen", () => {
     assert.match(String((t.input_schema.properties.art as { description?: string }).description), /chronik/);
   });
 
+  it("profil_vergessen: Chronik-Monat auch aus dem Archiv entfernt (Entscheidungen und Chronik-Text), anderes bleibt", async () => {
+    const t = werkzeug("profil_vergessen");
+    const archiv = join(temp, "data", "profil-archiv.jsonl");
+    profil.chronik = [
+      { monat: "2026-05", text: "Mai-Text", entscheidungen: 1 },
+      { monat: "2026-06", text: "Kündigung beschlossen.", entscheidungen: 1 },
+    ];
+    const lauf = {
+      datum: "2026-10-01",
+      fakten: [{ id: 2, text: "bleibt", seit: "2026-01-01", quelle: "chat", ersetztDurch: 9 }],
+      entscheidungen: [
+        { id: 5, datum: "2026-06-03T09:00:00.000Z", text: "Kündigung" },
+        { id: 6, datum: "2026-05-04T09:00:00.000Z", text: "Mai bleibt" },
+      ],
+      chronik: [
+        { monat: "2026-06", text: "Kündigung beschlossen.", entscheidungen: 1 },
+        { monat: "2026-05", text: "Mai-Text", entscheidungen: 1 },
+      ],
+    };
+    try {
+      writeFileSync(archiv, `${JSON.stringify(lauf)}\n{ kaputt\n`, { mode: 0o600 });
+      assert.equal(await t.run({ art: "chronik", text: "2026-06" }, ctx), "Vergessen.");
+      const zeilen = readFileSync(archiv, "utf8").split("\n");
+      assert.equal(zeilen[1], "{ kaputt");
+      const neu = JSON.parse(zeilen[0]!) as typeof lauf;
+      assert.deepEqual(neu.entscheidungen.map((e) => e.id), [6]);
+      assert.deepEqual(neu.chronik.map((c) => c.monat), ["2026-05"]);
+      assert.deepEqual(neu.fakten, lauf.fakten);
+      assert.ok(!readFileSync(archiv, "utf8").includes("Kündigung"));
+      assert.equal(statSync(archiv).mode & 0o777, 0o600);
+      assert.deepEqual(profil.chronik.map((c) => c.monat), ["2026-05"]);
+    } finally {
+      rmSync(archiv, { force: true });
+    }
+  });
+
+  it("profil_anzeigen: alle Chronik-Monate, auch ältere als die letzten drei im Prompt", () => {
+    profil.chronik = ["2026-01", "2026-02", "2026-03", "2026-04", "2026-05"].map((monat, i) => ({ monat, text: `Text ${monat}`, entscheidungen: i + 1 }));
+    assert.ok(!profilFuerPrompt().includes("Text 2026-01"));
+    const text = profilFuerAnzeige();
+    assert.ok(text.includes("Chronik (alle Monate, zum Vergessen per Monat):\n2026-01 (1 Entscheidung): Text 2026-01\n2026-02 (2 Entscheidungen): Text 2026-02"), text);
+    assert.ok(text.includes("2026-05 (5 Entscheidungen): Text 2026-05"), text);
+    assert.ok(!text.includes("(1 Entscheidungen)"), text);
+    profil.chronik = [];
+    assert.ok(!profilFuerAnzeige().includes("Chronik (alle Monate"));
+  });
+
   it("profil_vergessen: verschobene Entscheidung → Hinweis auf den Chronik-Monat, nichts gelöscht", async () => {
     const t = werkzeug("profil_vergessen");
     const archiv = join(temp, "data", "profil-archiv.jsonl");

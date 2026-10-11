@@ -253,9 +253,16 @@ export function profilFuerPrompt(): string {
   return teile.join("\n\n");
 }
 
-/** Für profil_anzeigen: wie im Prompt, dazu alle Fakten mit Nummer (zum Vergessen per id) und die veralteten mit Grund. */
+/** Für profil_anzeigen: wie im Prompt, dazu alle Fakten mit Nummer (zum Vergessen per id), die veralteten mit Grund und die ganze Chronik. */
 export function profilFuerAnzeige(): string {
   const basis = profilFuerPrompt();
   const fakten = profil.fakten.map((f) => `#${f.id} (seit ${f.seit}) ${f.text}${f.veraltet ? ` [veraltet seit ${f.veraltet.seit}: ${f.veraltet.grund}]` : ""}`);
-  return [basis, fakten.length ? `Fakten mit Nummer:\n${fakten.join("\n")}` : ""].filter(Boolean).join("\n\n");
+  const chronik = [...profil.chronik].sort((a, b) => a.monat.localeCompare(b.monat)).map((c) => `${c.monat} (${c.entscheidungen} ${c.entscheidungen === 1 ? "Entscheidung" : "Entscheidungen"}): ${c.text}`);
+  return [
+    basis,
+    fakten.length ? `Fakten mit Nummer:\n${fakten.join("\n")}` : "",
+    chronik.length ? `Chronik (alle Monate, zum Vergessen per Monat):\n${chronik.join("\n")}` : "",
+  ]
+    .filter(Boolean)
+    .join("\n\n");
 }
