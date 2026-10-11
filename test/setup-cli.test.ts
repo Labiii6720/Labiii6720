@@ -59,14 +59,14 @@ const TOKEN = "123456789:ABCdefGHIjklMNOpqrSTUvwxYZ0123456789";
 const KEY = "sk-ant-api03-testschluessel-nicht-echt";
 const PIN = "zz99"; // bewusst mit Nicht-Hex-Zeichen: kein erzeugter Token kann diese Folge enthalten
 
-/** Antworten erster Lauf: Pflichtwerte, Chat-ID zuerst ungültig, sonst Enter (68 Felder in Reihenfolge der Abschnitte) */
+/** Antworten erster Lauf: Pflichtwerte, Chat-ID zuerst ungültig, sonst Enter (72 Felder in Reihenfolge der Abschnitte) */
 function ersteAntworten(): string[] {
   return [
     "Labinot", "", "", "", "", // grundlagen
     KEY, "", "", "", "", "", // claude
     TOKEN, "abc", "12345", // telegram: Chat-ID erst ungültig
     PIN, "", "", "", "", "", "", // sicherheit: PIN, zwei Tokens erzeugen
-    ...Array(50).fill(""), // Rest: Enter (mehr als nötig schadet nicht)
+    ...Array(60).fill(""), // Rest: Enter (mehr als nötig schadet nicht)
   ];
 }
 

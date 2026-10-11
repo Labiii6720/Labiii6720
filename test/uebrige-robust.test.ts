@@ -193,7 +193,7 @@ describe("OctoPrint-Upload", () => {
     mkdirSync(join(temp, "workspace"), { recursive: true });
     writeFileSync(join(temp, "workspace", "teil.stl"), "solid teil\nendsolid teil\n");
     antworten = [http(201, "{}")];
-    assert.equal(await werkstatt.anDrucker("teil.stl", false), "An den Drucker geschickt (nicht gestartet).");
+    assert.equal(await werkstatt.anDrucker("teil.stl", false), "STL an den Drucker geschickt (nicht gestartet).");
     assert.equal(aufrufe.length, 1);
     assert.equal(gesundheit.zustand("octoprint")?.ok, true);
   });

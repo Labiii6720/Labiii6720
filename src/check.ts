@@ -131,6 +131,7 @@ export async function selbsttest(nur?: string[], beiBefund?: (b: Befund) => void
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     return "OctoPrint erreichbar";
   });
+  await lauf("Slicer", Boolean(config.slicerPath || config.slicerProfil), async () => (await import("./werkstatt.js")).pruefeSlicer(PRUEF_MS));
 
   await lauf("Stimme (STT/TTS)", Boolean(config.stt || config.tts), async () => `${config.stt ? "STT " : ""}${config.tts ? "TTS " : ""}eingetragen (nicht live getestet)`);
   await lauf("Alexa-Skill", Boolean(opt("ALEXA_SKILL_ID")), async () => {

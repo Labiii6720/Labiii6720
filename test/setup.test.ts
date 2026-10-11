@@ -238,6 +238,11 @@ describe("Prüffunktionen", () => {
   });
   it("pruefeZielcheck", () => { ok(s.pruefeZielcheck, "so 18:00", "mo 06:30", "off"); nok(s.pruefeZielcheck, "sonntag 18:00", "so 24:00", "so", "18:00"); });
   it("pruefeZahl", () => { ok(s.pruefeZahl, "0", "10", "6500"); nok(s.pruefeZahl, "-1", "1.5", "abc", ""); });
+  it("pruefeZeitlimitMs (SLICER_TIMEOUT_MS)", () => {
+    ok(s.pruefeZeitlimitMs, "1", "600000", "2147483647");
+    nok(s.pruefeZeitlimitMs, "0", "2147483648", "9999999999", "1.5", "abc", "");
+    assert.equal(s.ABSCHNITTE.flatMap((x) => x.felder).find((f) => f.key === "SLICER_TIMEOUT_MS")!.pruefen, s.pruefeZeitlimitMs);
+  });
   it("pruefePort", () => { ok(s.pruefePort, "1", "3000", "65535"); nok(s.pruefePort, "0", "65536", "abc", "-3"); });
   it("pruefeKoordinate", () => { const lat = s.pruefeKoordinate(-90, 90); ok(lat, "47.52", "-90", "0", "90"); nok(lat, "91", "-90.5", "abc", "47,52"); });
   it("pruefeModell", () => { ok(s.pruefeModell, "claude-sonnet-5-5"); nok(s.pruefeModell, "gpt-4", "sonnet"); });
@@ -307,7 +312,7 @@ describe("Schema ↔ .env.example", () => {
     const namen = s.ABSCHNITTE.map((a) => a.name);
     assert.deepEqual([...namen].sort(), [...new Set(namen)].sort());
     assert.ok(namen.every((n) => /^[a-z]+$/.test(n)));
-    const bekannt = ["Claude-API", "Telegram", "WHOOP", "Google Kalender", "Outlook-Kalender", "Gmail", "Home Assistant", "Frigate", "MQTT", "Shopify", "Browser", "Werkstatt", "3D-Drucker", "Stimme (STT/TTS)", "Alexa-Skill", "Protokolle", "Sicherheit"];
+    const bekannt = ["Claude-API", "Telegram", "WHOOP", "Google Kalender", "Outlook-Kalender", "Gmail", "Home Assistant", "Frigate", "MQTT", "Shopify", "Browser", "Werkstatt", "3D-Drucker", "Slicer", "Stimme (STT/TTS)", "Alexa-Skill", "Protokolle", "Sicherheit"];
     for (const a of s.ABSCHNITTE) for (const c of a.checks ?? []) assert.ok(bekannt.includes(c), `unbekannter Check ${c} in ${a.name}`);
     for (const a of s.ABSCHNITTE) for (const f of a.felder) if (f.art === "wahl") assert.ok(f.wahl?.length && f.pruefen, `wahl ohne Liste/Prüfung: ${f.key}`);
     const felder = s.ABSCHNITTE.flatMap((a) => a.felder);

@@ -100,6 +100,11 @@ export function pruefeZahlAbEins(wert: string): string | undefined {
   return /^\d+$/.test(wert) && Number(wert) >= 1 ? undefined : "ganze Zahl ab 1";
 }
 
+/** Zeitlimit in ms: darüber nimmt setTimeout den Wert nicht an. */
+export function pruefeZeitlimitMs(wert: string): string | undefined {
+  return /^\d+$/.test(wert) && Number(wert) >= 1 && Number(wert) <= 2_147_483_647 ? undefined : "ganze Zahl 1–2147483647 (ms)";
+}
+
 export function pruefePort(wert: string): string | undefined {
   const n = /^\d+$/.test(wert) ? Number(wert) : NaN;
   return n >= 1 && n <= 65535 ? undefined : "Port 1–65535";
@@ -318,17 +323,20 @@ export const ABSCHNITTE: Abschnitt[] = [
   {
     name: "werkstatt",
     titel: "Werkstatt und Browser",
-    beschreibung: "Browser, OpenSCAD, 3D-Drucker (OctoPrint), Arbeitsordner und Websuche.",
+    beschreibung: "Browser, OpenSCAD, 3D-Drucker (OctoPrint), Slicer (PrusaSlicer), Arbeitsordner und Websuche.",
     optional: true,
     felder: [
       { key: "BROWSER_PATH", frage: "Pfad zu Chromium", hinweis: "leer = automatisch suchen", art: "pfad" },
       { key: "OPENSCAD_PATH", frage: "Pfad zu OpenSCAD", hinweis: "leer = automatisch suchen", art: "pfad" },
       { key: "OCTOPRINT_URL", frage: "OctoPrint-URL", art: "url", pruefen: pruefeUrl },
       { key: "OCTOPRINT_KEY", frage: "OctoPrint API-Key", art: "geheim" },
+      { key: "PRUSASLICER_PATH", frage: "Pfad zu PrusaSlicer", hinweis: "leer = automatisch suchen (apt, ~/.local/bin, Flatpak)", art: "pfad" },
+      { key: "SLICER_PROFIL", frage: "PrusaSlicer-Profil (.ini)", hinweis: "in PrusaSlicer: Datei → Export → Konfiguration exportieren; leer = kein Slicen", art: "pfad" },
+      { key: "SLICER_TIMEOUT_MS", frage: "Zeitlimit fürs Slicen (ms)", hinweis: "der Pi ist langsam, 600000 = 10 Minuten", art: "zahl", standard: "600000", pruefen: pruefeZeitlimitMs },
       { key: "JARVIS_WORKSPACE", frage: "Arbeitsordner für Code und Websites", art: "pfad", standard: "workspace", pruefen: pruefeArbeitsordner },
       { key: "WEB_SEARCH", frage: "Websuche über die Claude-API", art: "wahl", wahl: ["on", "off"], standard: "on", pruefen: anAus },
     ],
-    checks: ["Browser", "Werkstatt", "3D-Drucker"],
+    checks: ["Browser", "Werkstatt", "3D-Drucker", "Slicer"],
   },
   {
     name: "proaktiv",

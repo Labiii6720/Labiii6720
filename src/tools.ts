@@ -1,4 +1,5 @@
 import { appendFileSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { relative } from "node:path";
 import { config } from "./config.js";
 import { createDraft, readMail, searchMails, sendMail } from "./gmail.js";
 import { haDomain, haService, haStates } from "./homeassistant.js";
@@ -7,7 +8,7 @@ import { recentOrders, searchProducts, updatePrice } from "./shopify.js";
 import { createGoogleEvent, getWeather, googleEvents, outlookEvents, recoveryToday } from "./sources.js";
 import { state } from "./state.js";
 import { clock } from "./time.js";
-import { listFiles, readFile, runCommand, writeFile } from "./workspace.js";
+import { listFiles, readFile, ROOT, runCommand, safePath, writeFile } from "./workspace.js";
 import * as browser from "./browser.js";
 import { saveZeitplaene, zeitplaene } from "./zeitplaene.js";
 import { cameras, describeCameras, dynamicWachen, eventClip, formatEvents, hasCameras, look, recentEvents, saveWachen, allWachen } from "./cameras.js";
@@ -16,7 +17,7 @@ import { readMail as gmailRead, searchMails as gmailSearch } from "./gmail.js";
 import { beraterTools } from "./berater.js";
 import { profil, saveProfil } from "./profil.js";
 import { describeProtokolle, protokolle, runProtokoll } from "./protokolle.js";
-import { anDrucker, hasOpenscad, pruefeVorschau, render, schreibeScad } from "./werkstatt.js";
+import { anDrucker, dauerText, gcodeZusammenfassung, hasOpenscad, hasSlicer, pruefeVorschau, pruefsumme, render, schreibeScad, slice, vomSlicer } from "./werkstatt.js";
 
 type Input = Record<string, any>;
 
@@ -586,17 +587,128 @@ const werkstatt: Tool[] = [
   },
   {
     name: "cad_drucken",
-    description: "Schickt die STL einer .scad-Datei an den 3D-Drucker (OctoPrint). Nur nach Freigabe mit PIN.",
-    input_schema: { type: "object", properties: { pfad: str("Pfad zur .scad- oder .stl-Datei"), starten: { type: "boolean", description: "Druck sofort starten" } }, required: ["pfad"] },
+    description: "Schickt ein Teil an den 3D-Drucker (OctoPrint). Mit eingerichtetem Slicer wird die STL vorher zu G-Code geslict, sonst geht die STL. Ein fertiger .gcode (aus cad_slicen) geht direkt. Nur nach Freigabe mit PIN.",
+    input_schema: { type: "object", properties: { pfad: str("Pfad zur .scad-, .stl- oder .gcode-Datei"), starten: { type: "boolean", description: "Druck sofort starten" } }, required: ["pfad"] },
     stufe: "sensibel",
-    summary: (i) => `3D-Druck: ${i.pfad}${i.starten ? " (sofort starten)" : ""}`,
+    summary: (i) => {
+      const p = String(i.pfad);
+      // Die Entscheidung G-Code/STL gilt ab hier: run() führt aus, was freigegeben wurde, nicht was später gerade da ist
+      if (/\.gcode$/i.test(p)) return `3D-Druck: ${i.pfad} → ${gcodeFreigabe(i, p)}${i.starten ? " (sofort starten)" : ""}`;
+      i.freigegeben_als = hasSlicer() ? "gcode" : "stl";
+      return `3D-Druck: ${i.pfad} → ${druckArt(p, i.freigegeben_als)}${i.starten ? " (sofort starten)" : ""}`;
+    },
     run: async (i) => {
       const p = String(i.pfad);
-      const stl = p.endsWith(".stl") ? p : (await render(p)).stlPath;
-      return anDrucker(stl, Boolean(i.starten));
+      const starten = Boolean(i.starten);
+      // Ohne Drucker steht der Ausgang fest: nicht erst minutenlang rendern und slicen
+      if (!config.octoprint) throw new Error("Kein Drucker eingerichtet (OCTOPRINT_URL, OCTOPRINT_KEY). Für eine Druckzeit-Schätzung genügt cad_slicen, Sir.");
+      if (/\.gcode$/i.test(p)) return gcodeAnDrucker(p, i.freigegeben_sha256, starten);
+      const slicerDa = hasSlicer();
+      const freigegeben: DruckArt | undefined = i.freigegeben_als === "gcode" || i.freigegeben_als === "stl" ? i.freigegeben_als : undefined;
+      if (freigegeben === "gcode" && !slicerDa) throw new Error(`Freigegeben war G-Code, aber der Slicer ist nicht mehr nutzbar (${SLICER_PRUEFEN}). Nichts an den Drucker geschickt, Sir.`);
+      // Ohne festgehaltene Entscheidung (alter Auftrag, Protokoll): mit Profil eingerichtet heisst G-Code, nie still die STL
+      if (!freigegeben && !slicerDa && config.slicerProfil?.trim()) throw new Error(`Slicer eingerichtet, aber nicht nutzbar (${SLICER_PRUEFEN}). Nichts an den Drucker geschickt, Sir.`);
+      const mitSlicer = freigegeben ? freigegeben === "gcode" : slicerDa;
+      const gerendert = !/\.stl$/i.test(p);
+      const stl = gerendert ? (await render(p)).stlPath : p;
+      if (!mitSlicer) {
+        if (gerendert) notausVorDruck("des Renderns", `Die STL liegt unter ${relative(ROOT, stl)}`);
+        const ergebnis = await anDrucker(stl, starten);
+        const hinweis = slicerDa
+          ? "Freigegeben war die STL ohne Slicen, also geht die STL; den G-Code erzeugt OctoPrint/der Slicer am Drucker."
+          : "Ohne Slicer (PRUSASLICER_PATH/SLICER_PROFIL) schicke ich die STL; den G-Code erzeugt dann OctoPrint/der Slicer am Drucker.";
+        // Ergebnis zuerst: Protokolle übernehmen nur die erste Zeile, und die muss sagen, ob der Druck läuft
+        return `${ergebnis}\n${hinweis}`;
+      }
+      // Scheitert das Slicen, bricht der Druck ab: freigegeben war G-Code, nicht die STL
+      const { gcodePath, dauerMs, sha256: erzeugt } = await slice(stl);
+      // Vor dem Upload: nach dem Druckstart darf kein Folgefehler den Erfolg überdecken (sonst droht eine zweite Freigabe)
+      const info = zusammenfassungSicher(gcodePath);
+      notausVorDruck("des Slicens", `Der G-Code liegt unter ${relative(ROOT, gcodePath)}`);
+      const ergebnis = await gcodeAnDrucker(gcodePath, erzeugt, starten);
+      return `${ergebnis}\nGeslict in ${dauerText(dauerMs)} (${info}).`;
+    },
+  },
+  {
+    name: "cad_slicen",
+    description: "Slict eine .stl (oder .scad, wird vorher gerendert) mit PrusaSlicer zu G-Code im Arbeitsordner, ohne zu drucken – zum Prüfen vorab. Liefert Dauer, Dateigrösse, geschätzte Druckzeit und Filament.",
+    input_schema: { type: "object", properties: { pfad: str("Pfad zur .stl- oder .scad-Datei") }, required: ["pfad"] },
+    stufe: "extern", // läuft auf dem Pi minutenlang mit voller Last
+    summary: (i) => `G-Code erzeugen (PrusaSlicer, kein Druck): ${i.pfad}`,
+    run: async (i) => {
+      const p = String(i.pfad);
+      const stl = /\.scad$/i.test(p) ? (await render(p)).stlPath : p;
+      const { gcodePath, dauerMs } = await slice(stl);
+      const weiter = config.octoprint ? "Gedruckt wird erst mit cad_drucken." : "Kein Drucker eingerichtet (OCTOPRINT_URL, OCTOPRINT_KEY); die Datei liegt bereit.";
+      return `G-Code erstellt: ${relative(ROOT, gcodePath)} (geslict in ${dauerText(dauerMs)}; ${zusammenfassungSicher(gcodePath)}). ${weiter}`;
     },
   },
 ];
+
+type DruckArt = "gcode" | "stl";
+const SLICER_PRUEFEN = "npm run check -- --nur Slicer";
+
+/** Was cad_drucken an den Drucker schickt – für die Freigabe-Nachricht. */
+function druckArt(pfad: string, art?: DruckArt): string {
+  if (/\.gcode$/i.test(pfad)) return "G-Code";
+  return art === "gcode" ? "G-Code (vorher mit PrusaSlicer geslict)" : "STL (ohne Slicer)";
+}
+
+/**
+ * Notaus und Notfall werden nur vor dem Start geprüft (telegram.ts); Rendern und Slicen dauern aber Minuten.
+ * Kam in der Zeit ein Notaus, geht nichts mehr an den Drucker – die Datei bleibt liegen.
+ */
+function notausVorDruck(schritt: string, datei: string): void {
+  if (!state.paused && !state.notfall?.aktiv) return;
+  throw new Error(`Notaus kam während ${schritt}: nichts an den Drucker geschickt, Sir. ${datei} bereit.`);
+}
+
+// ---------- G-Code: Bindung an die Freigabe ----------
+// Freigegeben wird genau ein Inhalt (sha256); die Herkunft (nur Ausgabe von slice()) führt werkstatt.ts.
+
+/**
+ * Freigabe-Text für einen fertigen G-Code; hält Prüfsumme und Grösse im Auftrag fest. Vom Modell mitgegebene Werte
+ * werden immer überschrieben. Wirft nie (summary läuft ausserhalb der Fehlerbehandlung); was hier fehlt, lehnt run() ab.
+ */
+function gcodeFreigabe(i: Input, p: string): string {
+  delete i.freigegeben_sha256;
+  delete i.freigegeben_bytes;
+  let datei: string;
+  let inhalt: Buffer;
+  try {
+    datei = safePath(p);
+    inhalt = readFileSync(datei);
+  } catch {
+    return "G-Code, Datei nicht lesbar – wird abgelehnt";
+  }
+  const hash = pruefsumme(inhalt);
+  i.freigegeben_sha256 = hash;
+  i.freigegeben_bytes = inhalt.length;
+  const herkunft = vomSlicer(hash) ? "vom Slicer erzeugt" : "ACHTUNG: G-Code NICHT vom Slicer erzeugt – wird abgelehnt";
+  const angaben = zusammenfassungSicher(datei) || `${inhalt.length} B`;
+  return `G-Code (${herkunft}; ${angaben}; Prüfsumme ${hash.slice(0, 12)})`;
+}
+
+/**
+ * Nur G-Code, dessen freigegebene Prüfsumme vom Slicer stammt. Ob die Datei noch genau diesen Inhalt hat, prüft
+ * anDrucker auf demselben Buffer, der hochgeladen wird – dazwischen kann nichts mehr tauschen.
+ */
+function gcodeAnDrucker(p: string, erwartet: unknown, starten: boolean): Promise<string> {
+  if (typeof erwartet !== "string" || !/^[0-9a-f]{64}$/.test(erwartet)) {
+    throw new Error("Für diesen G-Code fehlt die Prüfsumme der Freigabe (alter Auftrag): nichts an den Drucker geschickt, Sir. Bitte neu beantragen.");
+  }
+  if (!vomSlicer(erwartet)) throw new Error("Dieser G-Code stammt nicht vom Slicer (an den Drucker geht nur G-Code aus cad_slicen): nichts an den Drucker geschickt, Sir.");
+  return anDrucker(p, starten, erwartet);
+}
+
+/** Grösse, Druckzeit, Filament – fehlt die Datei inzwischen (zweites Slicen), nie ein Fehler. */
+function zusammenfassungSicher(gcodePath: string): string {
+  try {
+    return gcodeZusammenfassung(gcodePath);
+  } catch {
+    return "Angaben nicht lesbar";
+  }
+}
 
 const prot: Tool[] = [
   {
@@ -625,7 +737,9 @@ export function activeTools(): Tool[] {
   if (config.shopify) list.push(...shop);
   if (config.homeAssistant) list.push(...haus);
   if (hasCameras()) list.push(...kameras);
-  if (hasOpenscad()) list.push(...werkstatt);
+  if (hasOpenscad()) list.push(...werkstatt.filter((t) => t.name !== "cad_slicen" || hasSlicer()));
+  // cad_drucken braucht OpenSCAD nur für .scad (render meldet das selbst); .stl und .gcode gehen ohne
+  else if (hasSlicer()) list.push(...werkstatt.filter((t) => t.name === "cad_slicen" || (t.name === "cad_drucken" && config.octoprint)));
   if (!config.telegramToken) return list.filter((t) => !["datei_senden", "erinnerung", "zeitplan_erstellen"].includes(t.name));
   return list;
 }

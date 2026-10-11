@@ -2,6 +2,14 @@
 
 Kurz und nur das Wichtigste. Details stehen im README.
 
+## 0.21
+- Werkstatt-Slicer: Mit PrusaSlicer (`PRUSASLICER_PATH`, sonst Suche über apt, `~/.local/bin` und Flatpak zuletzt) und einem exportierten Profil (`SLICER_PROFIL`, `.ini`) slict `cad_drucken` die STL vor dem Upload und schickt G-Code an OctoPrint. Ohne Slicer geht wie bisher die STL, mit Hinweis. Ein fertiger `.gcode` geht direkt. Die Freigabe-Nachricht nennt, ob G-Code oder STL. Scheitert das Slicen, wird nicht gedruckt.
+- Neues Werkzeug `cad_slicen` (extern): erzeugt nur `<name>.gcode` im Arbeitsordner und meldet Dauer, Grösse, geschätzte Druckzeit, Filament und Schichten.
+- Zeitlimit `SLICER_TIMEOUT_MS` (Standard 10 Minuten). Es läuft nur ein Slicer zugleich, ohne Wiederholen und ohne Geheimnisse in der Umgebung. Der alte G-Code wird vorher gelöscht. Binärer G-Code wird abgelehnt. Fehler nennen die letzten Log-Zeilen.
+- Slicer und Drucker nehmen nur Dateien, die wirklich im Arbeitsordner liegen; Verknüpfungen nach aussen werden abgelehnt. `npm run check` hat den neuen Befund «Slicer», der Assistent fragt die drei Schlüssel im Abschnitt `werkstatt` ab.
+- Die Freigabe hält fest, ob G-Code oder STL gedruckt wird; ist der Slicer beim Tippen nicht mehr nutzbar, bricht der Druck ab. Notaus oder Notfall während Rendern/Slicen verhindern den Upload, die Datei bleibt liegen; der Upload an OctoPrint prüft das zusätzlich für alle Aufrufer.
+- Ein fertiger G-Code ist an die Freigabe gebunden: `cad_drucken` nimmt nur G-Code aus `cad_slicen` (Prüfsumme in `data/slicer-gcode.json`), die Freigabe nennt Herkunft, Angaben und Prüfsumme, und der Upload prüft die Prüfsumme auf genau den hochgeladenen Inhalt.
+
 ## 0.20
 - Satellit: Entitäten «Lautstärke» (0–100, gespeichert, Start 60), «Nachtmodus» (Lautstärke 30, LED gedimmt, vorherige Lautstärke kommt zurück) und «Ton-Feedback». Kurzer Doppelton beim Wakeword vor dem Zuhören, tieferer Ton bei Fehlern; die Töne erzeugt `esphome/tools/ton.mjs` als `esphome/ton.yaml` (7680 Bytes im Flash).
 - Zweiter Satellit im Bad (`jarvis-satellit-bad.yaml`); das Gemeinsame steht in `jarvis-satellit-basis.yaml`, beide Satelliten binden es als Paket ein. Entitätsnamen des ersten bleiben. Antworten und Ansagen laufen über einen internen Media-Player.

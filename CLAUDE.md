@@ -15,7 +15,7 @@ Du arbeitest am persönlichen Assistenten **JARVIS** von Labinot (Service Specia
 - `tools.ts` Werkzeugkasten; jedes Werkzeug hat eine Stufe `auto` / `extern` / `sensibel` (queue.ts). `extern` wartet auf Tippen, `sensibel` auf Tippen + PIN. Neue Werkzeuge immer mit richtiger Stufe und `summary`.
 - `telegram.ts` Zentrale: Befehle, Freigabe-Buttons, PIN, Notaus, Sprachnachrichten. `dashboard.ts` dieselben Funktionen fürs Web.
 - `brain.ts` Morgen (Cardio aus WHOOP, Tagesbriefing mit Freigaben-Hinweis `freigabenHinweis`), `alexa.ts` Skill (SSML nur über `ssml()`, Nachtstimme `ALEXA_NACHT`, per Stimme nur vorlesen, nie freigeben), `sources.ts` Wetter/Kalender/WHOOP.
-- `cameras.ts`/`watch.ts` Frigate (schauen, melden, wachen), `homeassistant.ts`, `shopify.ts`, `gmail.ts`, `browser.ts`, `workspace.ts` (Sandbox), `werkstatt.ts` (OpenSCAD/OctoPrint).
+- `cameras.ts`/`watch.ts` Frigate (schauen, melden, wachen), `homeassistant.ts`, `shopify.ts`, `gmail.ts`, `browser.ts`, `workspace.ts` (Sandbox), `werkstatt.ts` (OpenSCAD, PrusaSlicer-CLI mit Profil `SLICER_PROFIL`, OctoPrint; Dateien nur real im Arbeitsordner, Slicer ohne Geheimnisse in der Umgebung; G-Code nur aus `slice()` mit Prüfsumme der Freigabe an den Drucker, Herkunft in `data/slicer-gcode.json`).
 - `profil.ts`/`berater.ts` Lernen über den Nutzer und ehrlicher Berater, `verdichtung.ts` nächtliche Gedächtnis-Verdichtung (Haiku, Vorschlag geprüft, nichts gelöscht, Archiv `data/profil-archiv.jsonl`), `finanzen.ts` Rechnungen und Finanz-Wochenbericht (nur vorbereiten), `notfall.ts` defensives Notfall-Protokoll, `scheduler.ts` Zeitpläne, Rückblick, Rechnungs- und Zielerinnerungen, Finanzbericht, Verdichtungs-Lauf, `check.ts` Selbsttest, `claude.ts` Verbrauch/Kosten, `audit.ts` Protokoll.
 - `robust.ts` Fehlereinordnung, Wiederholen mit Backoff (`mitWiederholung`), Gesundheit je Anbindung und Watchdog; Claude-Aufrufe über `claudeAufruf` (claude.ts), eigene Meldungen über `sendeSpaeter` (Postausgang in telegram.ts). Nebenwirkungen (Schalten, Senden, Uploads) nie blind wiederholen.
 - Konfiguration nur über `.env` (siehe .env.example) und die JSON-Dateien `cameras.json`, `protokolle.json`. Zustand und Geheimnisse in `data/` (600).
@@ -51,6 +51,5 @@ Du arbeitest am persönlichen Assistenten **JARVIS** von Labinot (Service Specia
 ## Offener Plan (Schicht 2, nach Nutzen sortiert)
 
 1. Dashboard: Freigabe-Historie, Kosten (aus usage.json), Zeitpläne und Wachen bearbeiten; Finanz-Wochenbericht aus `/api/finanzen` darstellen.
-2. Werkstatt: Slicer-Anbindung (PrusaSlicer CLI) damit `cad_drucken` G-Code statt STL schickt.
 
 Was nicht kommt: Anzug, Gegenangriff, Selbstmodifikation, Zahlungsauslösung.

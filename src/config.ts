@@ -131,4 +131,10 @@ export const config = {
   openscadPath: opt("OPENSCAD_PATH"),
   /** 3D-Drucker über OctoPrint: URL und API-Key */
   octoprint: opt("OCTOPRINT_URL") && opt("OCTOPRINT_KEY") ? { url: opt("OCTOPRINT_URL")!.replace(/\/$/, ""), key: opt("OCTOPRINT_KEY")! } : undefined,
+  /** PrusaSlicer (CLI) für G-Code; leer = automatisch suchen (apt, ~/.local/bin, Flatpak zuletzt) */
+  slicerPath: opt("PRUSASLICER_PATH"),
+  /** Aus PrusaSlicer exportierte Konfiguration (.ini); ohne Profil kein Slicen, dann geht die STL an OctoPrint */
+  slicerProfil: opt("SLICER_PROFIL"),
+  /** Zeitlimit fürs Slicen in ms; der Pi ist langsam, Standard 10 Minuten */
+  slicerTimeoutMs: Number(opt("SLICER_TIMEOUT_MS") ?? "600000"),
 };
