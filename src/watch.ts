@@ -2,8 +2,9 @@ import mqtt from "mqtt";
 import { allWachen, cameraByFrigateName, cameras, eventSnapshot, look, snapshot, type Bedingung } from "./cameras.js";
 import { config } from "./config.js";
 import { isHome } from "./homeassistant.js";
+import { fehlerDetail, gesundheit, voruebergehend } from "./robust.js";
 import { state } from "./state.js";
-import { sendPhoto, sendText } from "./telegram.js";
+import { sendPhoto, sendText, sendeSpaeter } from "./telegram.js";
 import { minutesOfDay } from "./time.js";
 
 const log = (e: unknown) => console.error(e instanceof Error ? e.message : e);
@@ -64,7 +65,10 @@ export async function onCameraEvent(ev: CameraEvent): Promise<boolean> {
   }
   const buttons = ev.id ? { reply_markup: { inline_keyboard: [[{ text: "🎬 Clip", callback_data: `clip:${ev.id}` }]] } } : {};
   if (image) await sendPhoto(image, caption, buttons);
-  else await sendText(caption, buttons);
+  // Text ohne Bild: mit Clip-Knopf direkt (der Postausgang kennt keine Knöpfe); scheitert das trotz Wiederholung,
+  // wird der Text ohne Knopf nachgereicht – ein Clip-Knopf Stunden später hilft ohnehin nicht mehr.
+  else if (ev.id) await sendText(caption, buttons).catch(() => sendeSpaeter(caption));
+  else await sendeSpaeter(caption);
   return true;
 }
 
@@ -80,14 +84,36 @@ export function parseFrigateMessage(payload: string): CameraEvent | null {
   return { camera: a.camera, label: a.label, zones: a.entered_zones?.length ? a.entered_zones : zonesNow, id: a.id, hasSnapshot: a.has_snapshot };
 }
 
-export function startMqtt(): void {
-  if (!config.mqtt) return;
-  const client = mqtt.connect(config.mqtt.url, { username: config.mqtt.username, password: config.mqtt.password, reconnectPeriod: 5000 });
+/** Das Wenige, das die Ereignisverarbeitung vom MQTT-Client braucht (damit Tests eine Attrappe anhängen können). */
+export interface MqttClientLike {
+  on(event: "connect", cb: () => void): unknown;
+  on(event: "error", cb: (e: Error) => void): unknown;
+  on(event: "offline" | "reconnect", cb: () => void): unknown;
+  on(event: "message", cb: (topic: string, payload: Buffer) => void): unknown;
+  subscribe(topic: string): unknown;
+}
+
+/** MQTT-Fehlertexte können die Broker-URL samt Zugangsdaten enthalten – schwaerze() nimmt den Nutzerteil, hier zusätzlich das rohe Passwort. */
+function mqttDetail(e: unknown): string {
+  let text = fehlerDetail(e);
+  const pw = config.mqtt?.password;
+  if (pw && pw.length >= 4) text = text.split(pw).join("<geheim>");
+  return text;
+}
+
+/**
+ * Hängt die Ereignisverarbeitung an einen MQTT-Client. Verbindungsfehler laufen nur über die Gesundheit
+ * (eine Logzeile pro Störung, nicht pro Wiederholungsversuch alle 5 s); `connect` meldet die Erholung.
+ */
+export function bindeMqtt(client: MqttClientLike): void {
   client.on("connect", () => {
     client.subscribe("frigate/events");
+    gesundheit.melde("mqtt", true);
     console.log("MQTT verbunden, Frigate-Ereignisse aktiv");
   });
-  client.on("error", log);
+  client.on("error", (e) => gesundheit.melde("mqtt", false, mqttDetail(e)));
+  client.on("offline", () => gesundheit.melde("mqtt", false, "Verbindung verloren"));
+  client.on("reconnect", () => gesundheit.melde("mqtt", false, "Verbindung wird neu aufgebaut"));
   client.on("message", (_topic, payload) => {
     try {
       const ev = parseFrigateMessage(payload.toString());
@@ -96,6 +122,11 @@ export function startMqtt(): void {
       log(e);
     }
   });
+}
+
+export function startMqtt(): void {
+  if (!config.mqtt) return;
+  bindeMqtt(mqtt.connect(config.mqtt.url, { username: config.mqtt.username, password: config.mqtt.password, reconnectPeriod: 5000 }));
 }
 
 // ---------- Wachen (regelmässig hinschauen) ----------
@@ -120,7 +151,8 @@ export async function wachenTick(now = Date.now()): Promise<void> {
       lastHit.set(key, now);
       await sendPhoto(r.image, `👁 ${w.kamera}: ${w.frage}\n${r.text.replace(/^\s*ja\b[.:,\s-]*/i, "").trim()}`);
     } catch (e) {
-      log(e);
+      // Vorübergehende Störungen (Frigate, Claude, Telegram) loggt bereits die Gesundheit – sonst eine Zeile pro Wache und Minute
+      if (!voruebergehend(e)) log(e);
     }
   }
 }

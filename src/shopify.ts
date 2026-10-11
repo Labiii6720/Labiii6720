@@ -1,19 +1,30 @@
 import { config } from "./config.js";
+import { HttpFehler, mitWiederholung, retryAfterAusHeader, type WiederholOptionen } from "./robust.js";
 
+/** Nur für Tests: Warten und Zufall des Backoffs injizieren (im Betrieb leer). */
+export const _testOptionen: Pick<WiederholOptionen, "warten" | "zufall"> = {};
+
+/**
+ * Lese-Queries werden bei Netz-, Zeitlimit-, Rate- und Serverfehlern einmal wiederholt. Mutationen nie:
+ * bei Zeitlimit oder 5xx kann Shopify die Änderung schon ausgeführt haben, ein zweiter Versuch würde sie verdoppeln.
+ */
 async function gql<T>(query: string, variables: Record<string, unknown> = {}): Promise<T> {
   if (!config.shopify) throw new Error("Shopify ist nicht eingerichtet (SHOPIFY_SHOP, SHOPIFY_TOKEN).");
   const { shop, token, version } = config.shopify;
-  const res = await fetch(`https://${shop}.myshopify.com/admin/api/${version}/graphql.json`, {
-    method: "POST",
-    headers: { "X-Shopify-Access-Token": token, "Content-Type": "application/json" },
-    body: JSON.stringify({ query, variables }),
-    signal: AbortSignal.timeout(15_000),
-  });
-  if (!res.ok) throw new Error(`Shopify HTTP ${res.status}`);
-  const json = (await res.json()) as { data?: T; errors?: { message: string }[] };
-  if (json.errors?.length) throw new Error(`Shopify: ${json.errors.map((e) => e.message).join("; ")}`);
-  if (!json.data) throw new Error("Shopify: leere Antwort");
-  return json.data;
+  const mutation = /^\s*mutation\b/.test(query);
+  return mitWiederholung(mutation ? "shopify.mutation" : "shopify.query", async () => {
+    const res = await fetch(`https://${shop}.myshopify.com/admin/api/${version}/graphql.json`, {
+      method: "POST",
+      headers: { "X-Shopify-Access-Token": token, "Content-Type": "application/json" },
+      body: JSON.stringify({ query, variables }),
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (!res.ok) throw new HttpFehler(`Shopify HTTP ${res.status}`, res.status, retryAfterAusHeader(res.headers));
+    const json = (await res.json()) as { data?: T; errors?: { message: string }[] };
+    if (json.errors?.length) throw new Error(`Shopify: ${json.errors.map((e) => e.message).join("; ")}`);
+    if (!json.data) throw new Error("Shopify: leere Antwort");
+    return json.data;
+  }, { versuche: mutation ? 1 : 2, komponente: "shopify", ..._testOptionen });
 }
 
 interface Money { amount: string; currencyCode: string }

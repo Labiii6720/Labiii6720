@@ -11,6 +11,7 @@ import { ausloesen, notfallAktiv } from "./notfall.js";
 import { profil } from "./profil.js";
 import { protokolle, runProtokoll } from "./protokolle.js";
 import { createAuftrag, getAuftrag, offeneAuftraege } from "./queue.js";
+import { gesundheit } from "./robust.js";
 import { save, state, type Mode } from "./state.js";
 import { approveAuftrag, denyAuftrag, hooks, sendText } from "./telegram.js";
 import { allWachen } from "./cameras.js";
@@ -48,6 +49,7 @@ export function statusJson(_req: Request, res: Response): void {
     protokolle: Object.entries(protokolle).map(([k, p]) => ({ name: k, beschreibung: p.beschreibung, stufe: p.stufe })),
     ziele: profil.ziele.filter((z) => z.status === "offen").map((z) => ({ id: z.id, text: z.text, frist: z.frist })),
     werte: profil.werte,
+    gesundheit: gesundheit.alle(),
   });
 }
 

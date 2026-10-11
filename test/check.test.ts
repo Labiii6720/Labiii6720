@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
-import { createServer, type AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, describe, it } from "node:test";
@@ -12,18 +11,18 @@ after(() => rmSync(temp, { recursive: true, force: true }));
 process.env.TELEGRAM_BOT_TOKEN = "123456789:ABCdefGHIjklMNOpqrSTUvwxYZ0123456789";
 process.env.TELEGRAM_CHAT_ID = "12345";
 
-// Stummer TCP-Listener: nimmt Verbindungen an, antwortet nie – simuliert eine hängende Claude-API
-const stumm = createServer((socket) => socket.on("error", () => {}));
-await new Promise<void>((ok) => stumm.listen(0, "127.0.0.1", ok));
-after(() => stumm.close());
+// Claude-API: kein Netz. Der fetch-Ersatz unten wirft für diese Adresse sofort das, was undici beim
+// Zeitlimit des SDK wirft (AbortError) – so verhält sich das SDK wie bei einer hängenden Verbindung, ohne echten Timer.
 process.env.ANTHROPIC_API_KEY = "sk-ant-attrappe-nur-fuer-tests";
-process.env.ANTHROPIC_BASE_URL = `http://127.0.0.1:${(stumm.address() as AddressInfo).port}`;
+process.env.ANTHROPIC_BASE_URL = "http://127.0.0.1:9";
 
 let aufrufe = 0;
-const echterFetch = globalThis.fetch;
-globalThis.fetch = (async (eingabe: string | URL | Request, init?: RequestInit) => {
-  // Das Anthropic-SDK darf nur den stummen Listener erreichen
-  if (String(eingabe instanceof Request ? eingabe.url : eingabe).startsWith(process.env.ANTHROPIC_BASE_URL!)) return echterFetch(eingabe, init);
+let claudeVersuche = 0;
+globalThis.fetch = (async (eingabe: string | URL | Request) => {
+  if (String(eingabe instanceof Request ? eingabe.url : eingabe).startsWith(process.env.ANTHROPIC_BASE_URL!)) {
+    claudeVersuche++;
+    throw Object.assign(new Error("This operation was aborted"), { name: "AbortError" });
+  }
   aufrufe++;
   assert.ok(String(eingabe).startsWith("https://api.telegram.org/bot"), `unerwarteter Aufruf: ${eingabe}`);
   return new Response(JSON.stringify({ ok: true, result: { username: "jarvis_test_bot" } }), { headers: { "content-type": "application/json" } });
@@ -71,14 +70,16 @@ describe("selbsttest(nur)", () => {
     assert.equal(aufrufe, 0);
   });
 
-  it("Claude-API: hängende Verbindung → ein Versuch, fehler nach unter 20 s", { timeout: 25_000 }, async () => {
-    const start = Date.now();
+  it("Claude-API: Zeitlimit → genau ein Verbindungsversuch (maxRetries 0), fehler", async () => {
+    aufrufe = 0;
+    claudeVersuche = 0;
     const b = await selbsttest(["Claude-API"]);
-    const dauer = Date.now() - start;
     assert.equal(b.length, 1);
     assert.equal(b[0].name, "Claude-API");
     assert.equal(b[0].status, "fehler");
-    assert.ok(dauer < 20_000, `Selbsttest brauchte ${dauer} ms (SDK wiederholt den Aufruf?)`);
+    assert.match(b[0].info, /timed out/i);
+    assert.equal(claudeVersuche, 1, "SDK wiederholt den Aufruf (maxRetries fehlt?)");
+    assert.equal(aufrufe, 0);
   });
 });
 

@@ -1,13 +1,38 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { config } from "./config.js";
+import { gesundheit, mitWiederholung, type WiederholOptionen } from "./robust.js";
+import { state } from "./state.js";
 
 /**
  * Ein Client für alle Aufrufe plus Verbrauchszählung. Jeder API-Aufruf meldet seine Tokens hier an,
  * /kosten in Telegram zeigt Tag und Monat mit einer Kostenschätzung.
  */
 let client: Anthropic | undefined;
-export const anthropic = () => (client ??= new Anthropic());
+/** maxRetries 2 = SDK-Standard (schnelle Wiederholungen bei 408/409/429/5xx); die langsamen macht claudeAufruf. */
+export const anthropic = () => (client ??= new Anthropic({ maxRetries: 2 }));
+
+/**
+ * Nur diese Fehler lohnen einen späten zweiten Anlauf; BadRequest, Auth, NotFound und Abbruch nie.
+ * Notaus (state.paused) schaltet die Wiederholung ab statt einen Abbruchfehler zu werfen: so bleibt der echte,
+ * vorübergehende Fehler erhalten und die Gesundheit verbucht keinen Nutzer-Abbruch als Claude-Störung.
+ */
+const claudeWiederholen = (e: unknown): boolean =>
+  !state.paused && (e instanceof Anthropic.RateLimitError || e instanceof Anthropic.APIConnectionError || e instanceof Anthropic.InternalServerError);
+
+/**
+ * Gemeinsame Hülle für alle Claude-Aufrufe: bis zu 3 Versuche mit Backoff 5–30 s (Retry-After der API hat Vorrang),
+ * Gesundheit der Komponente «claude» wird geführt. `fn` erhält die Versuchsnummer (1 = erster Anlauf).
+ * `test` erlaubt Tests, Warten und Zufall zu injizieren.
+ */
+export async function claudeAufruf<T>(zweck: string, fn: (versuch: number) => Promise<T>, test: Pick<WiederholOptionen, "warten" | "zufall"> = {}): Promise<T> {
+  try {
+    return await mitWiederholung(`claude.${zweck}`, fn, { versuche: 3, basisMs: 5000, maxMs: 30000, komponente: "claude", wiederholen: claudeWiederholen, ...test });
+  } catch (e) {
+    if (e instanceof Anthropic.AuthenticationError) gesundheit.melde("claude", false, "API-Schlüssel abgelehnt");
+    throw e;
+  }
+}
 
 export interface Verbrauch { calls: number; input: number; output: number; cacheRead: number; cacheWrite: number }
 type Usage = Record<string, Verbrauch>; // YYYY-MM-DD → Verbrauch

@@ -1,8 +1,9 @@
 import Anthropic from "@anthropic-ai/sdk";
-import { anthropic as claude, trackUsage } from "./claude.js";
+import { anthropic as claude, claudeAufruf, trackUsage } from "./claude.js";
 import { exec } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { config } from "./config.js";
+import { HttpFehler, mitWiederholung } from "./robust.js";
 import { ROOT, safePath, writeFile } from "./workspace.js";
 
 /**
@@ -46,7 +47,7 @@ export async function render(scadPath: string): Promise<{ png: Buffer; stlPath: 
 /** Jarvis schaut sich seine eigene Vorschau an und beschreibt/bewertet sie. */
 export async function pruefeVorschau(png: Buffer, auftrag: string): Promise<string> {
   const anthropic = claude();
-  const msg = await anthropic.messages.create(
+  const msg = await claudeAufruf("werkstatt", () => anthropic.messages.create(
     {
       model: config.claudeModelSehen || config.claudeModel,
       max_tokens: 400,
@@ -61,27 +62,34 @@ export async function pruefeVorschau(png: Buffer, auftrag: string): Promise<stri
       ],
     },
     { timeout: 60_000 },
-  );
+  ));
   trackUsage(msg);
   return msg.content.map((b) => (b.type === "text" ? b.text : "")).join("").trim();
 }
 
-/** STL an OctoPrint hochladen und optional den Druck starten. */
+/**
+ * STL an OctoPrint hochladen und optional den Druck starten. Der Upload wird nie wiederholt: bei Zeitlimit oder
+ * Serverfehler kann die Datei bereits angekommen und der Druck gestartet sein – ein zweiter Versuch druckt doppelt.
+ * Der Aufruf läuft trotzdem durch `mitWiederholung` (ein Versuch), damit die Gesundheit von OctoPrint geführt wird.
+ */
 export async function anDrucker(stlPath: string, starten: boolean): Promise<string> {
-  if (!config.octoprint) throw new Error("Kein Drucker eingerichtet (OCTOPRINT_URL, OCTOPRINT_KEY).");
+  const octoprint = config.octoprint;
+  if (!octoprint) throw new Error("Kein Drucker eingerichtet (OCTOPRINT_URL, OCTOPRINT_KEY).");
   const stl = safePath(stlPath);
   if (!existsSync(stl)) throw new Error(`STL nicht gefunden: ${stlPath}`);
-  const form = new FormData();
-  form.append("file", new Blob([new Uint8Array(readFileSync(stl))]), stl.split("/").pop());
-  form.append("select", "true");
-  form.append("print", starten ? "true" : "false");
-  const res = await fetch(`${config.octoprint.url}/api/files/local`, {
-    method: "POST",
-    headers: { "X-Api-Key": config.octoprint.key },
-    body: form,
-    signal: AbortSignal.timeout(60_000),
-  });
-  if (!res.ok) throw new Error(`OctoPrint HTTP ${res.status}: ${(await res.text()).slice(0, 200)}`);
+  await mitWiederholung("octoprint.upload", async () => {
+    const form = new FormData();
+    form.append("file", new Blob([new Uint8Array(readFileSync(stl))]), stl.split("/").pop());
+    form.append("select", "true");
+    form.append("print", starten ? "true" : "false");
+    const res = await fetch(`${octoprint.url}/api/files/local`, {
+      method: "POST",
+      headers: { "X-Api-Key": octoprint.key },
+      body: form,
+      signal: AbortSignal.timeout(60_000),
+    });
+    if (!res.ok) throw new HttpFehler(`OctoPrint HTTP ${res.status}: ${(await res.text()).slice(0, 200)}`, res.status);
+  }, { versuche: 1, komponente: "octoprint" });
   return starten ? "An den Drucker geschickt, Druck gestartet." : "An den Drucker geschickt (nicht gestartet).";
 }
 

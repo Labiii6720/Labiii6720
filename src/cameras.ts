@@ -1,7 +1,8 @@
 import Anthropic from "@anthropic-ai/sdk";
-import { anthropic as claude, trackUsage } from "./claude.js";
+import { anthropic as claude, claudeAufruf, trackUsage } from "./claude.js";
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { config } from "./config.js";
+import { HttpFehler, mitWiederholung, retryAfterAusHeader, type WiederholOptionen } from "./robust.js";
 
 /**
  * Kameras laufen über Frigate (Erkennung, Aufnahme, Zonen – alles lokal).
@@ -74,9 +75,20 @@ function frigate(): string {
   return config.frigateUrl;
 }
 
+/** Nur für Tests: Warten und Zufall des Backoffs injizieren (im Betrieb leer). */
+export const _testOptionen: Pick<WiederholOptionen, "warten" | "zufall"> = {};
+
+/** Frigate-GET ist nebenwirkungsfrei: zwei Versuche bei Netz-, Zeitlimit- und Serverfehlern. */
+async function frigateGet(path: string, timeoutMs: number, label = path.split("?")[0]): Promise<Response> {
+  return mitWiederholung("frigate.get", async () => {
+    const res = await fetch(`${frigate()}${path}`, { signal: AbortSignal.timeout(timeoutMs) });
+    if (!res.ok) throw new HttpFehler(`Frigate HTTP ${res.status} (${label})`, res.status, retryAfterAusHeader(res.headers));
+    return res;
+  }, { versuche: 2, komponente: "frigate", ..._testOptionen });
+}
+
 async function bytes(path: string, timeoutMs = 15_000): Promise<Buffer> {
-  const res = await fetch(`${frigate()}${path}`, { signal: AbortSignal.timeout(timeoutMs) });
-  if (!res.ok) throw new Error(`Frigate HTTP ${res.status} (${path.split("?")[0]})`);
+  const res = await frigateGet(path, timeoutMs);
   return Buffer.from(await res.arrayBuffer());
 }
 
@@ -98,8 +110,7 @@ export interface FrigateEvent {
 export async function recentEvents(opts: { kamera?: string; stunden?: number; limit?: number } = {}): Promise<FrigateEvent[]> {
   const q = new URLSearchParams({ limit: String(opts.limit ?? 20), after: String(Math.floor(Date.now() / 1000 - (opts.stunden ?? 24) * 3600)) });
   if (opts.kamera) q.set("cameras", cameras[opts.kamera]?.frigate ?? opts.kamera);
-  const res = await fetch(`${frigate()}/api/events?${q}`, { signal: AbortSignal.timeout(15_000) });
-  if (!res.ok) throw new Error(`Frigate HTTP ${res.status} (events)`);
+  const res = await frigateGet(`/api/events?${q}`, 15_000, "events");
   return (await res.json()) as FrigateEvent[];
 }
 
@@ -122,7 +133,7 @@ export async function look(cam: string, question: string, image?: Buffer): Promi
   if (!c) throw new Error(`Kamera «${cam}» kenne ich nicht.`);
   const img = image ?? (await snapshot(cam));
   const anthropic = claude();
-  const msg = await anthropic.messages.create(
+  const msg = await claudeAufruf("sehen", () => anthropic.messages.create(
     {
       model: config.claudeModelSehen || config.claudeModel,
       max_tokens: 400,
@@ -137,7 +148,7 @@ export async function look(cam: string, question: string, image?: Buffer): Promi
       ],
     },
     { timeout: 60_000 },
-  );
+  ));
   trackUsage(msg);
   return { text: msg.content.map((b) => (b.type === "text" ? b.text : "")).join("").trim(), image: img };
 }

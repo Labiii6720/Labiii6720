@@ -503,7 +503,29 @@ Nur einzelne Anbindungen: `npm run check -- --nur Telegram,Frigate` (Namen wie i
 - **Abend-/Tagesrückblick** (`RUECKBLICK`): Jarvis schaut auf den Tag, notiert echte Entscheidungen, hält belegte Muster fest und sagt dir in wenigen Sätzen, was wichtig war und was ansteht. Das ist das Lernen über dich.
 - **Zielcheck wöchentlich** (`ZIELCHECK`, z. B. `so 18:00`): jedes Ziel durchgehen, konkreter nächster Schritt, ehrlich auch wenn etwas stillsteht; hilfreiche Termine kommen als Freigabe.
 
-Alle drei respektieren Notaus und Notfall und laufen je höchstens einmal am Tag.
+Alle drei respektieren Notaus und Notfall und laufen je höchstens einmal am Tag. Der Tag des letzten Laufs steht in `data/routinen.json`, damit ein Neustart im Nachholfenster den Lauf nicht wiederholt. Verpasst ein Lauf seine Minute (Ausfall, Neustart), wird er im Nachholfenster `ZEITPLAN_NACHHOLEN_MIN` nachgeholt (siehe Robustheit unten).
+
+### Robustheit: Wiederholen, Postausgang, Watchdog
+
+Netz und Dienste fallen aus, Jarvis nicht. Seit 0.16 ordnet er jeden Fehler ein (Netz, Zeitlimit, Rate-Limit, Server, Zugang, Anfrage) und entscheidet daraus, ob ein neuer Versuch lohnt. Ohne Störung ändert sich nichts: gleiche Nachrichten, gleiche Zeiten.
+
+**Wiederholen mit Backoff.** Vorübergehende Fehler (Netz, Zeitlimit, 429, 5xx) werden mit wachsender Wartezeit und etwas Zufall wiederholt; nennt der Dienst ein `Retry-After`, gilt das (gedeckelt auf 60 s). Abgewiesene Anfragen (4xx) und abgelehnte Zugänge (401/403) werden nie wiederholt, da hilft kein zweiter Versuch.
+
+- Claude: das SDK macht die schnellen Wiederholungen (2×), Jarvis darüber drei langsame Anläufe mit 5 bis 30 s Pause, nur bei Rate-Limit, Verbindungs- und Serverfehlern. Ein Notaus (`/pause`) während der Wartezeit bricht ab. Statt roher Fehlertexte bekommst du einen klaren Satz: «Die Verbindung zur Claude-API hakt gerade (Rate-Limit). Ich habe es dreimal versucht – bitte in einer Minute nochmals, Sir.» Ein abgelehnter Schlüssel heisst: «Die Claude-API lehnt den Zugang ab. Bitte ANTHROPIC_API_KEY prüfen, Sir.»
+- Telegram: Senden (Text, Bild, Clip, Datei, Sprachnachricht, Knöpfe) bis zu viermal, 1 bis 15 s Pause; nicht bei 400 («chat not found») oder 401 (Token). Das Polling wartet nach Fehlern 1 s → 2 → 4 → … 60 s statt fest 3 s und loggt nicht mehr jeden Versuch. HTTP 409 (ein zweiter Jarvis läuft mit demselben Token) wird einmal klar geloggt, dann 30 s Pause; 401 einmal, dann 5 Minuten.
+- Home Assistant: Lesen bis zu dreimal. Frigate, Wetter, Kalender, WHOOP, Shopify-Abfragen, Spracherkennung und Sprachausgabe je ein zweiter Versuch.
+
+**Was bewusst nicht wiederholt wird.** Alles mit Nebenwirkung, bei dem ein zweiter Versuch doppelt wirken könnte:
+
+- Schaltbefehle an Home Assistant nur dann, wenn die Anfrage HA nachweislich nie erreicht hat (Verbindungsaufbau gescheitert: `ECONNREFUSED`, `ENOTFOUND`, `ENETUNREACH` …), und höchstens zweimal. Bei Zeitlimit, 5xx oder abgebrochener Verbindung kann HA den Befehl schon ausgeführt haben. `toggle`, `increase_*`, `decrease_*`, `*step*`, `press` und `trigger` nie: ein zweiter Versuch kippt den Zustand zurück oder löst doppelt aus.
+- Zahlungen gibt es ohnehin nur als Vorbereitung; Gmail-Senden, Shopify-Änderungen und der Upload an OctoPrint laufen genau einmal. Ein doppelt gesendetes Mail, eine doppelte Preisänderung oder ein doppelt gestarteter Druck wären schlimmer als ein Fehler, den du siehst.
+- Die Spracherkennung wird bei Zeitlimit nicht wiederholt (sonst wartest du doppelt so lange auf eine Antwort).
+
+**Internetausfall.** Das Telegram-Polling geht in den Backoff, Claude-Aufrufe scheitern leise, die Gesundheit merkt sich die Störung. Zeitpläne, Rückblick, Rechnungs-Erinnerung und Zielcheck markieren einen Lauf erst **nach** Erfolg als erledigt. Schlägt er vorübergehend fehl oder ist das Internet weg, bleibt er offen und wird im **Nachholfenster** erneut versucht (frühestens alle 5 Minuten, eine Log-Zeile pro Störung). `ZEITPLAN_NACHHOLEN_MIN` (Standard 60) legt fest, wie viele Minuten nach der Uhrzeit das noch gilt; `0` heisst nur zur Minute wie früher. Ein Zeitplan um 07:00 kommt also bei einem Ausfall bis 07:40 noch, bei einem bis 08:30 nicht mehr. Ein dauerhafter Fehler (etwa ein abgelehnter Schlüssel) wird einmal gemeldet und der Lauf als erledigt markiert, sonst würde er bis zum Fensterende alle 5 Minuten scheitern.
+
+**Postausgang.** Meldungen, die Jarvis von selbst schickt (Zeitpläne, Rückblick, Rechnungen, Zielcheck, Erinnerungen, Wachen-Texte, Watchdog), landen in `data/postausgang.json`, wenn Telegram trotz Wiederholung nicht erreichbar ist (höchstens 100, die ältesten fliegen raus). Jede Minute probiert Jarvis es erneut und reicht sie in Reihenfolge nach, mit dem Vermerk «(nachgereicht, 14:32)». Bilder gehen direkt mit Wiederholung; ein Clip-Knopf Stunden später hilft ohnehin nicht mehr. Beim Start steht im Log, wie viele Nachrichten warten.
+
+**Watchdog.** Jede überwachte Anbindung (Claude, Telegram, Home Assistant, Frigate, MQTT, WHOOP, Wetter, Kalender, Shopify, Stimme, OctoPrint) hat einen Gesundheitszustand; Gmail läuft noch ohne (Lesen ohne Wiederholung, Senden bewusst nicht), ein Fehler dort zeigt sich nur in der jeweiligen Antwort und in `/check`. Ist sie `WATCHDOG_MINUTEN` lang (Standard 10, `0` = aus) am Stück gestört, meldet Jarvis das genau einmal: «Sir, Home Assistant antwortet seit 12 Minuten nicht (HTTP 502). Ich versuche es weiter.» Kommt sie zurück: «Home Assistant ist wieder erreichbar (Ausfall 25 Minuten).» Bei einem Internetausfall gibt es eine Sammelmeldung («Sir, die Internetverbindung ist seit 10 Minuten gestört.») statt einer je Anbindung; die Meldungen gehen über den Postausgang, kommen also nach, sobald Telegram wieder geht. Im Log steht der erste Fehler einer Störung und danach höchstens alle 10 Minuten eine Zeile, nicht jeder Versuch. `/check` in Telegram hängt den Stand an («❌ homeassistant seit 12 Min: HTTP 502»), das Dashboard liefert ihn unter `/status.json` als `gesundheit`. Fehlertexte werden vor dem Loggen geschwärzt (Bot-Token, Schlüssel, Zugangsdaten in URLs).
 
 ### Tokens effizient
 
@@ -528,7 +550,7 @@ Damit spricht der Raum mit demselben Jarvis wie Telegram, Alexa und die Zentrale
 
 `npm test` fährt die Tests in `test/` mit Nodes eingebautem Testläufer (`node --test`, dank tsx direkt aus TypeScript). Sie brauchen weder `.env` noch Netz: echte Dienste werden nie angesprochen, Aufrufe nach aussen bekommen Attrappen (`globalThis.fetch` wird ersetzt und zählt die Aufrufe), geschrieben wird nur in Temp-Verzeichnisse, die am Ende wieder verschwinden.
 
-Heute abgedeckt: die `.env`-Verarbeitung des Assistenten (Roundtrip gegen Nodes eigenen Parser `util.parseEnv`, Kommentare und Reihenfolge, Rechte, `.env.bak`), alle Prüffunktionen, das Schema gegen `.env.example` (jeder Schlüssel genau einmal, in beide Richtungen), der Assistent End-zu-End mit gepipten Antworten, und `npm run check -- --nur`.
+Heute abgedeckt: die `.env`-Verarbeitung des Assistenten (Roundtrip gegen Nodes eigenen Parser `util.parseEnv`, Kommentare und Reihenfolge, Rechte, `.env.bak`), alle Prüffunktionen, das Schema gegen `.env.example` (jeder Schlüssel genau einmal, in beide Richtungen), der Assistent End-zu-End mit gepipten Antworten, `npm run check -- --nur`, und die Robustheit: Fehlereinordnung, Backoff und Watchdog (`robust.ts`), Telegram-Wiederholung und Postausgang, Claude-Anläufe, Home-Assistant-Lesen/Schalten, Nachholfenster und Zeitpläne (Zeit und Zufall werden injiziert, kein Test wartet echte Sekunden).
 
 Vor und nach jeder Änderung am Code: `npm run typecheck` muss sauber und `npm test` grün sein. Neue Anbindungen bekommen Tests mit Attrappen, nie mit echten Zugängen.
 
@@ -597,6 +619,10 @@ In dieser Reihenfolge, alles dauert zusammen keine zehn Minuten:
 | WHOOP-Refresh schlägt fehl | `npm run whoop:auth` erneut. WHOOP tauscht den Refresh-Token bei jeder Erneuerung aus, nutze ihn also nur in einer Jarvis-Instanz |
 | Briefing fehlt oder ist veraltet | `npm run try:briefing` |
 | Routine startet den Skill nicht | Test-Tab auf *Development*, Echo und Developer-Konto mit demselben Amazon-Login |
+| Im Log «Ein zweiter Jarvis läuft mit diesem Token (HTTP 409)» | Zwei Instanzen pollen denselben Bot: alte Instanz stoppen (`sudo systemctl stop jarvis` auf dem anderen Gerät) oder einen zweiten Bot anlegen |
+| «Sir, … antwortet seit 10 Minuten nicht» | Watchdog: die Anbindung ist am Stück gestört. `/check` zeigt den Stand, Jarvis versucht es weiter und meldet die Rückkehr. Schwelle `WATCHDOG_MINUTEN`, `0` schaltet die Meldung ab |
+| Meldungen kommen mit «(nachgereicht, 14:32)» | Telegram war zu der Zeit nicht erreichbar; der Text lag in `data/postausgang.json` und wurde nachgereicht. Nichts zu tun |
+| Zeitplan kam eine Stunde nach der Uhrzeit nicht mehr | Nachholfenster `ZEITPLAN_NACHHOLEN_MIN` (Standard 60) war vorbei; grösser setzen oder den Auftrag von Hand geben |
 | Jarvis antwortet nicht auf Telegram | `journalctl -u jarvis -f`: steht dort «Telegram nicht konfiguriert», fehlen Token oder Chat-ID. Schreibst du vom falschen Konto, wird die Nachricht ignoriert |
 | Fehler «web_search» von der API | `WEB_SEARCH=off` setzen |
 | Gmail 401 oder «invalid_grant» | Token abgelaufen (Testmodus, 7 Tage): `npm run google:auth` |

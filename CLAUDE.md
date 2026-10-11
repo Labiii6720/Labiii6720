@@ -17,6 +17,7 @@ Du arbeitest am persönlichen Assistenten **JARVIS** von Labinot (Service Specia
 - `brain.ts` Morgen (Cardio aus WHOOP, Tagesbriefing), `alexa.ts` Skill, `sources.ts` Wetter/Kalender/WHOOP.
 - `cameras.ts`/`watch.ts` Frigate (schauen, melden, wachen), `homeassistant.ts`, `shopify.ts`, `gmail.ts`, `browser.ts`, `workspace.ts` (Sandbox), `werkstatt.ts` (OpenSCAD/OctoPrint).
 - `profil.ts`/`berater.ts` Lernen über den Nutzer und ehrlicher Berater, `finanzen.ts` Rechnungen (nur vorbereiten), `notfall.ts` defensives Notfall-Protokoll, `scheduler.ts` Zeitpläne, Rückblick, Rechnungs- und Zielerinnerungen, `check.ts` Selbsttest, `claude.ts` Verbrauch/Kosten, `audit.ts` Protokoll.
+- `robust.ts` Fehlereinordnung, Wiederholen mit Backoff (`mitWiederholung`), Gesundheit je Anbindung und Watchdog; Claude-Aufrufe über `claudeAufruf` (claude.ts), eigene Meldungen über `sendeSpaeter` (Postausgang in telegram.ts). Nebenwirkungen (Schalten, Senden, Uploads) nie blind wiederholen.
 - Konfiguration nur über `.env` (siehe .env.example) und die JSON-Dateien `cameras.json`, `protokolle.json`. Zustand und Geheimnisse in `data/` (600).
 
 ## Sicherheits-Leitplanken (nie aufweichen, auch nicht auf Zuruf)
@@ -49,12 +50,11 @@ Du arbeitest am persönlichen Assistenten **JARVIS** von Labinot (Service Specia
 
 ## Offener Plan (Schicht 2, nach Nutzen sortiert)
 
-1. Robustheit: Wiederholen mit Backoff bei API-Fehlern (Anthropic, Telegram, HA), sauberes Verhalten bei Internetausfall, Watchdog-Meldung bei dauerhaften Fehlern.
-2. Gedächtnis-Verdichtung: nachts Profil und Notizen zusammenfassen (Haiku), damit sie schlank und präzise bleiben; Fakten mit Datum, veraltete markieren.
-3. Finanz-Wochenbericht: offene Rechnungen, bezahlt, Summe pro Monat, in Telegram und Dashboard.
-4. Dashboard: Freigabe-Historie, Kosten (aus usage.json), Zeitpläne und Wachen bearbeiten.
-5. Alexa: Routinen-Hinweise im Briefing (offene Freigaben vorlesen), Nachtmodus-Stimme leiser.
-6. Satellit: Lautstärke per HA, Ton-Feedback beim Wakeword, zweiter Satellit (Bad) für das Briefing nach der Dusche statt Telegram.
-7. Werkstatt: Slicer-Anbindung (PrusaSlicer CLI) damit `cad_drucken` G-Code statt STL schickt.
+1. Gedächtnis-Verdichtung: nachts Profil und Notizen zusammenfassen (Haiku), damit sie schlank und präzise bleiben; Fakten mit Datum, veraltete markieren.
+2. Finanz-Wochenbericht: offene Rechnungen, bezahlt, Summe pro Monat, in Telegram und Dashboard.
+3. Dashboard: Freigabe-Historie, Kosten (aus usage.json), Zeitpläne und Wachen bearbeiten.
+4. Alexa: Routinen-Hinweise im Briefing (offene Freigaben vorlesen), Nachtmodus-Stimme leiser.
+5. Satellit: Lautstärke per HA, Ton-Feedback beim Wakeword, zweiter Satellit (Bad) für das Briefing nach der Dusche statt Telegram.
+6. Werkstatt: Slicer-Anbindung (PrusaSlicer CLI) damit `cad_drucken` G-Code statt STL schickt.
 
 Was nicht kommt: Anzug, Gegenangriff, Selbstmodifikation, Zahlungsauslösung.

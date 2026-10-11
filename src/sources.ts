@@ -1,8 +1,12 @@
 import { google } from "googleapis";
 import ICAL from "ical.js";
 import { config, env, opt, TZ } from "./config.js";
+import { HttpFehler, mitWiederholung, retryAfterAusHeader, type WiederholOptionen } from "./robust.js";
 import { day, save, state, type Recovery, type Workout } from "./state.js";
 import { dayBounds, todayKey } from "./time.js";
+
+/** Nur für Tests: Warten und Zufall des Backoffs injizieren (im Betrieb leer). */
+export const _testOptionen: Pick<WiederholOptionen, "warten" | "zufall"> = {};
 
 export interface CalEvent {
   source: "privat" | "arbeit";
@@ -67,9 +71,12 @@ export async function getWeather(maxAgeMinutes = 30): Promise<Weather> {
     forecast_days: "1",
   }).toString();
 
-  const res = await fetch(url, { signal: AbortSignal.timeout(5000) });
-  if (!res.ok) throw new Error(`Open-Meteo HTTP ${res.status}`);
-  const { current, hourly: h, daily: d } = (await res.json()) as OpenMeteo;
+  // Lesen ohne Nebenwirkung: zwei Versuche bei Netz-, Zeitlimit- und Serverfehlern
+  const { current, hourly: h, daily: d } = await mitWiederholung("wetter.get", async () => {
+    const res = await fetch(url, { signal: AbortSignal.timeout(5000) });
+    if (!res.ok) throw new HttpFehler(`Open-Meteo HTTP ${res.status}`, res.status, retryAfterAusHeader(res.headers));
+    return (await res.json()) as OpenMeteo;
+  }, { versuche: 2, komponente: "wetter", ..._testOptionen });
 
   const hourNow = new Date().getHours();
   const hours = h.time.map((t, i) => ({ hour: Number(t.slice(11, 13)), p: h.precipitation_probability[i] ?? 0 }));
@@ -112,14 +119,14 @@ export async function googleEvents(range = dayBounds()): Promise<CalEvent[]> {
   const { calendar, calendarId } = g;
   const { start, end } = range;
 
-  const { data } = await calendar.events.list({
+  const { data } = await mitWiederholung("kalender.google", () => calendar.events.list({
     calendarId,
     timeMin: start.toISOString(),
     timeMax: end.toISOString(),
     singleEvents: true,
     orderBy: "startTime",
     timeZone: TZ,
-  });
+  }), { versuche: 2, komponente: "kalender", ..._testOptionen });
 
   return (data.items ?? [])
     .filter((ev) => ev.status !== "cancelled")
@@ -144,9 +151,12 @@ export async function googleEvents(range = dayBounds()): Promise<CalEvent[]> {
 export async function outlookEvents(range = dayBounds()): Promise<CalEvent[]> {
   const url = opt("OUTLOOK_ICS_URL");
   if (!url) return [];
-  const res = await fetch(url, { signal: AbortSignal.timeout(8000) });
-  if (!res.ok) throw new Error(`Outlook-Kalender HTTP ${res.status}`);
-  return eventsForDay(await res.text(), range, config.outlookMode);
+  const ics = await mitWiederholung("kalender.outlook", async () => {
+    const res = await fetch(url, { signal: AbortSignal.timeout(8000) });
+    if (!res.ok) throw new HttpFehler(`Outlook-Kalender HTTP ${res.status}`, res.status, retryAfterAusHeader(res.headers));
+    return res.text();
+  }, { versuche: 2, komponente: "kalender", ..._testOptionen });
+  return eventsForDay(ics, range, config.outlookMode);
 }
 
 /** Legt einen Termin im privaten Google-Kalender an (Dienstkonto braucht Schreibrecht). */
@@ -274,19 +284,23 @@ async function refreshWhoopToken(refreshToken: string): Promise<string> {
     }),
     signal: AbortSignal.timeout(8000),
   });
-  if (!res.ok) throw new Error(`WHOOP-Token-Refresh fehlgeschlagen (HTTP ${res.status}), evtl. neu verbinden.`);
+  // Kein zweiter Versuch: WHOOP rotiert den Refresh-Token, eine Wiederholung könnte den frischen Token entwerten
+  if (!res.ok) throw new HttpFehler(`WHOOP-Token-Refresh fehlgeschlagen (HTTP ${res.status}), evtl. neu verbinden.`, res.status);
   const tokens = (await res.json()) as TokenResponse;
   storeWhoopTokens(tokens, refreshToken);
   return tokens.access_token;
 }
 
 async function whoopGet<T>(path: string, timeoutMs = 8000): Promise<T> {
-  const res = await fetch(`${WHOOP_API}${path}`, {
-    headers: { Authorization: `Bearer ${await whoopToken()}` },
-    signal: AbortSignal.timeout(timeoutMs),
-  });
-  if (!res.ok) throw new Error(`WHOOP HTTP ${res.status} (${path.split("?")[0]})`);
-  return (await res.json()) as T;
+  const token = await whoopToken();
+  return mitWiederholung("whoop.get", async () => {
+    const res = await fetch(`${WHOOP_API}${path}`, {
+      headers: { Authorization: `Bearer ${token}` },
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    if (!res.ok) throw new HttpFehler(`WHOOP HTTP ${res.status} (${path.split("?")[0]})`, res.status, retryAfterAusHeader(res.headers));
+    return (await res.json()) as T;
+  }, { versuche: 2, komponente: "whoop", ..._testOptionen });
 }
 
 interface RecoveryRecord {
@@ -338,15 +352,43 @@ export async function latestWorkoutToday(): Promise<Workout | null> {
 // Telegram (optional): Briefing zusätzlich als Text
 // =====================================================================
 
+interface TelegramAntwort {
+  ok?: boolean;
+  error_code?: number;
+  description?: string;
+  parameters?: { retry_after?: number };
+}
+
+/** Briefing an Telegram: wie telegram.ts vier Versuche (1 s → 15 s), nie bei client/auth; Fehler als HttpFehler mit Status und Retry-After. */
 export async function sendTelegram(text: string): Promise<void> {
   const token = opt("TELEGRAM_BOT_TOKEN");
   const chatId = opt("TELEGRAM_CHAT_ID");
   if (!token || !chatId) return;
-  const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ chat_id: chatId, text }),
-    signal: AbortSignal.timeout(8000),
-  });
-  if (!res.ok) throw new Error(`Telegram HTTP ${res.status}`);
+  await mitWiederholung("telegram.sendMessage", async () => {
+    const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ chat_id: chatId, text }),
+      signal: AbortSignal.timeout(8000),
+    });
+    let json: TelegramAntwort | undefined;
+    try {
+      json = (await res.json()) as TelegramAntwort;
+    } catch {
+      json = undefined; // kein JSON (z. B. Proxy-Seite) → Status entscheidet
+    }
+    if (!json || typeof json !== "object") {
+      if (!res.ok) throw new HttpFehler(`Telegram HTTP ${res.status}`, res.status, retryAfterAusHeader(res.headers));
+      return;
+    }
+    if (!res.ok || !json.ok) {
+      const status = typeof json.error_code === "number" ? json.error_code : res.status;
+      const retryAfter = json.parameters?.retry_after;
+      throw new HttpFehler(
+        `Telegram HTTP ${status}${json.description ? ` (${json.description})` : ""}`,
+        status,
+        typeof retryAfter === "number" && retryAfter > 0 ? retryAfter * 1000 : undefined,
+      );
+    }
+  }, { versuche: 4, basisMs: 1000, maxMs: 15_000, komponente: "telegram", ..._testOptionen });
 }

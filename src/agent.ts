@@ -1,5 +1,5 @@
 import Anthropic from "@anthropic-ai/sdk";
-import { anthropic as claude, trackUsage } from "./claude.js";
+import { anthropic as claude, claudeAufruf, trackUsage } from "./claude.js";
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { audit } from "./audit.js";
 import { config } from "./config.js";
@@ -147,9 +147,11 @@ async function runLoop(text: string, hooks: AgentHooks, opts: RunOptions & { his
   let reply = "";
   let step = 0;
   for (let loop = 0; loop < maxLoops; loop++) {
-    const msg = await anthropic.messages.create(
-      { model, max_tokens: opts.stark ? 8000 : 2500, system: systemPrompt(), tools: toolParams, messages: h },
-      { timeout: 300_000 },
+    const msg = await claudeAufruf("chat", () =>
+      anthropic.messages.create(
+        { model, max_tokens: opts.stark ? 8000 : 2500, system: systemPrompt(), tools: toolParams, messages: h },
+        { timeout: 300_000 },
+      ),
     );
     trackUsage(msg);
     h.push({ role: "assistant", content: msg.content as Anthropic.ContentBlockParam[] });

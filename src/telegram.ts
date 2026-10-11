@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { audit, throttled } from "./audit.js";
 import { basename } from "node:path";
 import { addSystemNote, handleMessage, resetHistory, runAuftrag } from "./agent.js";
@@ -16,13 +16,26 @@ import { createAuftrag } from "./queue.js";
 import { protokolle, runProtokoll } from "./protokolle.js";
 import { formatBefund, selbsttest } from "./check.js";
 import { abuseSignal } from "./notfall.js";
+import { HttpFehler, fehlerArt, fehlerDetail, gesundheit, mitWiederholung, nutzerText, schwaerze, voruebergehend, wartezeit } from "./robust.js";
+import { clock } from "./time.js";
 
 const API = () => `https://api.telegram.org/bot${config.telegramToken}`;
+/** Claude ist hier ersetzbar (Tests mit Attrappen); im Betrieb die echte Funktion. */
+export const abhaengigkeiten = { handleMessage };
 const owner = () => config.telegramOwner ?? "";
-const log = (e: unknown) => console.error(e instanceof Error ? e.message : e);
+const log = (e: unknown) => console.error(e instanceof Error ? schwaerze(e.message) : e);
 
 // ---------- Senden ----------
 
+interface TelegramAntwort<T> {
+  ok?: boolean;
+  result?: T;
+  description?: string;
+  error_code?: number;
+  parameters?: { retry_after?: number };
+}
+
+/** Ein Aufruf der Bot-API. Fehler als HttpFehler mit Status (und Retry-After bei 429), damit robust.ts sie einordnen kann. */
 async function api<T = unknown>(method: string, body: Record<string, unknown> | FormData): Promise<T> {
   const isForm = body instanceof FormData;
   const res = await fetch(`${API()}/${method}`, {
@@ -31,18 +44,128 @@ async function api<T = unknown>(method: string, body: Record<string, unknown> | 
     body: isForm ? body : JSON.stringify(body),
     signal: AbortSignal.timeout(method === "getUpdates" ? 45_000 : 20_000),
   });
-  const json = (await res.json()) as { ok: boolean; result: T; description?: string };
-  if (!json.ok) throw new Error(`Telegram ${method}: ${json.description ?? res.status}`);
-  return json.result;
+  let json: TelegramAntwort<T> | undefined;
+  try {
+    json = (await res.json()) as TelegramAntwort<T>;
+  } catch {
+    json = undefined; // kein JSON (z. B. Proxy-Seite) → Status entscheidet
+  }
+  if (!json || typeof json !== "object") throw new HttpFehler(`HTTP ${res.status}, keine gültige Antwort (${method})`, res.status);
+  if (!res.ok || !json.ok) {
+    const status = typeof json.error_code === "number" ? json.error_code : res.status;
+    const retryAfter = json.parameters?.retry_after;
+    throw new HttpFehler(
+      `${json.description ?? `HTTP ${status}`} (${method})`,
+      status,
+      typeof retryAfter === "number" && retryAfter > 0 ? retryAfter * 1000 : undefined,
+    );
+  }
+  return json.result as T;
+}
+
+/** Zeit und Zufall sind injizierbar (Tests); im Betrieb echte Timer. */
+let wartenFn: ((ms: number) => Promise<void>) | undefined;
+let zufallFn: (() => number) | undefined;
+export function setzeWarten(warten?: (ms: number) => Promise<void>, zufall?: () => number): void {
+  wartenFn = warten;
+  zufallFn = zufall;
+}
+
+/** Senden mit Wiederholung: 4 Versuche, 1 s → 15 s, nie bei client/auth (400 «chat not found», 401 Token ungültig). */
+function apiRobust<T = unknown>(method: string, body: Record<string, unknown> | FormData): Promise<T> {
+  return mitWiederholung(`telegram.${method}`, () => api<T>(method, body), {
+    versuche: 4,
+    basisMs: 1000,
+    maxMs: 15_000,
+    komponente: "telegram",
+    warten: wartenFn,
+    zufall: zufallFn,
+  });
 }
 
 export async function sendText(text: string, extra: Record<string, unknown> = {}): Promise<number | undefined> {
   let messageId: number | undefined;
   for (let i = 0; i < text.length; i += 4000) {
-    const r = await api<{ message_id: number }>("sendMessage", { chat_id: owner(), text: text.slice(i, i + 4000), ...extra });
+    const r = await apiRobust<{ message_id: number }>("sendMessage", { chat_id: owner(), text: text.slice(i, i + 4000), ...extra });
     messageId = r.message_id;
   }
   return messageId;
+}
+
+// ---------- Postausgang ----------
+
+const POSTAUSGANG_FILE = "data/postausgang.json";
+const POSTAUSGANG_MAX = 100;
+
+interface Postausgang {
+  /** Zeitpunkt, zu dem die Nachricht ursprünglich fällig war (ISO) */
+  ts: string;
+  text: string;
+}
+
+function ladePostausgang(): Postausgang[] {
+  try {
+    const roh = JSON.parse(readFileSync(POSTAUSGANG_FILE, "utf8")) as unknown;
+    if (!Array.isArray(roh)) return [];
+    return roh.filter((e): e is Postausgang => typeof e === "object" && e !== null && typeof (e as Postausgang).text === "string" && typeof (e as Postausgang).ts === "string");
+  } catch {
+    return [];
+  }
+}
+
+const postausgang: Postausgang[] = ladePostausgang();
+
+function speicherePostausgang(): void {
+  mkdirSync("data", { recursive: true, mode: 0o700 });
+  writeFileSync(`${POSTAUSGANG_FILE}.tmp`, JSON.stringify(postausgang, null, 2), { mode: 0o600 });
+  renameSync(`${POSTAUSGANG_FILE}.tmp`, POSTAUSGANG_FILE);
+}
+
+function ablegen(text: string): void {
+  postausgang.push({ ts: new Date().toISOString(), text });
+  if (postausgang.length > POSTAUSGANG_MAX) postausgang.splice(0, postausgang.length - POSTAUSGANG_MAX);
+  speicherePostausgang();
+}
+
+/**
+ * Sendet den Text; geht es trotz Wiederholung nicht, bleibt er im Postausgang liegen und wird nachgereicht.
+ * Wartet bereits etwas im Postausgang, wird der Text hinten angereiht (Reihenfolge bleibt). Nur ein client-Fehler
+ * (die Nachricht selbst ist unbrauchbar) wird weitergeworfen – Wiederholen hilft da nicht.
+ */
+export async function sendeSpaeter(text: string): Promise<void> {
+  if (postausgang.length > 0) return void ablegen(text);
+  try {
+    await sendText(text);
+  } catch (e) {
+    if (fehlerArt(e) === "client") throw e;
+    ablegen(text);
+  }
+}
+
+let nachreichenLaeuft = false;
+
+/** Alle 60 s: Liegengebliebenes in Reihenfolge nachreichen, sobald Telegram wieder antwortet. */
+export async function postausgangTick(): Promise<void> {
+  if (nachreichenLaeuft || postausgang.length === 0) return;
+  nachreichenLaeuft = true;
+  try {
+    while (postausgang.length > 0) {
+      const e = postausgang[0]!;
+      try {
+        await sendText(`(nachgereicht, ${clock(new Date(e.ts))}) ${e.text}`);
+      } catch (fehler) {
+        if (fehlerArt(fehler) !== "client") break; // weiterhin gestört → nächster Tick
+        console.error(`Postausgang: Eintrag verworfen (${fehlerDetail(fehler)}).`);
+      }
+      // Den konkreten Eintrag entfernen, nicht blind das erste Element: während des Sendens kann ein
+      // nebenläufiges sendeSpaeter bei vollem Postausgang die ältesten Einträge (auch e) gekürzt haben.
+      const i = postausgang.indexOf(e);
+      if (i >= 0) postausgang.splice(i, 1);
+      speicherePostausgang();
+    }
+  } finally {
+    nachreichenLaeuft = false;
+  }
 }
 
 export async function sendFile(path: string, caption?: string): Promise<void> {
@@ -51,7 +174,7 @@ export async function sendFile(path: string, caption?: string): Promise<void> {
   form.append("chat_id", owner());
   if (caption) form.append("caption", caption.slice(0, 1000));
   form.append("document", new Blob([readFileSync(full)]), basename(full));
-  await api("sendDocument", form);
+  await apiRobust("sendDocument", form);
 }
 
 export async function sendPhoto(image: Buffer, caption?: string, extra: Record<string, unknown> = {}): Promise<void> {
@@ -60,7 +183,7 @@ export async function sendPhoto(image: Buffer, caption?: string, extra: Record<s
   if (caption) form.append("caption", caption.slice(0, 1000));
   for (const [k, v] of Object.entries(extra)) form.append(k, typeof v === "string" ? v : JSON.stringify(v));
   form.append("photo", new Blob([new Uint8Array(image)]), "bild.jpg");
-  await api("sendPhoto", form);
+  await apiRobust("sendPhoto", form);
 }
 
 export async function sendVideo(video: Buffer, caption?: string): Promise<void> {
@@ -68,14 +191,14 @@ export async function sendVideo(video: Buffer, caption?: string): Promise<void> 
   form.append("chat_id", owner());
   if (caption) form.append("caption", caption.slice(0, 1000));
   form.append("video", new Blob([new Uint8Array(video)]), "clip.mp4");
-  await api("sendVideo", form);
+  await apiRobust("sendVideo", form);
 }
 
 async function sendVoice(audio: Buffer): Promise<void> {
   const form = new FormData();
   form.append("chat_id", owner());
   form.append("voice", new Blob([new Uint8Array(audio)]), "jarvis.ogg");
-  await api("sendVoice", form);
+  await apiRobust("sendVoice", form);
 }
 
 /** Antwort zusätzlich als Sprachnachricht, falls TTS eingerichtet ist */
@@ -86,9 +209,9 @@ export async function sendVoiceReply(text: string): Promise<void> {
 
 /** Sprachnachricht des Nutzers laden */
 async function downloadVoice(fileId: string): Promise<Buffer> {
-  const file = await api<{ file_path: string }>("getFile", { file_id: fileId });
+  const file = await apiRobust<{ file_path: string }>("getFile", { file_id: fileId });
   const res = await fetch(`https://api.telegram.org/file/bot${config.telegramToken}/${file.file_path}`, { signal: AbortSignal.timeout(30_000) });
-  if (!res.ok) throw new Error(`Telegram-Datei HTTP ${res.status}`);
+  if (!res.ok) throw new HttpFehler(`Telegram-Datei HTTP ${res.status}`, res.status);
   return Buffer.from(await res.arrayBuffer());
 }
 
@@ -142,7 +265,7 @@ export async function approveAuftrag(a: Auftrag, pin?: string): Promise<string> 
       return "Falsche PIN.";
     }
   }
-  if (a.messageId) await api("editMessageReplyMarkup", { chat_id: owner(), message_id: a.messageId, reply_markup: { inline_keyboard: [] } }).catch(() => undefined);
+  if (a.messageId) await apiRobust("editMessageReplyMarkup", { chat_id: owner(), message_id: a.messageId, reply_markup: { inline_keyboard: [] } }).catch(() => undefined);
   await execute(a);
   const nachher = getAuftrag(a.id)!; // execute hat den Status gesetzt
   return nachher.status === "erledigt" ? `✅ #${a.id} erledigt: ${nachher.result ?? ""}` : `⚠️ #${a.id}: ${nachher.result ?? "Fehler"}`;
@@ -153,13 +276,13 @@ export async function denyAuftrag(a: Auftrag): Promise<string> {
   audit("auftrag_abgelehnt", { id: a.id, tool: a.tool, quelle: "dashboard" });
   setStatus(a, "abgelehnt");
   addSystemNote(`Auftrag #${a.id} (${a.tool}) wurde vom Nutzer abgelehnt.`);
-  if (a.messageId) await api("editMessageReplyMarkup", { chat_id: owner(), message_id: a.messageId, reply_markup: { inline_keyboard: [] } }).catch(() => undefined);
+  if (a.messageId) await apiRobust("editMessageReplyMarkup", { chat_id: owner(), message_id: a.messageId, reply_markup: { inline_keyboard: [] } }).catch(() => undefined);
   await sendText(`❌ #${a.id} abgelehnt (Dashboard).`).catch(() => undefined);
   return `❌ #${a.id} abgelehnt.`;
 }
 
 async function onCallback(cb: { id: string; data?: string; message?: { message_id: number } }): Promise<void> {
-  await api("answerCallbackQuery", { callback_query_id: cb.id }).catch(log);
+  await apiRobust("answerCallbackQuery", { callback_query_id: cb.id }).catch(log);
   const [action, idStr] = (cb.data ?? "").split(":");
   if (action === "clip") {
     try {
@@ -171,7 +294,7 @@ async function onCallback(cb: { id: string; data?: string; message?: { message_i
   }
   const a = getAuftrag(Number(idStr));
   if (!a) return void sendText("Diesen Auftrag kenne ich nicht mehr.");
-  if (cb.message) await api("editMessageReplyMarkup", { chat_id: owner(), message_id: cb.message.message_id, reply_markup: { inline_keyboard: [] } }).catch(log);
+  if (cb.message) await apiRobust("editMessageReplyMarkup", { chat_id: owner(), message_id: cb.message.message_id, reply_markup: { inline_keyboard: [] } }).catch(log);
   if (a.status !== "offen") return void sendText(`#${a.id} ist bereits ${a.status}.`);
   if (state.paused && action === "ok") return void sendText("⛔ Notaus aktiv. Erst /weiter, dann nochmal freigeben.");
 
@@ -302,7 +425,7 @@ export async function handleUpdate(u: Update): Promise<void> {
   if (pendingPin) {
     const p = pendingPin;
     pendingPin = undefined;
-    await api("deleteMessage", { chat_id: owner(), message_id: m.message_id }).catch(() => undefined);
+    await apiRobust("deleteMessage", { chat_id: owner(), message_id: m.message_id }).catch(() => undefined);
     const a = getAuftrag(p.id);
     if (!a || a.status !== "offen") return void sendText("Dieser Auftrag ist nicht mehr offen.");
     if (Date.now() > p.until) return void sendText(`Zeit abgelaufen. /auftraege zeigt #${a.id} nochmal.`);
@@ -322,12 +445,25 @@ export async function handleUpdate(u: Update): Promise<void> {
   const ticker = setInterval(typing, 4000);
   await typing();
   try {
-    const reply = await handleMessage(text, hooks);
-    await sendText(reply);
+    let reply: string;
+    try {
+      reply = await abhaengigkeiten.handleMessage(text, hooks);
+    } catch (e) {
+      log(e);
+      // Vorübergehende Störung oder abgelehnter Schlüssel: klarer Text statt roher Fehlermeldung
+      const antwort = voruebergehend(e) || fehlerArt(e) === "auth" ? nutzerText(e, "claude") : `Da ging etwas schief: ${schwaerze(e instanceof Error ? e.message : String(e))}`;
+      await sendText(antwort).catch(log);
+      return;
+    }
+    // Die Antwort ist bezahlt und in der Historie: scheitert nur Telegram, bleibt sie im Postausgang statt verloren zu gehen.
+    try {
+      await sendText(reply);
+    } catch (e) {
+      log(e);
+      if (fehlerArt(e) !== "client") ablegen(reply); // client: Nachricht selbst unbrauchbar, Wiederholen hilft nicht
+      return;
+    }
     if (spoken) await sendVoiceReply(reply);
-  } catch (e) {
-    log(e);
-    await sendText(`Da ging etwas schief: ${e instanceof Error ? e.message : String(e)}`).catch(log);
   } finally {
     clearInterval(ticker);
   }
@@ -339,23 +475,58 @@ export async function remindersTick(): Promise<void> {
   const now = Date.now();
   const due = reminders.filter((r) => Date.parse(r.at) <= now);
   if (due.length === 0) return;
-  for (const r of due) await sendText(`⏰ ${r.text}`).catch(log);
+  for (const r of due) await sendeSpaeter(`⏰ ${r.text}`).catch(log);
   reminders.splice(0, reminders.length, ...reminders.filter((r) => Date.parse(r.at) > now));
   saveReminders();
 }
 
+const POLL_BACKOFF = { basisMs: 1000, maxMs: 60_000, faktor: 2, jitter: 0.2 };
+
+/**
+ * Wartezeit nach einem fehlgeschlagenen getUpdates (rein, für Tests): 1 s → 2 → 4 → … 60 s mit Jitter.
+ * 409 (zweiter Poller mit demselben Token) → 30 s, 401 (Token ungültig) → 5 Minuten; ein Retry-After von Telegram hat Vorrang.
+ */
+export function pollWartezeit(e: unknown, fehlversuch: number, zufall: () => number = Math.random): number {
+  const status = e instanceof HttpFehler ? e.status : undefined;
+  if (status === 409) return 30_000;
+  if (status === 401) return 300_000;
+  return wartezeit(Math.max(1, fehlversuch), POLL_BACKOFF, zufall, e instanceof HttpFehler ? e.retryAfterMs : undefined);
+}
+
+const schlafen = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
 async function poll(): Promise<void> {
   let offset = 0;
+  let fehlversuche = 0;
+  let sonderfallGeloggt = false; // 409/401 nur einmal pro Störung loggen
   for (;;) {
     try {
       const updates = await api<Update[]>("getUpdates", { offset, timeout: 30, allowed_updates: ["message", "callback_query"] });
+      fehlversuche = 0;
+      sonderfallGeloggt = false;
+      gesundheit.melde("telegram", true);
+      gesundheit.melde("internet", true);
       for (const u of updates) {
         offset = u.update_id + 1;
         await handleUpdate(u).catch(log);
       }
     } catch (e) {
-      log(e);
-      await new Promise((r) => setTimeout(r, 3000));
+      fehlversuche++;
+      const status = e instanceof HttpFehler ? e.status : undefined;
+      if ((status === 409 || status === 401) && !sonderfallGeloggt) {
+        sonderfallGeloggt = true;
+        console.error(
+          status === 409
+            ? "Telegram: Ein zweiter Jarvis läuft mit diesem Token (HTTP 409). Ich warte 30 Sekunden und versuche es dann wieder."
+            : "Telegram lehnt den Token ab (HTTP 401). Bitte TELEGRAM_BOT_TOKEN prüfen; nächster Versuch in 5 Minuten.",
+        );
+      }
+      // kein Log pro Fehlversuch – gesundheit.melde loggt den ersten Fehler und danach höchstens alle 10 Minuten
+      const detail = fehlerDetail(e);
+      gesundheit.melde("telegram", false, `telegram.getUpdates: ${detail}`);
+      const art = fehlerArt(e);
+      if (art === "netz" || art === "zeitlimit") gesundheit.melde("internet", false, detail);
+      await (wartenFn ?? schlafen)(pollWartezeit(e, fehlversuche, zufallFn));
     }
   }
 }
@@ -367,6 +538,9 @@ export function startTelegram(): void {
     return;
   }
   console.log(`Telegram aktiv, Werkzeuge: ${activeTools().map((t) => t.name).join(", ")}`);
+  gesundheit.setzeMelder(sendeSpaeter);
+  if (postausgang.length > 0) console.log(`Postausgang: ${postausgang.length} Nachricht(en) warten auf Zustellung.`);
   void poll();
   setInterval(() => remindersTick().catch(log), 30_000);
+  setInterval(() => postausgangTick().catch(log), 60_000);
 }

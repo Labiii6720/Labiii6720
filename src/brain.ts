@@ -1,6 +1,7 @@
 import Anthropic from "@anthropic-ai/sdk";
-import { anthropic as claude, trackUsage } from "./claude.js";
+import { anthropic as claude, claudeAufruf, trackUsage } from "./claude.js";
 import { config } from "./config.js";
+import { fehlerArt, fehlerDetail, gesundheit, schwaerze, type Komponente } from "./robust.js";
 import {
   getWeather, googleEvents, latestWorkoutToday, outlookEvents, recoveryToday, sendTelegram,
   type CalEvent, type Weather,
@@ -10,7 +11,25 @@ import { day, save, type DayState, type Recovery } from "./state.js";
 import { clock, hhmm, minutesOfDay, withTimeout } from "./time.js";
 import { persona, sagt } from "./persona.js";
 
-const log = (e: unknown) => console.error(e instanceof Error ? e.message : e);
+const log = (e: unknown) => console.error(e instanceof Error ? schwaerze(e.message) : e);
+
+/**
+ * Fehler einer Hintergrundquelle: Netz-, Zeitlimit-, Rate-, Server- und Zugangsfehler gehen an die Gesundheit
+ * (eine Logzeile pro Störung, Watchdog-Meldung ab Schwelle). Alles andere (nicht verbunden, unlesbare Antwort)
+ * wird höchstens einmal pro Stunde je Quelle geloggt statt bei jedem Lauf alle 5 Minuten.
+ */
+const zuletztGeloggt = new Map<Komponente, number>();
+function quellenFehler(k: Komponente, e: unknown, jetzt = Date.now()): void {
+  const art = fehlerArt(e);
+  if (art !== "unbekannt" && art !== "client") {
+    // Claude-Aufrufe melden sich schon in claudeAufruf; nicht doppelt zählen
+    if (k !== "claude") gesundheit.melde(k, false, fehlerDetail(e), jetzt);
+    return;
+  }
+  if (jetzt - (zuletztGeloggt.get(k) ?? 0) < 3_600_000) return;
+  zuletztGeloggt.set(k, jetzt);
+  console.error(`[${k}] ${fehlerDetail(e)}`);
+}
 
 // =====================================================================
 // Cardio-Regeln: fix im Code, nicht im Ermessen von Claude.
@@ -154,10 +173,10 @@ async function doBuild(): Promise<string> {
   ].join("\n\n");
 
   const anthropic = claude();
-  const msg = await anthropic.messages.create(
+  const msg = await claudeAufruf("briefing", () => anthropic.messages.create(
     { model: config.claudeModel, max_tokens: 700, system: system(), messages: [{ role: "user", content }] },
     { timeout: 25_000 },
-  );
+  ));
   trackUsage(msg);
   const text = msg.content.map((b) => (b.type === "text" ? b.text : "")).join("").trim();
   d.briefing = { text, builtAt: new Date().toISOString(), workoutId: w?.id };
@@ -174,9 +193,10 @@ export async function briefingText(): Promise<string> {
     if (!text) return `Das Briefing ist gleich fertig, ${config.anrede}. Eine Minute.`;
   }
   if (!d.briefingDelivered) {
-    d.briefingDelivered = true;
-    save();
-    sendTelegram(text).catch(log);
+    // Flag erst nach erfolgreichem Senden: ein endgültig gescheiterter Versand wird beim nächsten Aufruf nachgeholt
+    sendTelegram(text)
+      .then(() => { d.briefingDelivered = true; save(); })
+      .catch(log);
   }
   return text;
 }
@@ -194,12 +214,14 @@ export async function morningTick(): Promise<void> {
   const now = minutesOfDay();
   if (now < hhmm("05:00") || now > hhmm("10:00")) return;
   const d = day();
+  // Ohne Internet gar nicht erst anfragen (gesundheit hat die Störung bereits geloggt); nächster Lauf in 5 Minuten
+  if (gesundheit.istOffline()) return;
 
-  await getWeather().catch(log);
-  if (!d.recovery) await recoveryToday().catch(log);
+  await getWeather().catch((e) => quellenFehler("wetter", e));
+  if (!d.recovery) await recoveryToday().catch((e) => quellenFehler("whoop", e));
 
   const workout = await latestWorkoutToday().catch((e) => {
-    log(e);
+    quellenFehler("whoop", e);
     return undefined;
   });
   if (workout && workout.id !== d.workout?.id) {
@@ -213,5 +235,5 @@ export async function morningTick(): Promise<void> {
     !b ||
     (d.workout && b.workoutId !== d.workout.id) || // neues Training → Trainingsbilanz ergänzen
     Date.now() - Date.parse(b.builtAt) > 45 * 60_000; // Kalender frisch halten
-  if (stale) await buildBriefing().catch(log);
+  if (stale) await buildBriefing().catch((e) => quellenFehler("claude", e));
 }

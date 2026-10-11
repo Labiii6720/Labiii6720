@@ -1,4 +1,5 @@
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { imFenster, todayKey } from "./time.js";
 
 /** Wiederkehrende Aufgaben, die Jarvis von selbst erledigt und per Telegram meldet. */
 export interface Zeitplan {
@@ -26,11 +27,26 @@ export function saveZeitplaene(): void {
 
 const TAGE = ["so", "mo", "di", "mi", "do", "fr", "sa"];
 
-export function faelltAn(z: Zeitplan, now: Date): boolean {
+function tagPasst(z: Zeitplan, now: Date): boolean {
   const tag = TAGE[now.getDay()]!;
   const t = z.tage.toLowerCase().replace(/\s/g, "");
   if (t === "werktags" && (tag === "sa" || tag === "so")) return false;
-  if (t !== "taeglich" && t !== "täglich" && t !== "werktags" && !t.split(",").includes(tag)) return false;
+  return t === "taeglich" || t === "täglich" || t === "werktags" || t.split(",").includes(tag);
+}
+
+/** Genau zur Minute (Fenster 1 Minute) – bleibt für Kompatibilität. */
+export function faelltAn(z: Zeitplan, now: Date): boolean {
+  if (!tagPasst(z, now)) return false;
   const hhmm = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
   return hhmm === z.zeit;
+}
+
+/**
+ * Fällig im Nachholfenster: passender Tag, zeit ≤ jetzt < zeit + fensterMin (Tagesende als Grenze) und heute noch nicht gelaufen.
+ * fensterMin 0 = nur zur Minute (kein Nachholen).
+ */
+export function faelligIm(z: Zeitplan, now: Date, fensterMin: number): boolean {
+  if (z.lastRun === todayKey(now)) return false;
+  if (!tagPasst(z, now)) return false;
+  return imFenster(z.zeit, now, fensterMin);
 }

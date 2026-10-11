@@ -11,6 +11,7 @@ import { handleEvent } from "./events.js";
 import { startWatch } from "./watch.js";
 import { handlePanic } from "./notfall.js";
 import { auditTail, auftragAction, chat, dashboardAuth, geraete, kameraBild, modus, protokollAction, statusJson } from "./dashboard.js";
+import { gesundheit, schwaerze } from "./robust.js";
 
 const app = express();
 app.disable("x-powered-by");
@@ -77,6 +78,10 @@ for (const sig of ["SIGINT", "SIGTERM"] as const) {
   process.on(sig, () => void closeBrowser().finally(() => process.exit(0)));
 }
 
-const tick = () => morningTick().catch((e) => console.error("Hintergrund-Fehler:", e));
+// morningTick meldet Fehler je Quelle an die Gesundheit; hier landet nur, was dort durchrutscht
+const tick = () => morningTick().catch((e) => console.error("Hintergrund-Fehler:", e instanceof Error ? schwaerze(e.message) : e));
 tick();
 setInterval(tick, 5 * 60_000);
+
+// Watchdog: dauerhafte Störungen einmal melden, Erholung melden (Meldungen laufen über den Postausgang in telegram.ts)
+setInterval(() => gesundheit.tick().catch((e) => console.error("Watchdog:", e instanceof Error ? schwaerze(e.message) : e)), 60_000);

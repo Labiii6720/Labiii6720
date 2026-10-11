@@ -53,6 +53,10 @@ export const config = {
   outlookMode: (opt("OUTLOOK_MODE") === "details" ? "details" : "busy") as "busy" | "details",
   /** Ab dieser Uhrzeit wird das Tagesbriefing im Hintergrund vorbereitet */
   briefingPrepFrom: opt("BRIEFING_PREP_FROM") ?? "05:45",
+  /** Watchdog: nach so vielen Minuten Störung meldet Jarvis sie per Telegram; 0 = aus */
+  watchdogMinuten: Number(opt("WATCHDOG_MINUTEN") ?? "10"),
+  /** Verpasste Zeitpläne und Routinen werden bis so viele Minuten nach ihrer Uhrzeit nachgeholt; 0 = nur zur Minute */
+  zeitplanNachholenMin: Number(opt("ZEITPLAN_NACHHOLEN_MIN") ?? "60"),
 
   // ---------- interaktiver Jarvis (Telegram) ----------
   telegramToken: opt("TELEGRAM_BOT_TOKEN"),

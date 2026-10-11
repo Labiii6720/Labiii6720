@@ -5,6 +5,7 @@ import { cameras } from "./cameras.js";
 import { config, opt } from "./config.js";
 import { haState } from "./homeassistant.js";
 import { protokolle } from "./protokolle.js";
+import { gesundheit } from "./robust.js";
 import { googleEvents, outlookEvents, recoveryToday } from "./sources.js";
 import { state } from "./state.js";
 import { hasOpenscad } from "./werkstatt.js";
@@ -161,9 +162,15 @@ export function nurAusArgv(argv: string[]): string[] | undefined {
   return namen?.length ? namen : undefined;
 }
 
+/**
+ * Befunde als Text; die Summenzeile bleibt die letzte Zeile (scripts/check.ts liest sie so). Hat die Gesundheit
+ * im laufenden Dienst schon Komponenten gesehen (/check in Telegram), steht ihr Bericht vor der Summenzeile.
+ */
 export function formatBefund(b: Befund[]): string {
   const icon = { ok: "✅", fehlt: "➖", fehler: "❌" };
   const zeilen = b.map((x) => `${icon[x.status]} ${x.name}: ${x.info}`);
   const n = (s: Befund["status"]) => b.filter((x) => x.status === s).length;
-  return `${zeilen.join("\n")}\n\n${n("ok")} ok · ${n("fehlt")} nicht eingerichtet · ${n("fehler")} Fehler`;
+  const bericht = gesundheit.bericht();
+  const anhang = bericht ? `\n\nGesundheit der Anbindungen (laufender Betrieb):\n${bericht}` : "";
+  return `${zeilen.join("\n")}${anhang}\n\n${n("ok")} ok · ${n("fehlt")} nicht eingerichtet · ${n("fehler")} Fehler`;
 }

@@ -17,11 +17,15 @@ function fahre(dir: string, antworten: string[], extra: string[] = [], sigint = 
   return fahreRoh(dir, antworten, ["--ohne-pruefung", "--alle", "--env", join(dir, ".env"), ...extra], sigint);
 }
 
-/** Wie fahre, aber mit freier Argumentliste (Vorlage immer die Kopie im Temp-Verzeichnis). */
+/**
+ * Wie fahre, aber mit freier Argumentliste (Vorlage immer die Kopie im Temp-Verzeichnis).
+ * JARVIS_CHECK_TIMEOUT_MS kürzt die Zeitlimits der Prüfungen in src/check.ts (nur für Tests): hängende Attrappen
+ * laufen so nach 300 ms statt 10 s ins Zeitlimit. Der Assistent reicht die Variable an das Prüf-Kind weiter.
+ */
 function fahreRoh(dir: string, antworten: string[], argumente: string[], sigint = false): Promise<Lauf> {
   return new Promise((fertig) => {
     const kind = spawn(process.execPath, ["--import", "tsx", skript, "--beispiel", join(dir, ".env.example"), ...argumente], {
-      cwd: projekt, timeout: 60_000, env: { ...process.env, ANTHROPIC_API_KEY: "", TELEGRAM_BOT_TOKEN: "" },
+      cwd: projekt, timeout: 60_000, env: { ...process.env, ANTHROPIC_API_KEY: "", TELEGRAM_BOT_TOKEN: "", JARVIS_CHECK_TIMEOUT_MS: "300" },
     });
     let out = "";
     let err = "";
@@ -342,7 +346,8 @@ describe("scripts/setup.ts (End-zu-End)", () => {
   });
 
   it("Selbsttest am Ende liefert Befunde, auch wenn mehrere Dienste hängen", async () => {
-    // Attrappe statt Home Assistant und Frigate: nimmt Verbindungen an und antwortet nie (je 10 s Zeitlimit im Selbsttest)
+    // Attrappe statt Home Assistant und Frigate: nimmt Verbindungen an und antwortet nie; beide laufen nacheinander ins
+    // Zeitlimit des Selbsttests (im Betrieb je 10 s, hier über JARVIS_CHECK_TIMEOUT_MS auf 300 ms verkürzt)
     const sockets = new Set<Socket>();
     const server = createServer((s) => { sockets.add(s); s.on("close", () => sockets.delete(s)); });
     await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
@@ -352,7 +357,7 @@ describe("scripts/setup.ts (End-zu-End)", () => {
       const env = join(dir, ".env");
       writeFileSync(env, `HA_URL=http://127.0.0.1:${port}\nHA_TOKEN=token-attrappe\nFRIGATE_URL=http://127.0.0.1:${port}\n`, { mode: 0o600 });
       // Abschnitt ohne eigene Prüfung: nur der Abschluss-Selbsttest läuft
-      const lauf = await fahreRoh(dir, ["", "", "", "", ""], ["--abschnitt", "proaktiv", "--env", env]);
+      const lauf = await fahreRoh(dir, ["", "", "", "", "", "", ""], ["--abschnitt", "proaktiv", "--env", env]);
       assert.equal(lauf.code, 0, lauf.out + lauf.err);
       const selbsttest = lauf.out.slice(lauf.out.indexOf("── Selbsttest ──"));
       assert.ok(selbsttest.includes("❌ Home Assistant"), selbsttest);
