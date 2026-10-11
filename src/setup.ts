@@ -79,6 +79,15 @@ export function pruefeZeit(wert: string): string | undefined {
   return wert === "off" || pruefeUhrzeit(wert) === undefined ? undefined : "Form HH:MM oder off";
 }
 
+/** Zeitfenster «HH:MM-HH:MM» (über Mitternacht erlaubt) oder off, z. B. ALEXA_NACHT. */
+export function pruefeZeitfenster(wert: string): string | undefined {
+  if (wert === "off") return undefined;
+  const [von, bis, ...rest] = wert.split("-");
+  return rest.length === 0 && bis !== undefined && pruefeUhrzeit(von) === undefined && pruefeUhrzeit(bis) === undefined
+    ? undefined
+    : "Form HH:MM-HH:MM (z. B. 22:00-06:30) oder off";
+}
+
 export function pruefeZielcheck(wert: string): string | undefined {
   return wert === "off" || /^(so|mo|di|mi|do|fr|sa) ([01]\d|2[0-3]):[0-5]\d$/.test(wert) ? undefined : "Form «so 18:00» (so mo di mi do fr sa) oder off";
 }
@@ -200,6 +209,7 @@ export const ABSCHNITTE: Abschnitt[] = [
     felder: [
       { key: "ALEXA_SKILL_ID", frage: "Skill-ID", hinweis: "Developer Console, beginnt mit amzn1.ask.skill.", art: "text", pruefen: pruefeSkillId },
       { key: "ALEXA_VOICE", frage: "Andere Stimme", hinweis: "z. B. Hans; leer = Alexa-Stimme", art: "text" },
+      { key: "ALEXA_NACHT", frage: "Leise Nachtstimme im Fenster", hinweis: "HH:MM-HH:MM, über Mitternacht möglich; off = nur im Nachtmodus", art: "zeit", standard: "22:00-06:30", pruefen: pruefeZeitfenster },
       { key: "ALEXA_BUDGET_MS", frage: "Wartezeit von Alexa auf eine Antwort (ms)", art: "zahl", standard: "6500", pruefen: pruefeZahl },
     ],
     checks: ["Alexa-Skill"],

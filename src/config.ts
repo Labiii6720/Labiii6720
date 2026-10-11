@@ -55,6 +55,8 @@ export const config = {
   maxLoops: Number(opt("MAX_LOOPS") ?? "10"),
   maxLoopsStark: Number(opt("MAX_LOOPS_STARK") ?? "40"),
   alexaVoice: opt("ALEXA_VOICE"),
+  /** Alexa spricht in diesem Fenster leiser (HH:MM-HH:MM, über Mitternacht möglich); off = nur im Nachtmodus */
+  alexaNacht: opt("ALEXA_NACHT") ?? "22:00-06:30",
   /** busy = Claude sieht nur belegte Zeiten, details = auch Titel und Orte */
   outlookMode: (opt("OUTLOOK_MODE") === "details" ? "details" : "busy") as "busy" | "details",
   /** Ab dieser Uhrzeit wird das Tagesbriefing im Hintergrund vorbereitet */

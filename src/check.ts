@@ -2,6 +2,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { existsSync } from "node:fs";
 import { config, opt } from "./config.js";
 import { gesundheit } from "./robust.js";
+import { pruefeZeitfenster } from "./setup.js";
 import { state } from "./state.js";
 
 /**
@@ -132,7 +133,15 @@ export async function selbsttest(nur?: string[], beiBefund?: (b: Befund) => void
   });
 
   await lauf("Stimme (STT/TTS)", Boolean(config.stt || config.tts), async () => `${config.stt ? "STT " : ""}${config.tts ? "TTS " : ""}eingetragen (nicht live getestet)`);
-  await lauf("Alexa-Skill", Boolean(opt("ALEXA_SKILL_ID")), async () => `Skill-ID gesetzt; Erreichbarkeit über den Tunnel im Alexa-Test-Tab prüfen`);
+  await lauf("Alexa-Skill", Boolean(opt("ALEXA_SKILL_ID")), async () => {
+    // Gleiche Auswertung wie nachtFenster/istNacht (alexa.ts) – nicht importiert, das lüde Skill, Agent und Telegram.
+    const fenster = config.alexaNacht.trim();
+    if (pruefeZeitfenster(fenster)) throw new Error(`ALEXA_NACHT «${config.alexaNacht}» ungültig (HH:MM-HH:MM oder off); Nachtstimme nur im Nachtmodus`);
+    const [von, bis] = fenster.split("-");
+    if (fenster !== "off" && von === bis) throw new Error(`ALEXA_NACHT «${config.alexaNacht}»: Fenster leer (Beginn gleich Ende); Nachtstimme nur im Nachtmodus`);
+    const nacht = fenster === "off" ? "nur im Nachtmodus" : `${fenster} und im Nachtmodus`;
+    return `Skill-ID gesetzt, leise Nachtstimme ${nacht}; Erreichbarkeit über den Tunnel im Alexa-Test-Tab prüfen`;
+  });
   await lauf("Protokolle", true, async () => `${Object.keys((await import("./protokolle.js")).protokolle).length} Protokoll(e)`);
   await lauf("Sicherheit", true, async () => {
     const warn: string[] = [];

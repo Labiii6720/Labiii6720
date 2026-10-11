@@ -2,6 +2,11 @@
 
 Kurz und nur das Wichtigste. Details stehen im README.
 
+## 0.19
+- Alexa liest offene Freigaben vor: am Ende des Tagesbriefings nach kurzer Pause (höchstens drei Aufträge mit Nummer und gekürzter Zusammenfassung, Rest gezählt, immer frisch statt aus dem Cache) und direkt mit «frag Butler Jarvis nach offenen Aufträgen» (neuer `FreigabenIntent`, Interaction Model neu einspielen). Telegram-Kopie und Sprachnachricht enthalten den Hinweis als Klartext.
+- Per Stimme wird nie etwas freigegeben: Sätze wie «gib Auftrag 12 frei» gehen nicht an Claude, Antwort «Freigaben nehme ich nur per Telegram oder Dashboard entgegen» (Dashboard nur genannt, wenn es mit `JARVIS_EVENT_TOKEN` wirklich läuft). Das Briefing-Modell zählt die Freigaben nicht mehr selbst.
+- Nachtstimme: im Fenster `ALEXA_NACHT` (Standard `22:00-06:30`, `off` = aus) und im Nachtmodus spricht Alexa leiser und etwas langsamer. Alle Ausgaben laufen über ein gemeinsames, vollständig escapetes SSML; `npm run check` meldet ein ungültiges Fenster.
+
 ## 0.18
 - Finanz-Wochenbericht: wöchentlich um `FINANZBERICHT` (Standard `mo 07:45`, `off` = aus) per Telegram: offen (Summe je Währung, Schweizer Format), überfällig und fällig in 7 Tagen (je höchstens 5), bezahlt letzte Woche, Summe pro Monat der letzten sechs Monate. Ohne Claude, keine Tokens; ohne Rechnungen still; Zahlungen werden nie ausgelöst.
 - Sofort mit `/finanzen`, fürs Dashboard als JSON unter `GET /api/finanzen` (nur Heimnetz/Tailscale, Token, ohne IBAN und Referenz). Im Notfall gibt es keine Finanzdaten.

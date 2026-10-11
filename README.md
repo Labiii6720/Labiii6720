@@ -128,6 +128,8 @@ Im Router wird kein Port geöffnet. Die Menünamen bei Cloudflare ändern sich g
 
 Im Entwicklermodus läuft der Skill auf den Echos deines eigenen Amazon-Kontos. Veröffentlichen ist nicht nötig.
 
+Nach einem Update mit neuen Intents (zuletzt `FreigabenIntent` in 0.19) den Inhalt von `alexa/interaction-model.json` erneut einfügen und *Build Model* klicken, sonst kennt Alexa die neuen Sätze nicht.
+
 ## 6. Routinen in der Alexa-App
 
 - **Wecker:** «Alexa, stell einen Wecker für 5:30 Uhr jeden Tag».
@@ -135,6 +137,27 @@ Im Entwicklermodus läuft der Skill auf den Echos deines eigenen Amazon-Kontos. 
 - **Routine «Jarvis Tag»:** Auslöser *Sprache* «ich bin bereit». Aktion wieder *Butler Jarvis*. Gerät: Echo im Bad oder in der Küche.
 
 Beide Routinen starten denselben Skill. Jarvis entscheidet selbst: Solange Cardio heute noch nicht angesagt und kein Workout erfasst ist, kommt Cardio, danach das Tagesbriefing. Direkt geht immer: «Alexa, frag Butler Jarvis nach meinem Tag» oder «… nach meinem Cardio».
+
+### Offene Freigaben im Briefing
+
+Am Ende des Tagesbriefings sagt Jarvis nach einer kurzen Pause, was auf deine Freigabe wartet, etwa: «Es warten zwei Aufträge auf Ihre Freigabe, Sir: Nummer 12, Mail an Müller AG; Nummer 13, Licht Büro aus. Freigeben geht per Telegram oder Dashboard.» Er nennt höchstens drei Aufträge mit Nummer und gekürzter Zusammenfassung (höchstens 60 Zeichen), den Rest zählt er nur («und zwei weitere»). Wartet nichts, fällt der Satz weg. Der Hinweis wird bei jedem Abruf frisch gebildet, auch wenn das Briefing selbst schon vorbereitet im Cache liegt. Die Telegram-Kopie und die Sprachnachricht (Ereignis `briefing`) enthalten ihn als eigenen Absatz.
+
+Direkt fragen geht auch:
+
+- «Alexa, frag Butler Jarvis nach offenen Aufträgen»
+- «Alexa, frag Butler Jarvis nach offenen Freigaben»
+- «Alexa, frag Butler Jarvis, was wartet auf mich»
+- «Alexa, frag Butler Jarvis, was muss ich freigeben»
+- «Alexa, frag Butler Jarvis, welche Aufträge warten»
+- «Alexa, frag Butler Jarvis, gibt es offene Freigaben»
+
+Ist nichts offen, kommt «Nichts wartet auf Sie, Sir.»
+
+**Per Stimme wird nie etwas freigegeben.** Alexa liest nur vor. Sagst du «gib Auftrag 12 frei», «genehmige …» oder «führe den Auftrag aus», geht das gar nicht erst an Claude; Jarvis antwortet «Freigaben nehme ich nur per Telegram oder Dashboard entgegen, Sir.» Dasselbe sagen Hilfe und «nicht verstanden». Freigeben bleibt beim Tippen in Telegram oder in der Kommandozentrale, bei sensiblen Aufträgen mit PIN. Ist das Dashboard aus (`DASHBOARD=off` oder kein `JARVIS_EVENT_TOKEN`), nennt Jarvis nur Telegram, in der Ablehnung wie im Hinweis.
+
+### Nachtstimme
+
+Nachts spricht Alexa leiser und etwas langsamer. Das gilt im Fenster `ALEXA_NACHT` (Standard `22:00-06:30`, über Mitternacht möglich; der Beginn zählt mit, das Ende nicht) und immer im Nachtmodus (`/modus nacht`). Mit `ALEXA_NACHT=off` wirkt nur der Nachtmodus. Ein ungültiges oder leeres Fenster (Beginn gleich Ende) schaltet das Fenster aus und meldet sich als Fehler bei `npm run check` (ein ungültiges zusätzlich einmal im Log); der Nachtmodus wirkt trotzdem. Die Lautstärke des Echos selbst ändert Jarvis nicht, nur die Sprechweise des Skills.
 
 ## 7. Als Dienst starten
 
@@ -588,7 +611,7 @@ Damit spricht der Raum mit demselben Jarvis wie Telegram, Alexa und die Zentrale
 
 `npm test` fährt die Tests in `test/` mit Nodes eingebautem Testläufer (`node --test`, dank tsx direkt aus TypeScript). Sie brauchen weder `.env` noch Netz: echte Dienste werden nie angesprochen, Aufrufe nach aussen bekommen Attrappen (`globalThis.fetch` wird ersetzt und zählt die Aufrufe), geschrieben wird nur in Temp-Verzeichnisse, die am Ende wieder verschwinden.
 
-Heute abgedeckt: die `.env`-Verarbeitung des Assistenten (Roundtrip gegen Nodes eigenen Parser `util.parseEnv`, Kommentare und Reihenfolge, Rechte, `.env.bak`), alle Prüffunktionen, das Schema gegen `.env.example` (jeder Schlüssel genau einmal, in beide Richtungen), der Assistent End-zu-End mit gepipten Antworten, `npm run check -- --nur`, und die Robustheit: Fehlereinordnung, Backoff und Watchdog (`robust.ts`), Telegram-Wiederholung und Postausgang, Claude-Anläufe, Home-Assistant-Lesen/Schalten, Nachholfenster und Zeitpläne, Notaus mitten in einer Anfrage (Zeit und Zufall werden injiziert, kein Test wartet echte Sekunden), und die Gedächtnis-Verdichtung: Umstellung alter Profile, Prompt mit Datum und Chronik, Eingabe-Grenzen, Prüfung jedes Verstosses, Anwenden ohne Verlust (Archiv), Ablauf mit Attrappe statt Modell und der nächtliche Lauf, und die Finanzen: Übersicht mit zwei Währungen und Monaten über die Jahresgrenze, Fristgrenzen, Zahldatum beim Abhaken, Wochenbericht (Schweizer Format, höchstens 25 Zeilen) und der wöchentliche Lauf.
+Heute abgedeckt: die `.env`-Verarbeitung des Assistenten (Roundtrip gegen Nodes eigenen Parser `util.parseEnv`, Kommentare und Reihenfolge, Rechte, `.env.bak`), alle Prüffunktionen, das Schema gegen `.env.example` (jeder Schlüssel genau einmal, in beide Richtungen), der Assistent End-zu-End mit gepipten Antworten, `npm run check -- --nur`, und die Robustheit: Fehlereinordnung, Backoff und Watchdog (`robust.ts`), Telegram-Wiederholung und Postausgang, Claude-Anläufe, Home-Assistant-Lesen/Schalten, Nachholfenster und Zeitpläne, Notaus mitten in einer Anfrage (Zeit und Zufall werden injiziert, kein Test wartet echte Sekunden), und die Gedächtnis-Verdichtung: Umstellung alter Profile, Prompt mit Datum und Chronik, Eingabe-Grenzen, Prüfung jedes Verstosses, Anwenden ohne Verlust (Archiv), Ablauf mit Attrappe statt Modell und der nächtliche Lauf, und die Finanzen: Übersicht mit zwei Währungen und Monaten über die Jahresgrenze, Fristgrenzen, Zahldatum beim Abhaken, Wochenbericht (Schweizer Format, höchstens 25 Zeilen) und der wöchentliche Lauf, und Alexa: Nachtfenster (über Mitternacht, Grenzen, `off`, Nachtmodus), SSML-Escaping samt eingeschleuster Tags, der Freigaben-Hinweis (0 bis 5 Aufträge, Kürzung, Anrede), das Interaction Model und die Skill-Handler ohne Netz – inklusive der Prüfung, dass per Stimme nichts freigegeben wird.
 
 Vor und nach jeder Änderung am Code: `npm run typecheck` muss sauber und `npm test` grün sein. Neue Anbindungen bekommen Tests mit Attrappen, nie mit echten Zugängen.
 
@@ -667,6 +690,7 @@ In dieser Reihenfolge, alles dauert zusammen keine zehn Minuten:
 | Shopify «unsupported version» | `SHOPIFY_API_VERSION` auf eine aktuelle Version setzen |
 | «Kein Browser gefunden» | `sudo apt install chromium` oder `BROWSER_PATH` setzen; ohne Browser bleibt `seite_lesen` |
 | Alexa versteht die Frage nicht | Satz mit «frag Butler Jarvis …» beginnen; das Interaction Model mit dem FrageIntent neu einspielen und bauen |
+| Alexa kennt «offene Aufträge» nicht oder spricht nachts nicht leiser | Interaction Model aus `alexa/` neu einspielen und bauen (FreigabenIntent); `ALEXA_NACHT` prüfen (`npm run check -- --nur Alexa-Skill`) |
 | Sprachnachricht wird nicht verstanden | `STT_URL`/`STT_KEY` prüfen; `journalctl -u jarvis -f` zeigt die Antwort des Servers |
 | Node 1 taucht nicht in Home Assistant auf | WLAN-Daten in `secrets.yaml` prüfen; der Notfall-Hotspot «Jarvis Node 1 Setup» erscheint, wenn das WLAN nicht erreichbar ist |
 | Sensor liefert `nan` | I2C-Adresse (0x76/0x77) und SDA/SCL vertauscht? Log zeigt den Scan |

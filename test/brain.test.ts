@@ -31,8 +31,11 @@ const tg = (daten: unknown, status = 200) =>
 const sources = await import("../src/sources.js");
 sources._testOptionen.warten = async () => {};
 sources._testOptionen.zufall = () => 0.5;
-const { briefingText } = await import("../src/brain.js");
-const { day, save } = await import("../src/state.js");
+const { briefingText, briefingAltbestand, BRIEFING_VERSION, aktuellerFreigabenHinweis, dashboardErreichbar, freigabenHinweis, kurzFuerStimme, HINWEIS_MAX_ZEICHEN } = await import("../src/brain.js");
+const { config } = await import("../src/config.js");
+const { day, save, state } = await import("../src/state.js");
+const { auftraege } = await import("../src/queue.js");
+type Auftrag = import("../src/queue.js").Auftrag;
 const { gesundheit } = await import("../src/robust.js");
 
 /** Lässt alle anstehenden Mikro- und Makroaufgaben (Promise-Ketten) durchlaufen. */
@@ -96,5 +99,184 @@ describe("briefingText – Telegram-Versand", () => {
     } finally {
       console.error = err;
     }
+  });
+});
+
+// =====================================================================
+const auftrag = (id: number, summary: string, extra: Partial<Auftrag> = {}): Auftrag => ({
+  id, summary, status: "offen", createdAt: "2026-10-11T06:00:00.000Z", tool: "gmail_senden", input: {}, stufe: "extern", ...extra,
+});
+const einzelnesSurrogat = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+
+describe("Freigaben-Hinweis – Notaus, gestartete Aufträge, Emoji", () => {
+  it("Notaus: keine Zusammenfassung und kein «Freigeben geht», auch nicht im Briefing", async () => {
+    auftraege.splice(0, auftraege.length, auftrag(12, "Mail an Müller AG wegen Offerte"));
+    try {
+      state.paused = true;
+      state.notfall = undefined;
+      const h = aktuellerFreigabenHinweis();
+      assert.match(h, /Notaus aktiv/);
+      assert.match(h, /\/weiter/);
+      assert.ok(!h.includes("Müller") && !h.includes("Nummer 12") && !h.includes("Freigeben geht"), h);
+
+      state.notfall = { aktiv: true, seit: "2026-10-11T05:00:00.000Z", grund: "Test" };
+      const n = aktuellerFreigabenHinweis();
+      assert.match(n, /Notfall aktiv/);
+      assert.match(n, /\/entwarnung/);
+      assert.ok(!n.includes("Müller") && !n.includes("Freigeben geht"), n);
+
+      const b = await briefingText();
+      assert.ok(!b.includes("Müller") && !b.includes("Freigeben geht"), b);
+
+      state.paused = false;
+      state.notfall = undefined;
+      assert.match(aktuellerFreigabenHinweis(), /Nummer 12, Mail an Müller AG/);
+    } finally {
+      state.paused = false;
+      state.notfall = undefined;
+      auftraege.splice(0, auftraege.length);
+    }
+  });
+
+  it("gestartete Aufträge warten nicht auf Freigabe und werden ohne Inhalt eigens genannt", () => {
+    const gestartet = auftrag(12, "Protokoll Werkstatt ausführen", { gestartetAm: "2026-10-11T06:00:00.000Z" });
+    const nur = freigabenHinweis([gestartet], "Sir");
+    assert.ok(!nur.includes("wartet") && !nur.includes("Freigeben geht") && !nur.includes("Werkstatt"), nur);
+    assert.match(nur, /^Nummer 12 ist bereits gestartet oder ohne klares Ergebnis; den Stand zeigt Telegram\.$/);
+
+    const gemischt = freigabenHinweis([gestartet, auftrag(13, "Licht Büro aus"), auftrag(14, "B", { gestartetAm: "x" })], "Sir");
+    assert.equal(
+      gemischt,
+      "Ein Auftrag wartet auf Ihre Freigabe, Sir: Nummer 13, Licht Büro aus. Freigeben geht per Telegram oder Dashboard. " +
+        "Die Nummern 12, 14 sind bereits gestartet oder ohne klares Ergebnis; den Stand zeigt Telegram.",
+    );
+    assert.equal(freigabenHinweis([auftrag(1, "A", { status: "erledigt", gestartetAm: "x" })], "Sir"), "");
+  });
+
+  it("gestartete Aufträge: höchstens drei Nummern, Rest gezählt", () => {
+    const g = (id: number) => auftrag(id, `Geheim ${id}`, { gestartetAm: "2026-10-11T06:00:00.000Z" });
+    assert.equal(
+      freigabenHinweis([3, 7, 12, 15, 21].map(g), "Sir"),
+      "Die Nummern 3, 7, 12 und zwei weitere sind bereits gestartet oder ohne klares Ergebnis; den Stand zeigt Telegram.",
+    );
+    assert.equal(
+      freigabenHinweis([3, 7, 12, 15].map(g), "Sir"),
+      "Die Nummern 3, 7, 12 und eine weitere sind bereits gestartet oder ohne klares Ergebnis; den Stand zeigt Telegram.",
+    );
+    assert.equal(
+      freigabenHinweis([3, 7, 12].map(g), "Sir"),
+      "Die Nummern 3, 7, 12 sind bereits gestartet oder ohne klares Ergebnis; den Stand zeigt Telegram.",
+    );
+    const viele = freigabenHinweis([...Array.from({ length: 15 }, (_, i) => g(i + 1)), auftrag(99, "Licht aus")], "Sir");
+    assert.match(viele, /Nummer 99, Licht aus\. Freigeben geht/);
+    assert.match(viele, /Die Nummern 1, 2, 3 und zwölf weitere sind bereits gestartet/);
+    assert.ok(!/\b4\b|Geheim/.test(viele), viele);
+  });
+
+  it("Dashboard nur nennen, wenn es eingebunden ist (DASHBOARD an und JARVIS_EVENT_TOKEN gesetzt)", () => {
+    const vorher = { dashboard: config.dashboard, eventToken: config.eventToken };
+    auftraege.splice(0, auftraege.length, auftrag(12, "Mail an Müller AG"));
+    try {
+      config.dashboard = true;
+      config.eventToken = undefined;
+      assert.equal(dashboardErreichbar(), false);
+      const ohneToken = aktuellerFreigabenHinweis();
+      assert.ok(ohneToken.endsWith("Freigeben geht per Telegram."), ohneToken);
+      assert.ok(!ohneToken.includes("Dashboard"), ohneToken);
+
+      config.eventToken = "attrappe-event-token";
+      assert.equal(dashboardErreichbar(), true);
+      assert.ok(aktuellerFreigabenHinweis().endsWith("Freigeben geht per Telegram oder Dashboard."));
+
+      config.dashboard = false;
+      assert.equal(dashboardErreichbar(), false);
+      assert.ok(aktuellerFreigabenHinweis().endsWith("Freigeben geht per Telegram."));
+    } finally {
+      config.dashboard = vorher.dashboard;
+      config.eventToken = vorher.eventToken;
+      auftraege.splice(0, auftraege.length);
+    }
+  });
+
+  it("Kürzung zerschneidet kein Emoji (kein einzelnes Surrogat)", () => {
+    const t = "Termin anlegen: «Geburtstagsfeier👨‍👩‍👧Familienessen🎉🎉🎉»";
+    for (let max = 10; max <= HINWEIS_MAX_ZEICHEN; max++) {
+      const k = kurzFuerStimme(t, max);
+      assert.ok(!einzelnesSurrogat.test(k), `max ${max}: ${JSON.stringify(k)}`);
+      assert.ok(Array.from(k).length <= max, `max ${max}: zu lang`);
+    }
+    const lang = `${"🎉".repeat(70)}`;
+    const k = kurzFuerStimme(lang);
+    assert.ok(!einzelnesSurrogat.test(k));
+    assert.equal(k, `${"🎉".repeat(HINWEIS_MAX_ZEICHEN - 1)}…`);
+    assert.ok(!einzelnesSurrogat.test(freigabenHinweis([auftrag(3, t)], "Sir")));
+  });
+});
+
+// =====================================================================
+describe("Briefing-Cache aus älterer Version (vor 0.19)", () => {
+  const ALT = "Guten Morgen, Sir. Zwei Freigaben warten.";
+  const vorStart = new Date(Date.now() - 3_600_000).toISOString();
+
+  /** Beantwortet anstehende Anfragen: Claude mit neuem Briefing, alles andere (Wetter) mit 404. */
+  async function beantworte(neu: string): Promise<void> {
+    for (let i = 0; i < 50; i++) {
+      await durchlaufen();
+      for (const o of offen.splice(0)) {
+        if (o.url.includes("anthropic")) {
+          o.antworte(tg({
+            id: "msg_attrappe", type: "message", role: "assistant", model: "claude-attrappe",
+            content: [{ type: "text", text: neu }], stop_reason: "end_turn", stop_sequence: null,
+            usage: { input_tokens: 1, output_tokens: 1 },
+          }));
+        } else if (o.url.endsWith("/sendMessage")) {
+          offen.push(o); // Telegram bleibt hängen, damit der Versand zählbar ist
+          return;
+        } else {
+          o.antworte(tg({ error: "nicht da" }, 404));
+        }
+      }
+    }
+  }
+
+  it("briefingAltbestand: Marke, Prozessstart und unlesbares Datum", () => {
+    const start = Date.parse("2026-10-11T06:00:00.000Z");
+    assert.equal(briefingAltbestand({ text: ALT, builtAt: "2026-10-11T05:30:00.000Z" }, start), true);
+    assert.equal(briefingAltbestand({ text: ALT, builtAt: "kaputt" }, start), true);
+    assert.equal(briefingAltbestand({ text: "neu", builtAt: "2026-10-11T05:30:00.000Z", v: BRIEFING_VERSION }, start), false);
+    assert.equal(briefingAltbestand({ text: "neu", builtAt: "2026-10-11T06:10:00.000Z" }, start), false);
+    assert.equal(briefingAltbestand({ text: ALT, builtAt: "2026-10-11T05:30:00.000Z", v: 1 }, start), true);
+  });
+
+  it("bereits zugestellt: altes Briefing wird neu gebaut, keine doppelte Freigaben-Zählung, kein zweiter Versand", async () => {
+    const err = console.error;
+    console.error = () => {};
+    const d = day();
+    d.briefing = { text: ALT, builtAt: vorStart };
+    d.briefingDelivered = true;
+    auftraege.splice(0, auftraege.length, auftrag(3, "Licht aus"));
+    try {
+      const p = briefingText();
+      await beantworte("Guten Morgen, Sir. Drei Termine, kein Regen.");
+      const b = await p;
+      assert.ok(!b.includes("Zwei Freigaben"), b);
+      assert.ok(b.startsWith("Guten Morgen, Sir. Drei Termine, kein Regen.\n\nEin Auftrag wartet"), b);
+      assert.equal(day().briefing?.v, BRIEFING_VERSION);
+      await durchlaufen();
+      assert.equal(sendungen().length, 0);
+    } finally {
+      console.error = err;
+      auftraege.splice(0, auftraege.length);
+    }
+  });
+
+  it("frisches Briefing mit Versionsmarke bleibt im Cache, auch wenn vor dem Start gebaut", async () => {
+    const d = day();
+    const neu = { text: "Guten Morgen, Sir. Aus dem Cache.", builtAt: vorStart, v: BRIEFING_VERSION };
+    d.briefing = neu;
+    d.briefingDelivered = true;
+    assert.equal(await briefingText(), "Guten Morgen, Sir. Aus dem Cache.");
+    await durchlaufen();
+    assert.equal(offen.length, 0, "keine Anfrage an Claude");
   });
 });

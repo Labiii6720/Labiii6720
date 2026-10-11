@@ -83,6 +83,42 @@ describe("selbsttest(nur)", () => {
   });
 });
 
+describe("selbsttest: Alexa-Skill wertet ALEXA_NACHT wie die Laufzeit (nachtFenster/istNacht)", () => {
+  it("OFF ungültig, gleiche Grenzen = leeres Fenster, off und echtes Fenster ok; kein fetch", async () => {
+    const { config } = await import("../src/config.js");
+    const vorher = config.alexaNacht;
+    process.env.ALEXA_SKILL_ID = "amzn1.ask.skill.00000000-0000-0000-0000-000000000000";
+    aufrufe = 0;
+    const pruefe = async (wert: string) => {
+      config.alexaNacht = wert;
+      const b = await selbsttest(["Alexa-Skill"]);
+      assert.equal(b.length, 1);
+      return b[0];
+    };
+    try {
+      for (const wert of ["OFF", "Off"]) {
+        const b = await pruefe(wert);
+        assert.equal(b.status, "fehler", wert);
+        assert.match(b.info, new RegExp(`ALEXA_NACHT «${wert}» ungültig`));
+      }
+      const leer = await pruefe("22:00-22:00");
+      assert.equal(leer.status, "fehler");
+      assert.match(leer.info, /Fenster leer.*nur im Nachtmodus/);
+      assert.doesNotMatch(leer.info, /22:00-22:00 und im Nachtmodus/);
+      const aus = await pruefe("off");
+      assert.equal(aus.status, "ok");
+      assert.match(aus.info, /nur im Nachtmodus/);
+      const fenster = await pruefe("22:00-06:30");
+      assert.equal(fenster.status, "ok");
+      assert.match(fenster.info, /22:00-06:30 und im Nachtmodus/);
+      assert.equal(aufrufe, 0);
+    } finally {
+      config.alexaNacht = vorher;
+      delete process.env.ALEXA_SKILL_ID;
+    }
+  });
+});
+
 describe("nurAusArgv", () => {
   it("liest --nur a,b", () => {
     assert.deepEqual(nurAusArgv(["node", "check", "--nur", "Telegram,Frigate"]), ["Telegram", "Frigate"]);

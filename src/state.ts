@@ -27,7 +27,13 @@ export interface DayState {
   recovery?: Recovery;
   workout?: Workout;
   cardioDelivered?: boolean;
-  briefing?: { text: string; builtAt: string; workoutId?: string };
+  briefing?: {
+    text: string;
+    builtAt: string;
+    workoutId?: string;
+    /** Versionsmarke des Caches (brain.ts BRIEFING_VERSION) */
+    v?: number;
+  };
   briefingDelivered?: boolean;
 }
 
