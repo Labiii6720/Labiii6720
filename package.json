@@ -1,6 +1,6 @@
 {
   "name": "jarvis",
-  "version": "0.16.0",
+  "version": "0.17.0",
   "scripts": {
     "start": "tsx src/server.ts",
     "whoop:auth": "tsx scripts/whoop-auth.ts",

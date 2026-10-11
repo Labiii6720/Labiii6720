@@ -1355,3 +1355,81 @@ describe("Nachprüfung Runde 3: Notaus über den Neustart, Notfall während der 
     await bis(() => gesendet().some((t) => t.startsWith(`✅ #${a.id} erledigt:`)));
   });
 });
+
+describe("/verdichten bei Telegram-Störung: kein Absturz, der Bericht geht nicht verloren", () => {
+  const origVerdichte = abhaengigkeiten.verdichteJetzt;
+  const origErr = console.error;
+  const nachricht = (id: number, text: string) => ({ update_id: id, message: { message_id: id, chat: { id: 12345 }, text } });
+  let unbehandelt: unknown[] = [];
+  const merke = (e: unknown) => { unbehandelt.push(e); };
+  /** Mikro- und Makroaufgaben abarbeiten: eine verworfene Rejection käme hier als unhandledRejection an */
+  const ruhe = async () => { for (let i = 0; i < 200; i++) await new Promise((r) => setImmediate(r)); };
+  /** sendMessage scheitert ab jetzt dauerhaft mit Netzfehler (Telegram fällt während des Modellaufrufs aus) */
+  const sendenKaputt = () => {
+    globalThis.fetch = (async (eingabe, init) => {
+      const url = String(eingabe instanceof Request ? eingabe.url : eingabe);
+      if (url.endsWith("/sendMessage")) {
+        aufrufe.push({ method: "sendMessage", text: (JSON.parse(String(init?.body)) as { text?: string }).text });
+        throw netzfehler();
+      }
+      return fetchAttrappe(eingabe, init);
+    }) as typeof fetch;
+  };
+  const bericht = { faktenZusammengefuehrt: 3, faktenVeraltet: 2, notizenVorher: 41, notizenNachher: 12, entscheidungenChronik: 7, chronikMonate: ["2026-07"] };
+  beforeEach(() => {
+    unbehandelt = [];
+    state.paused = false;
+    console.error = () => undefined;
+    process.on("unhandledRejection", merke);
+  });
+  afterEach(() => {
+    process.off("unhandledRejection", merke);
+    abhaengigkeiten.verdichteJetzt = origVerdichte;
+    console.error = origErr;
+    globalThis.fetch = fetchAttrappe;
+    state.paused = false;
+  });
+
+  it("Bericht nach erfolgreicher Verdichtung: landet im Postausgang, keine unbehandelte Rejection", async () => {
+    abhaengigkeiten.verdichteJetzt = async () => {
+      sendenKaputt();
+      return { bericht };
+    };
+    await handleUpdate(nachricht(9601, "/verdichten"));
+    await ruhe();
+    assert.deepEqual(unbehandelt, []);
+    assert.deepEqual(liesPostausgang().map((e) => e.text), ["🧠 Verdichtung: 3 Fakten zusammengeführt, 2 als veraltet markiert, Notizen 41 → 12 Zeilen, 7 Entscheidungen (Juli) in die Chronik."]);
+    // kommt Telegram zurück, wird der Bericht nachgereicht
+    globalThis.fetch = fetchAttrappe;
+    aufrufe = [];
+    await postausgangTick();
+    assert.match(aufrufe[0]?.text ?? "", /^\(nachgereicht, \d{2}:\d{2}\) 🧠 Verdichtung: 3 Fakten/);
+    assert.deepEqual(liesPostausgang(), []);
+  });
+
+  it("Vorschau, abgelehnter Vorschlag, nichts zu tun und Ausnahme: Sendefehler werden abgefangen", async () => {
+    const eingabe = { fakten: [], notizen: [], entscheidungenAlt: [], muster: [], heute: "2026-10-11", tage: 90 };
+    const vorschau = { fakten: { zusammenfuehren: [], veraltet: [] }, notizen: { behalten: [], verdichtet: [] }, chronik: [] };
+    const faelle: [string, () => Promise<Awaited<ReturnType<typeof abhaengigkeiten.verdichteJetzt>>>][] = [
+      ["/verdichten vorschau", async () => ({ vorschau, eingabe })],
+      ["/verdichten", async () => ({ fehler: "Vorschlag abgelehnt: y. Nichts geändert." })],
+      ["/verdichten", async () => ({})],
+      ["/verdichten", async () => { throw new Error("EACCES: permission denied, open 'data/profil.json'"); }],
+    ];
+    let id = 9610;
+    for (const [befehl, ergebnis] of faelle) {
+      globalThis.fetch = fetchAttrappe;
+      abhaengigkeiten.verdichteJetzt = async () => {
+        sendenKaputt();
+        return ergebnis();
+      };
+      aufrufe = [];
+      await handleUpdate(nachricht(++id, befehl));
+      await ruhe();
+      assert.deepEqual(unbehandelt, [], befehl);
+      assert.equal(aufrufe.filter((a) => a.method === "sendMessage").length, 5, befehl); // Ansage + vier Versuche der Antwort
+    }
+    // Antworten ohne bleibenden Wert (Vorschau, Fehlertexte) gehen nicht in den Postausgang
+    assert.deepEqual(liesPostausgang(), []);
+  });
+});

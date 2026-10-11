@@ -18,10 +18,11 @@ import { formatBefund, selbsttest } from "./check.js";
 import { abuseSignal } from "./notfall.js";
 import { HttpFehler, fehlerArt, fehlerDetail, gesundheit, mitWiederholung, nutzerText, schwaerze, voruebergehend, wartezeit } from "./robust.js";
 import { clock } from "./time.js";
+import { berichtText, verdichteJetzt, vorschauText } from "./verdichtung.js";
 
 const API = () => `https://api.telegram.org/bot${config.telegramToken}`;
-/** Claude ist hier ersetzbar (Tests mit Attrappen); im Betrieb die echte Funktion. */
-export const abhaengigkeiten = { handleMessage };
+/** Claude und die Verdichtung sind hier ersetzbar (Tests mit Attrappen); im Betrieb die echten Funktionen. */
+export const abhaengigkeiten = { handleMessage, verdichteJetzt };
 const owner = () => config.telegramOwner ?? "";
 const log = (e: unknown) => console.error(e instanceof Error ? schwaerze(e.message) : e);
 
@@ -487,7 +488,7 @@ async function onCommand(cmd: string, arg: string): Promise<void> {
     case "/start":
     case "/hilfe":
       return void sendText(
-        "JARVIS, zu Diensten.\n\n/auftraege – offene Freigaben\n/vorgang <Auftrag> – grosse Aufgabe im Hintergrund, starkes Modell\n/vorgaenge – Stand der Vorgänge\n! vor einer Nachricht – starkes Modell für diese Antwort\n/modus normal|fokus|nacht\n/neu – Gespräch vergessen\n/pause – Notaus, /weiter hebt ihn auf\n/notfall – Angriff: alles sperren und alarmieren\n/protokoll <name> – Nacht, Abwesend, Werkstatt …\n/kosten – Tokenverbrauch heute und Monat\n/check – Selbsttest aller Anbindungen\n/status – was läuft",
+        "JARVIS, zu Diensten.\n\n/auftraege – offene Freigaben\n/vorgang <Auftrag> – grosse Aufgabe im Hintergrund, starkes Modell\n/vorgaenge – Stand der Vorgänge\n! vor einer Nachricht – starkes Modell für diese Antwort\n/modus normal|fokus|nacht\n/neu – Gespräch vergessen\n/pause – Notaus, /weiter hebt ihn auf\n/notfall – Angriff: alles sperren und alarmieren\n/protokoll <name> – Nacht, Abwesend, Werkstatt …\n/kosten – Tokenverbrauch heute und Monat\n/verdichten – Gedächtnis jetzt verdichten (/verdichten vorschau ändert nichts)\n/check – Selbsttest aller Anbindungen\n/status – was läuft",
       );
     case "/auftraege": {
       const offen = offeneAuftraege();
@@ -541,6 +542,8 @@ async function onCommand(cmd: string, arg: string): Promise<void> {
       save();
       audit("weiter", {});
       return void sendText("▶️ Weiter geht's.");
+    case "/verdichten":
+      return verdichtenBefehl(arg.trim().toLowerCase());
     case "/check":
       await sendText("Prüfe alle Anbindungen …");
       return void sendText(formatBefund(await selbsttest()));
@@ -551,6 +554,51 @@ async function onCommand(cmd: string, arg: string): Promise<void> {
     default:
       return void sendText("Kenne ich nicht. /hilfe zeigt die Befehle.");
   }
+}
+
+/**
+ * /verdichten [vorschau]: sofort verdichten (Bericht als Antwort) oder nur den Vorschlag zeigen.
+ * Jedes Senden wird abgewartet und abgefangen: nach dem bis zu minutenlangen Modellaufruf kann Telegram gestört sein,
+ * und ein verworfenes Promise würde zur unbehandelten Rejection (Absturz des Dienstes).
+ */
+async function verdichtenBefehl(arg: string): Promise<void> {
+  if (arg && arg !== "vorschau") {
+    await sendText("Benutzung: /verdichten oder /verdichten vorschau.");
+    return;
+  }
+  if (state.paused) {
+    await sendText("⛔ Notaus aktiv. Erst /weiter.");
+    return;
+  }
+  const vorschau = arg === "vorschau";
+  await sendText(vorschau ? "Ich sehe mir an, was sich verdichten liesse …" : "Ich verdichte das Gedächtnis, einen Moment, Sir …");
+  let r: Awaited<ReturnType<typeof abhaengigkeiten.verdichteJetzt>>;
+  try {
+    r = await abhaengigkeiten.verdichteJetzt({ nurVorschau: vorschau });
+  } catch (e) {
+    log(e);
+    if (state.paused) {
+      await sendText(pausiertText()).catch(log);
+      return;
+    }
+    const antwort = voruebergehend(e) || fehlerArt(e) === "auth" ? nutzerText(e, "claude") : `Die Verdichtung ist fehlgeschlagen: ${schwaerze(e instanceof Error ? e.message : String(e))}`;
+    await sendText(antwort).catch(log);
+    return;
+  }
+  if (vorschau && r.vorschau && r.eingabe) {
+    await sendText(`${vorschauText(r.vorschau, r.eingabe)}${r.fehler ? `\n\n⚠️ So würde ich ihn nicht anwenden – ${r.fehler}` : ""}`).catch(log);
+    return;
+  }
+  if (r.fehler) {
+    await sendText(`⚠️ ${r.fehler}`).catch(log);
+    return;
+  }
+  // Die Verdichtung ist geschrieben: der Bericht darf bei einer Telegram-Störung nicht verloren gehen → Postausgang.
+  if (r.bericht) {
+    await sendeSpaeter(berichtText(r.bericht)).catch(log);
+    return;
+  }
+  await sendText("Nichts zu verdichten, Sir. Das Gedächtnis ist bereits schlank.").catch(log);
 }
 
 // ---------- Eingehende Updates ----------

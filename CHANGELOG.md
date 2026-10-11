@@ -2,6 +2,11 @@
 
 Kurz und nur das Wichtigste. Details stehen im README.
 
+## 0.17
+- Gedächtnis-Verdichtung: nachts um `VERDICHTUNG` (Standard 03:30, `off` = aus) führt Haiku doppelte Fakten zusammen, markiert überholte mit Grund als veraltet, fasst Notizen älterer Monate je Monat zusammen und alte Entscheidungen (`VERDICHTUNG_TAGE`, Standard 90) in eine Monats-Chronik. Der Vorschlag wird geprüft und bei jedem Verstoss ganz verworfen; nichts wird gelöscht, Originale stehen in `data/profil-archiv.jsonl`. `/verdichten` sofort, `/verdichten vorschau` ändert nichts.
+- Fakten mit Datum und Nummer (`seit`, Herkunft, Veraltet-Vermerk), neues Werkzeug `fakt_merken`, `profil_vergessen` auch per Nummer. Alte Profile werden beim Start umgestellt, die alte Datei vorher nach `data/profil.vor-0.17.json` gesichert; eine unlesbare `profil.json` wird nach `data/profil.json.defekt` kopiert und nie überschrieben (Speichern und Verdichtung verweigert). Entscheidungsnummern bleiben nach der Chronik eindeutig.
+- Prompt: «Dauerhafte Fakten (seit): …» mit Datum, veraltete ausgeblendet, Chronik der letzten drei Monate.
+
 ## 0.16
 - Robustheit: Fehler werden eingeordnet (Netz, Zeitlimit, Rate-Limit, Server, Zugang) und vorübergehende mit Backoff wiederholt – Claude (3 langsame Anläufe über dem SDK), Telegram-Senden (4×), Home Assistant lesen (3×), Frigate, Wetter, Kalender, WHOOP, Shopify-Abfragen, Stimme (2×). Schaltbefehle nur, wenn die Anfrage HA nie erreicht hat; `toggle`, Schritte, `press`, `trigger`, Mails, Shopify-Änderungen und Drucker-Uploads nie.
 - Internetausfall: Telegram-Polling mit Backoff bis 60 s (409/401 einmal klar geloggt), Zeitpläne, Rückblick, Rechnungen und Zielcheck gelten erst nach Erfolg als gelaufen und werden im Nachholfenster `ZEITPLAN_NACHHOLEN_MIN` (Standard 60) nachgeholt. Der letzte Lauf steht persistent in `data/routinen.json` – kein Doppellauf nach Neustart im Nachholfenster.

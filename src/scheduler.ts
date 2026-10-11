@@ -9,11 +9,12 @@ import { faelligIm, saveZeitplaene, zeitplaene } from "./zeitplaene.js";
 import { formatRechnung, offeneRechnungen } from "./finanzen.js";
 import { profil } from "./profil.js";
 import { gesundheit, schwaerze, voruebergehend } from "./robust.js";
+import { berichtText, hatAenderungen, verdichteJetzt, verdichtungLaeuft } from "./verdichtung.js";
 
 const log = (e: unknown) => console.error(e instanceof Error ? schwaerze(e.message) : e);
 
-/** Claude und Telegram sind hier ersetzbar (Tests mit Attrappen); im Betrieb die echten Funktionen. */
-export const abhaengigkeiten = { handleMessage, sendeSpaeter };
+/** Claude, Telegram und die Verdichtung sind hier ersetzbar (Tests mit Attrappen); im Betrieb die echten Funktionen. */
+export const abhaengigkeiten = { handleMessage, sendeSpaeter, verdichteJetzt };
 
 // ---------- Gemeinsames Muster: erst nach Erfolg als gelaufen markieren ----------
 
@@ -25,8 +26,8 @@ const letzterFehlversuch = new Map<string, number>();
 const laufend = new Set<string>();
 let offlineGemeldet = false;
 
-/** Rückblick, Rechnungs-Erinnerung und Zielcheck: Tag des letzten Laufs. Persistent, sonst liefe ein Lauf nach einem Neustart im Nachholfenster ein zweites Mal. */
-export type Routinen = { rueckblick?: string; rechnungen?: string; zielcheck?: string };
+/** Rückblick, Rechnungs-Erinnerung, Zielcheck und Verdichtung: Tag des letzten Laufs. Persistent, sonst liefe ein Lauf nach einem Neustart im Nachholfenster ein zweites Mal. */
+export type Routinen = { rueckblick?: string; rechnungen?: string; zielcheck?: string; verdichtung?: string };
 const ROUTINEN_DATEI = "data/routinen.json";
 const WOCHENTAGE = ["so", "mo", "di", "mi", "do", "fr", "sa"];
 
@@ -57,7 +58,7 @@ const routinen: Routinen = (() => {
     if (!roh || typeof roh !== "object") return {};
     const r = roh as Record<string, unknown>;
     const tag = (k: string) => (typeof r[k] === "string" ? (r[k] as string) : undefined);
-    return { rueckblick: tag("rueckblick"), rechnungen: tag("rechnungen"), zielcheck: tag("zielcheck") };
+    return { rueckblick: tag("rueckblick"), rechnungen: tag("rechnungen"), zielcheck: tag("zielcheck"), verdichtung: tag("verdichtung") };
   } catch (e) {
     // Datei fehlt = erster Start; kaputtes JSON = wie bisher alles offen
     if ((e as NodeJS.ErrnoException)?.code !== "ENOENT") return {};
@@ -298,9 +299,45 @@ export async function zielcheckTick(now = new Date()): Promise<void> {
   if (fertig) merkeRoutine("zielcheck", today);
 }
 
+/**
+ * Nachts: Gedächtnis-Verdichtung (Haiku). Erfolg mit Änderungen → kurzer Bericht; nichts geändert → still.
+ * Dauerhafter Fehler oder abgelehnter Vorschlag → eine Meldung, der Lauf gilt für heute als erledigt;
+ * vorübergehender Fehler → still, im Fenster später erneut, sonst in der nächsten Nacht.
+ */
+export async function verdichtungTick(now = new Date()): Promise<void> {
+  offlineNachfuehren();
+  if (config.verdichtung === "off" || state.paused) return;
+  const today = todayKey(now);
+  if (routinen.verdichtung === today || !imFenster(config.verdichtung, now, config.zeitplanNachholenMin)) return;
+  // Läuft gerade /verdichten, nächste Minute erneut versuchen
+  if (!bereit("verdichtung", now) || verdichtungLaeuft()) return;
+  if (wartetWeilOffline("die Verdichtung")) return;
+  const ausgefallen = (grund: string) => abhaengigkeiten.sendeSpaeter(`⚠️ Die nächtliche Verdichtung ist ausgefallen: ${grund}`);
+  const fertig = await ausfuehren("verdichtung", "Die nächtliche Verdichtung", now, async () => {
+    let r: Awaited<ReturnType<typeof verdichteJetzt>>;
+    try {
+      r = await abhaengigkeiten.verdichteJetzt({ heute: today });
+    } catch (e) {
+      // Vorübergehend oder Notaus: ausfuehren hält den Lauf still offen
+      if (state.paused || voruebergehend(e)) throw e;
+      log(e);
+      await ausgefallen(schwaerze(e instanceof Error ? e.message : String(e)));
+      return;
+    }
+    if (state.paused) return false;
+    if (r.fehler) {
+      await ausgefallen(schwaerze(r.fehler));
+      return;
+    }
+    if (r.bericht && hatAenderungen(r.bericht)) await abhaengigkeiten.sendeSpaeter(berichtText(r.bericht));
+  });
+  if (fertig) merkeRoutine("verdichtung", today);
+}
+
 export function startScheduler(): void {
   setInterval(() => zeitplanTick().catch(log), 60_000);
   setInterval(() => rueckblickTick().catch(log), 60_000);
   setInterval(() => rechnungsTick().catch(log), 60_000);
   setInterval(() => zielcheckTick().catch(log), 60_000);
+  setInterval(() => verdichtungTick().catch(log), 60_000);
 }
