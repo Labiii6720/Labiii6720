@@ -45,6 +45,8 @@ export const config = {
   rechnungVorlauf: Number(opt("RECHNUNG_VORLAUF_TAGE") ?? "3"),
   /** Wöchentlicher Zielcheck: Wochentag und Uhrzeit, z. B. «so 18:00»; off = aus */
   zielcheck: opt("ZIELCHECK") ?? "so 18:00",
+  /** Finanz-Wochenbericht (offen, überfällig, bezahlt, pro Monat): Wochentag und Uhrzeit, z. B. «mo 07:45»; off = aus */
+  finanzbericht: opt("FINANZBERICHT") ?? "mo 07:45",
   /** Nächtliche Gedächtnis-Verdichtung (Profil und Notizen, Haiku) um HH:MM; off = aus */
   verdichtung: opt("VERDICHTUNG") ?? "03:30",
   /** Entscheidungen, die älter sind als so viele Tage, wandern als Monats-Chronik ins Profil (Details ins Archiv) */

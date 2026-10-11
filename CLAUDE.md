@@ -16,7 +16,7 @@ Du arbeitest am persönlichen Assistenten **JARVIS** von Labinot (Service Specia
 - `telegram.ts` Zentrale: Befehle, Freigabe-Buttons, PIN, Notaus, Sprachnachrichten. `dashboard.ts` dieselben Funktionen fürs Web.
 - `brain.ts` Morgen (Cardio aus WHOOP, Tagesbriefing), `alexa.ts` Skill, `sources.ts` Wetter/Kalender/WHOOP.
 - `cameras.ts`/`watch.ts` Frigate (schauen, melden, wachen), `homeassistant.ts`, `shopify.ts`, `gmail.ts`, `browser.ts`, `workspace.ts` (Sandbox), `werkstatt.ts` (OpenSCAD/OctoPrint).
-- `profil.ts`/`berater.ts` Lernen über den Nutzer und ehrlicher Berater, `verdichtung.ts` nächtliche Gedächtnis-Verdichtung (Haiku, Vorschlag geprüft, nichts gelöscht, Archiv `data/profil-archiv.jsonl`), `finanzen.ts` Rechnungen (nur vorbereiten), `notfall.ts` defensives Notfall-Protokoll, `scheduler.ts` Zeitpläne, Rückblick, Rechnungs- und Zielerinnerungen, Verdichtungs-Lauf, `check.ts` Selbsttest, `claude.ts` Verbrauch/Kosten, `audit.ts` Protokoll.
+- `profil.ts`/`berater.ts` Lernen über den Nutzer und ehrlicher Berater, `verdichtung.ts` nächtliche Gedächtnis-Verdichtung (Haiku, Vorschlag geprüft, nichts gelöscht, Archiv `data/profil-archiv.jsonl`), `finanzen.ts` Rechnungen und Finanz-Wochenbericht (nur vorbereiten), `notfall.ts` defensives Notfall-Protokoll, `scheduler.ts` Zeitpläne, Rückblick, Rechnungs- und Zielerinnerungen, Finanzbericht, Verdichtungs-Lauf, `check.ts` Selbsttest, `claude.ts` Verbrauch/Kosten, `audit.ts` Protokoll.
 - `robust.ts` Fehlereinordnung, Wiederholen mit Backoff (`mitWiederholung`), Gesundheit je Anbindung und Watchdog; Claude-Aufrufe über `claudeAufruf` (claude.ts), eigene Meldungen über `sendeSpaeter` (Postausgang in telegram.ts). Nebenwirkungen (Schalten, Senden, Uploads) nie blind wiederholen.
 - Konfiguration nur über `.env` (siehe .env.example) und die JSON-Dateien `cameras.json`, `protokolle.json`. Zustand und Geheimnisse in `data/` (600).
 
@@ -50,10 +50,9 @@ Du arbeitest am persönlichen Assistenten **JARVIS** von Labinot (Service Specia
 
 ## Offener Plan (Schicht 2, nach Nutzen sortiert)
 
-1. Finanz-Wochenbericht: offene Rechnungen, bezahlt, Summe pro Monat, in Telegram und Dashboard.
-2. Dashboard: Freigabe-Historie, Kosten (aus usage.json), Zeitpläne und Wachen bearbeiten.
-3. Alexa: Routinen-Hinweise im Briefing (offene Freigaben vorlesen), Nachtmodus-Stimme leiser.
-4. Satellit: Lautstärke per HA, Ton-Feedback beim Wakeword, zweiter Satellit (Bad) für das Briefing nach der Dusche statt Telegram.
-5. Werkstatt: Slicer-Anbindung (PrusaSlicer CLI) damit `cad_drucken` G-Code statt STL schickt.
+1. Dashboard: Freigabe-Historie, Kosten (aus usage.json), Zeitpläne und Wachen bearbeiten; Finanz-Wochenbericht aus `/api/finanzen` darstellen.
+2. Alexa: Routinen-Hinweise im Briefing (offene Freigaben vorlesen), Nachtmodus-Stimme leiser.
+3. Satellit: Lautstärke per HA, Ton-Feedback beim Wakeword, zweiter Satellit (Bad) für das Briefing nach der Dusche statt Telegram.
+4. Werkstatt: Slicer-Anbindung (PrusaSlicer CLI) damit `cad_drucken` G-Code statt STL schickt.
 
 Was nicht kommt: Anzug, Gegenangriff, Selbstmodifikation, Zahlungsauslösung.

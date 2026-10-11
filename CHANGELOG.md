@@ -2,6 +2,11 @@
 
 Kurz und nur das Wichtigste. Details stehen im README.
 
+## 0.18
+- Finanz-Wochenbericht: wöchentlich um `FINANZBERICHT` (Standard `mo 07:45`, `off` = aus) per Telegram: offen (Summe je Währung, Schweizer Format), überfällig und fällig in 7 Tagen (je höchstens 5), bezahlt letzte Woche, Summe pro Monat der letzten sechs Monate. Ohne Claude, keine Tokens; ohne Rechnungen still; Zahlungen werden nie ausgelöst.
+- Sofort mit `/finanzen`, fürs Dashboard als JSON unter `GET /api/finanzen` (nur Heimnetz/Tailscale, Token, ohne IBAN und Referenz). Im Notfall gibt es keine Finanzdaten.
+- Rechnungen merken sich beim Abhaken als bezahlt das Datum (`bezahltAm`), damit Zahlungen im richtigen Monat zählen.
+
 ## 0.17
 - Gedächtnis-Verdichtung: nachts um `VERDICHTUNG` (Standard 03:30, `off` = aus) führt Haiku doppelte Fakten zusammen, markiert überholte mit Grund als veraltet, fasst Notizen älterer Monate je Monat zusammen und alte Entscheidungen (`VERDICHTUNG_TAGE`, Standard 90) in eine Monats-Chronik. Der Vorschlag wird geprüft und bei jedem Verstoss ganz verworfen; nichts wird gelöscht, Originale stehen in `data/profil-archiv.jsonl`. `/verdichten` sofort, `/verdichten vorschau` ändert nichts.
 - Fakten mit Datum und Nummer (`seit`, Herkunft, Veraltet-Vermerk), neues Werkzeug `fakt_merken`, `profil_vergessen` auch per Nummer. Alte Profile werden beim Start umgestellt, die alte Datei vorher nach `data/profil.vor-0.17.json` gesichert; eine unlesbare `profil.json` wird nach `data/profil.json.defekt` kopiert und nie überschrieben (Speichern und Verdichtung verweigert). Entscheidungs- und Faktnummern bleiben eindeutig (auch nach Zusammenführen und Vergessen). Ein vergessener Chronik-Monat verschwindet auch aus dem Archiv; `profil_anzeigen` listet alle Chronik-Monate.

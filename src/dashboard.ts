@@ -5,7 +5,7 @@ import { askWithBudget } from "./agent.js";
 import { audit } from "./audit.js";
 import { cameras, snapshot } from "./cameras.js";
 import { config } from "./config.js";
-import { offeneRechnungen } from "./finanzen.js";
+import { finanzUebersicht, offeneRechnungen, type Rechnung } from "./finanzen.js";
 import { haStates } from "./homeassistant.js";
 import { ausloesen, notfallAktiv } from "./notfall.js";
 import { profil } from "./profil.js";
@@ -50,6 +50,22 @@ export function statusJson(_req: Request, res: Response): void {
     ziele: profil.ziele.filter((z) => z.status === "offen").map((z) => ({ id: z.id, text: z.text, frist: z.frist })),
     werte: profil.werte,
     gesundheit: gesundheit.alle(),
+  });
+}
+
+/** Für das Dashboard reicht das: keine IBAN, keine Referenz, keine Notiz. */
+const kurzeRechnung = (r: Rechnung) => ({ id: r.id, empfaenger: r.empfaenger, betrag: r.betrag, waehrung: r.waehrung, faellig: r.faellig, bezahltAm: r.bezahltAm, status: r.status });
+
+/** GET /api/finanzen: Wochenbericht als JSON. Nur lesen, keine Zahlung; im Notfall gesperrt wie alle Daten. */
+export function finanzenJson(_req: Request, res: Response): void {
+  if (notfallAktiv()) return void res.status(423).json({ ok: false, error: "notfall" });
+  const u = finanzUebersicht();
+  res.json({
+    ok: true,
+    ...u,
+    ueberfaellig: u.ueberfaellig.map(kurzeRechnung),
+    faelligBald: u.faelligBald.map(kurzeRechnung),
+    bezahltLetzteWoche: u.bezahltLetzteWoche.map(kurzeRechnung),
   });
 }
 

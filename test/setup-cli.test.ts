@@ -59,7 +59,7 @@ const TOKEN = "123456789:ABCdefGHIjklMNOpqrSTUvwxYZ0123456789";
 const KEY = "sk-ant-api03-testschluessel-nicht-echt";
 const PIN = "zz99"; // bewusst mit Nicht-Hex-Zeichen: kein erzeugter Token kann diese Folge enthalten
 
-/** Antworten erster Lauf: Pflichtwerte, Chat-ID zuerst ungültig, sonst Enter (65 Felder in Reihenfolge der Abschnitte) */
+/** Antworten erster Lauf: Pflichtwerte, Chat-ID zuerst ungültig, sonst Enter (68 Felder in Reihenfolge der Abschnitte) */
 function ersteAntworten(): string[] {
   return [
     "Labinot", "", "", "", "", // grundlagen
@@ -358,7 +358,7 @@ describe("scripts/setup.ts (End-zu-End)", () => {
       const env = join(dir, ".env");
       writeFileSync(env, `HA_URL=http://127.0.0.1:${port}\nHA_TOKEN=token-attrappe\nFRIGATE_URL=http://127.0.0.1:${port}\n`, { mode: 0o600 });
       // Abschnitt ohne eigene Prüfung: nur der Abschluss-Selbsttest läuft
-      const lauf = await fahreRoh(dir, Array<string>(9).fill(""), ["--abschnitt", "proaktiv", "--env", env]);
+      const lauf = await fahreRoh(dir, Array<string>(10).fill(""), ["--abschnitt", "proaktiv", "--env", env]);
       assert.equal(lauf.code, 0, lauf.out + lauf.err);
       const selbsttest = lauf.out.slice(lauf.out.indexOf("── Selbsttest ──"));
       assert.ok(selbsttest.includes("❌ Home Assistant"), selbsttest);

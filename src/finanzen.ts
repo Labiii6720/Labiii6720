@@ -1,4 +1,5 @@
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { todayKey } from "./time.js";
 
 /**
  * Finanzüberblick. Jarvis liest Rechnungen aus dem Postfach und behält Fristen und Beträge im Blick.
@@ -15,6 +16,8 @@ export interface Rechnung {
   referenz?: string; // QR-Referenz / Zahlungszweck
   faellig?: string; // ISO-Datum
   status: "offen" | "bezahlt" | "ignoriert";
+  /** YYYY-MM-DD, gesetzt beim Abhaken als bezahlt (Monatssumme, Wochenbericht) */
+  bezahltAm?: string;
   notiz?: string;
 }
 
@@ -114,4 +117,185 @@ export function offeneRechnungen(): Rechnung[] {
 export function formatRechnung(r: Rechnung): string {
   const betrag = r.betrag != null ? `${r.betrag.toFixed(2)} ${r.waehrung}` : "Betrag unklar";
   return `#${r.id} · ${r.empfaenger} · ${betrag}${r.faellig ? ` · fällig ${r.faellig}` : ""}${r.iban ? `\n   IBAN ${r.iban}` : ""}${r.referenz ? ` · Ref ${r.referenz}` : ""} · ${r.status}`;
+}
+
+/**
+ * Setzt den Status und pflegt bezahltAm: beim Abhaken als bezahlt das Datum (ein schon gesetztes bleibt), beim Wechsel
+ * weg von bezahlt wird es gelöscht. Speichert sofort. Hakt nur ab – gezahlt wird ausschliesslich in der Bank-App.
+ */
+export function setzeStatus(r: Rechnung, status: Rechnung["status"], heute = todayKey()): void {
+  r.status = status;
+  if (status !== "bezahlt") delete r.bezahltAm;
+  else if (!r.bezahltAm) r.bezahltAm = heute;
+  saveRechnungen();
+}
+
+// ---------- Auswertung (Wochenbericht, Dashboard) ----------
+
+/** Summe je Währung, z. B. { CHF: 1234.5, EUR: 20 } */
+export interface Summe {
+  [waehrung: string]: number;
+}
+
+export interface MonatsZeile {
+  /** YYYY-MM */
+  monat: string;
+  bezahlt: Summe;
+  offen: Summe;
+  anzahlBezahlt: number;
+  anzahlOffen: number;
+}
+
+export interface FinanzUebersicht {
+  /** YYYY-MM-DD */
+  stand: string;
+  offen: { anzahl: number; summe: Summe };
+  /** offen, faellig < heute */
+  ueberfaellig: Rechnung[];
+  /** offen, heute ≤ faellig ≤ heute + 7 Tage */
+  faelligBald: Rechnung[];
+  /** offen ohne Fälligkeit */
+  ohneFrist: number;
+  /** offen ohne Betrag */
+  unklar: number;
+  /** bezahltAm in den letzten 7 Tagen (inkl. heute) */
+  bezahltLetzteWoche: Rechnung[];
+  /** letzte 6 Monate inkl. aktuellem, älteste zuerst */
+  proMonat: MonatsZeile[];
+}
+
+const hatBetrag = (r: Rechnung): r is Rechnung & { betrag: number } => typeof r.betrag === "number" && Number.isFinite(r.betrag);
+const waehrungVon = (r: Rechnung): string => (typeof r.waehrung === "string" && r.waehrung.trim() ? r.waehrung.trim().toUpperCase() : "CHF");
+
+/** YYYY-MM-DD in Schweizer Zeit; erkanntAm ist ein UTC-Zeitstempel und kann kurz vor Mitternacht im Vortag liegen. */
+function tagVon(wert: unknown): string | undefined {
+  if (typeof wert !== "string" || !wert) return undefined;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(wert)) return wert;
+  if (!/^\d{4}-\d{2}-\d{2}T/.test(wert)) return undefined;
+  const d = new Date(wert);
+  return Number.isNaN(d.getTime()) ? undefined : todayKey(d);
+}
+
+/** Kalenderrechnung auf dem Datumsschlüssel (UTC), unabhängig von Sommerzeit */
+function plusTage(tag: string, n: number): string {
+  const [j, m, t] = tag.split("-").map(Number) as [number, number, number];
+  return new Date(Date.UTC(j, m - 1, t + n)).toISOString().slice(0, 10);
+}
+
+function plusMonate(tag: string, n: number): string {
+  const [j, m] = tag.split("-").map(Number) as [number, number];
+  return new Date(Date.UTC(j, m - 1 + n, 1)).toISOString().slice(0, 7);
+}
+
+/** Summiert in Rappen, damit 0.1 + 0.2 nicht 0.30000000000000004 ergibt. */
+class Summierer {
+  private rappen = new Map<string, number>();
+  add(r: Rechnung): void {
+    if (!hatBetrag(r)) return;
+    const w = waehrungVon(r);
+    this.rappen.set(w, (this.rappen.get(w) ?? 0) + Math.round(r.betrag * 100));
+  }
+  summe(): Summe {
+    const s: Summe = {};
+    for (const [w, rp] of this.rappen) s[w] = rp / 100;
+    return s;
+  }
+}
+
+const nachFaelligkeit = (a: Rechnung, b: Rechnung) => (tagVon(a.faellig) ?? "9999").localeCompare(tagVon(b.faellig) ?? "9999") || a.id - b.id;
+
+/**
+ * Überblick für Wochenbericht und Dashboard. Reine Funktion: `now` und die Liste sind injizierbar.
+ * Monatszuordnung: bezahlt → bezahltAm (sonst faellig, sonst erkanntAm), offen → faellig (sonst erkanntAm); ignoriert zählt nirgends.
+ */
+export function finanzUebersicht(now: Date = new Date(), liste: Rechnung[] = rechnungen): FinanzUebersicht {
+  const heute = todayKey(now);
+  const inSiebenTagen = plusTage(heute, 7);
+  const vorSechsTagen = plusTage(heute, -6);
+  const offene = liste.filter((r) => r.status === "offen");
+  const offenSumme = new Summierer();
+  for (const r of offene) offenSumme.add(r);
+
+  const monate = Array.from({ length: 6 }, (_, i) => plusMonate(heute, i - 5));
+  const proMonat = monate.map(() => ({ bezahlt: new Summierer(), offen: new Summierer(), anzahlBezahlt: 0, anzahlOffen: 0 }));
+  for (const r of liste) {
+    let tag: string | undefined;
+    if (r.status === "bezahlt") tag = tagVon(r.bezahltAm) ?? tagVon(r.faellig) ?? tagVon(r.erkanntAm);
+    else if (r.status === "offen") tag = tagVon(r.faellig) ?? tagVon(r.erkanntAm);
+    const i = tag ? monate.indexOf(tag.slice(0, 7)) : -1;
+    if (i < 0) continue;
+    const zeile = proMonat[i]!;
+    if (r.status === "bezahlt") {
+      zeile.bezahlt.add(r);
+      zeile.anzahlBezahlt++;
+    } else {
+      zeile.offen.add(r);
+      zeile.anzahlOffen++;
+    }
+  }
+
+  const kopie = (r: Rechnung): Rechnung => ({ ...r });
+  return {
+    stand: heute,
+    offen: { anzahl: offene.length, summe: offenSumme.summe() },
+    ueberfaellig: offene.filter((r) => { const f = tagVon(r.faellig); return f !== undefined && f < heute; }).sort(nachFaelligkeit).map(kopie),
+    faelligBald: offene.filter((r) => { const f = tagVon(r.faellig); return f !== undefined && f >= heute && f <= inSiebenTagen; }).sort(nachFaelligkeit).map(kopie),
+    ohneFrist: offene.filter((r) => tagVon(r.faellig) === undefined).length,
+    unklar: offene.filter((r) => !hatBetrag(r)).length,
+    bezahltLetzteWoche: liste
+      .filter((r) => { const b = tagVon(r.bezahltAm); return r.status === "bezahlt" && b !== undefined && b >= vorSechsTagen && b <= heute; })
+      .sort((a, b) => (tagVon(b.bezahltAm) ?? "").localeCompare(tagVon(a.bezahltAm) ?? "") || a.id - b.id)
+      .map(kopie),
+    proMonat: proMonat.map((z, i) => ({ monat: monate[i]!, bezahlt: z.bezahlt.summe(), offen: z.offen.summe(), anzahlBezahlt: z.anzahlBezahlt, anzahlOffen: z.anzahlOffen })),
+  };
+}
+
+/** Schweizer Zahlenformat: 1'234.50 CHF */
+export function chf(n: number, waehrung = "CHF"): string {
+  if (!Number.isFinite(n)) return `– ${waehrung}`;
+  const rappen = Math.round(Math.abs(n) * 100);
+  const ganz = Math.floor(rappen / 100).toString().replace(/\B(?=(\d{3})+(?!\d))/g, "'");
+  return `${n < 0 && rappen > 0 ? "-" : ""}${ganz}.${String(rappen % 100).padStart(2, "0")} ${waehrung}`;
+}
+
+/** Summe je Währung, CHF zuerst; leer → «–» */
+export function summeText(s: Summe): string {
+  const w = Object.keys(s).sort((a, b) => (a === "CHF" ? -1 : b === "CHF" ? 1 : a.localeCompare(b)));
+  return w.length ? w.map((x) => chf(s[x]!, x)).join(" · ") : "–";
+}
+
+const LISTE_MAX = 5;
+const einzeilig = (r: Rechnung) => `• ${formatRechnung(r).replace(/\n\s*/g, " · ")}`;
+
+function listenBlock(titel: string, liste: Rechnung[]): string[] {
+  if (liste.length === 0) return [];
+  const kopf = liste.length > LISTE_MAX ? `${titel} (${liste.length}, die ersten ${LISTE_MAX}):` : `${titel} (${liste.length}):`;
+  return [kopf, ...liste.slice(0, LISTE_MAX).map(einzeilig)];
+}
+
+/** Wochenbericht für Telegram: kompakt, höchstens 25 Zeilen. Bereitet Zahlungen nur vor, löst nie etwas aus. */
+export function wochenberichtText(u: FinanzUebersicht): string {
+  const rechnung = (n: number) => `${n} Rechnung${n === 1 ? "" : "en"}`;
+  const bezahltSumme = new Summierer();
+  for (const r of u.bezahltLetzteWoche) bezahltSumme.add(r);
+  const zeilen = [
+    `💼 Finanzen, Stand ${u.stand}`,
+    u.offen.anzahl
+      ? `Offen: ${rechnung(u.offen.anzahl)} · ${summeText(u.offen.summe)}${u.ohneFrist ? ` (${u.ohneFrist} ohne Frist)` : ""}`
+      : "Offen: nichts, Sir.",
+    ...listenBlock("Überfällig", u.ueberfaellig),
+    ...listenBlock("Fällig in 7 Tagen", u.faelligBald),
+    u.bezahltLetzteWoche.length
+      ? `Bezahlt letzte Woche: ${rechnung(u.bezahltLetzteWoche.length)} · ${summeText(bezahltSumme.summe())}`
+      : "Bezahlt letzte Woche: keine.",
+    "Pro Monat:",
+    ...u.proMonat.map((m) =>
+      m.anzahlBezahlt || m.anzahlOffen
+        ? `${m.monat}: bezahlt ${summeText(m.bezahlt)} (${m.anzahlBezahlt}) · offen ${summeText(m.offen)} (${m.anzahlOffen})`
+        : `${m.monat}: –`,
+    ),
+  ];
+  if (u.unklar > 0) zeilen.push(`⚠️ ${rechnung(u.unklar)} ohne erkannten Betrag – die Summen sind unvollständig. Bitte in der Rechnung prüfen, Sir.`);
+  if (u.offen.anzahl > 0) zeilen.push("Zahlung vorbereiten: «Bereite die Zahlung für #… vor». Auslösen müssen Sie selbst, in der Bank-App.");
+  return zeilen.join("\n");
 }

@@ -6,7 +6,7 @@ import { hooks, sendeSpaeter } from "./telegram.js";
 import { state } from "./state.js";
 import { hhmm, imFenster, minutesOfDay, todayKey } from "./time.js";
 import { faelligIm, saveZeitplaene, zeitplaene } from "./zeitplaene.js";
-import { formatRechnung, offeneRechnungen } from "./finanzen.js";
+import { finanzUebersicht, formatRechnung, offeneRechnungen, rechnungen, wochenberichtText } from "./finanzen.js";
 import { profil } from "./profil.js";
 import { gesundheit, schwaerze, voruebergehend } from "./robust.js";
 import { berichtText, hatAenderungen, verdichteJetzt, verdichtungLaeuft } from "./verdichtung.js";
@@ -26,16 +26,18 @@ const letzterFehlversuch = new Map<string, number>();
 const laufend = new Set<string>();
 let offlineGemeldet = false;
 
-/** Rückblick, Rechnungs-Erinnerung, Zielcheck und Verdichtung: Tag des letzten Laufs. Persistent, sonst liefe ein Lauf nach einem Neustart im Nachholfenster ein zweites Mal. */
-export type Routinen = { rueckblick?: string; rechnungen?: string; zielcheck?: string; verdichtung?: string };
+/** Rückblick, Rechnungs-Erinnerung, Zielcheck, Verdichtung und Finanzbericht: Tag des letzten Laufs. Persistent, sonst liefe ein Lauf nach einem Neustart im Nachholfenster ein zweites Mal. */
+export type Routinen = { rueckblick?: string; rechnungen?: string; zielcheck?: string; verdichtung?: string; finanzbericht?: string };
 const ROUTINEN_DATEI = "data/routinen.json";
 const WOCHENTAGE = ["so", "mo", "di", "mi", "do", "fr", "sa"];
 
-/** ZIELCHECK «so 18:00» → Wochentag und Uhrzeit */
-function zielcheckZeit(): { tag: string; zeit: string } {
-  const [tag = "", zeit = ""] = config.zielcheck.toLowerCase().split(/\s+/);
+/** «so 18:00» → Wochentag und Uhrzeit (ZIELCHECK, FINANZBERICHT) */
+function wochenzeit(wert: string): { tag: string; zeit: string } {
+  const [tag = "", zeit = ""] = wert.trim().toLowerCase().split(/\s+/);
   return { tag, zeit };
 }
+
+const zielcheckZeit = () => wochenzeit(config.zielcheck);
 
 /**
  * Erster Start ohne data/routinen.json (Update auf 0.16): Was heute schon hätte laufen sollen, gilt als erledigt.
@@ -58,7 +60,7 @@ const routinen: Routinen = (() => {
     if (!roh || typeof roh !== "object") return {};
     const r = roh as Record<string, unknown>;
     const tag = (k: string) => (typeof r[k] === "string" ? (r[k] as string) : undefined);
-    return { rueckblick: tag("rueckblick"), rechnungen: tag("rechnungen"), zielcheck: tag("zielcheck"), verdichtung: tag("verdichtung") };
+    return { rueckblick: tag("rueckblick"), rechnungen: tag("rechnungen"), zielcheck: tag("zielcheck"), verdichtung: tag("verdichtung"), finanzbericht: tag("finanzbericht") };
   } catch (e) {
     // Datei fehlt = erster Start; kaputtes JSON = wie bisher alles offen
     if ((e as NodeJS.ErrnoException)?.code !== "ENOENT") return {};
@@ -300,6 +302,31 @@ export async function zielcheckTick(now = new Date()): Promise<void> {
 }
 
 /**
+ * Wöchentlich: Finanz-Wochenbericht (offen, überfällig, bezahlt, Summe pro Monat). Ohne Claude, nur Daten, darum kein
+ * Warten auf das Netz: sendeSpaeter reicht bei Störung nach. Ohne erfasste Rechnungen kein Bericht. Löst nie eine Zahlung aus.
+ */
+export async function finanzberichtTick(now = new Date()): Promise<void> {
+  offlineNachfuehren();
+  if (config.finanzbericht === "off" || state.paused) return;
+  const { tag, zeit } = wochenzeit(config.finanzbericht);
+  const today = todayKey(now);
+  if (WOCHENTAGE[now.getDay()] !== tag || routinen.finanzbericht === today || !imFenster(zeit, now, config.zeitplanNachholenMin)) return;
+  if (!bereit("finanzbericht", now)) return;
+  if (rechnungen.length === 0) {
+    merkeRoutine("finanzbericht", today);
+    return;
+  }
+  const u = finanzUebersicht(now);
+  const text = wochenberichtText(u);
+  audit("finanzbericht", { offen: u.offen.anzahl, ueberfaellig: u.ueberfaellig.length });
+  // Finanzdaten: kommt währenddessen der Notfall, weder senden noch im Postausgang ablegen
+  const fertig = await ausfuehren("finanzbericht", "Der Finanz-Wochenbericht", now, () =>
+    abhaengigkeiten.sendeSpaeter(text, { imNotfallZurueckhalten: true }),
+  );
+  if (fertig) merkeRoutine("finanzbericht", today);
+}
+
+/**
  * Nachts: Gedächtnis-Verdichtung (Haiku). Erfolg mit Änderungen → kurzer Bericht; nichts geändert → still.
  * Dauerhafter Fehler oder abgelehnter Vorschlag → eine Meldung, der Lauf gilt für heute als erledigt;
  * vorübergehender Fehler → still, im Fenster später erneut, sonst in der nächsten Nacht.
@@ -340,4 +367,5 @@ export function startScheduler(): void {
   setInterval(() => rechnungsTick().catch(log), 60_000);
   setInterval(() => zielcheckTick().catch(log), 60_000);
   setInterval(() => verdichtungTick().catch(log), 60_000);
+  setInterval(() => finanzberichtTick().catch(log), 60_000);
 }

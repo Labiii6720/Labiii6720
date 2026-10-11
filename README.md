@@ -429,6 +429,22 @@ Das ist die Schicht, die Jarvis vom Werkzeug zum Begleiter macht. Vier Dinge, be
 
 Jarvis liest Rechnungen aus dem Postfach, erkennt Empfänger, Betrag, IBAN (mit Prüfziffer), QR-Referenz und Fälligkeit und führt eine Übersicht. Er erinnert dich vor Fristen und stellt dir die Zahlungsdaten zusammen, damit du sie in der Bank-App eingibst oder den QR scannst. **Er löst keine Zahlung aus** (`ZAHLUNG_NUR_VORBEREITEN=on`, Standard). Das ist Absicht: kein Zahlungsverkehr ohne dich, egal was eine Mail behauptet. «Welche Rechnungen sind offen?», «Bereite die Zahlung für #3 vor», «Hak #3 als bezahlt ab».
 
+### Wochenbericht
+
+Einmal pro Woche schickt Jarvis dir eine Finanz-Übersicht nach Telegram, standardmässig am Montag um 07:45 (`FINANZBERICHT=mo 07:45`, Wochentag `so mo di mi do fr sa` und Uhrzeit, `off` = aus). Sie enthält:
+
+- **Offen:** Anzahl und Summe je Währung im Schweizer Format (`1'234.50 CHF · 20.00 EUR`), dazu wie viele keine Frist haben.
+- **Überfällig** und **fällig in den nächsten 7 Tagen** (heute und heute + 7 eingeschlossen): je höchstens 5 Rechnungen, die dringendste zuerst. Sind es mehr, steht die Gesamtzahl im Kopf («Überfällig (8, die ersten 5):»).
+- **Bezahlt letzte Woche:** Anzahl und Summe der Rechnungen, die du in den letzten 7 Tagen abgehakt hast.
+- **Pro Monat:** die letzten sechs Monate inklusive dem laufenden, älteste zuerst, je Zeile bezahlt und offen mit Anzahl («2026-10: bezahlt 1'234.50 CHF (3) · offen 890.00 CHF (2)»). Bezahlte zählen im Monat der Zahlung, offene im Monat der Fälligkeit (ohne Frist: wann Jarvis die Rechnung erkannt hat). Ignorierte zählen nirgends.
+- Hinweise: fehlt bei einer offenen Rechnung der Betrag, sagt Jarvis, dass die Summen unvollständig sind. Ist etwas offen, erinnert er daran, wie du eine Zahlung vorbereiten lässt («Bereite die Zahlung für #3 vor»).
+
+Damit die Zahlungen im richtigen Monat landen, merkt sich Jarvis seit 0.18 beim Abhaken («Hak #3 als bezahlt ab») das Datum (`bezahltAm`); setzt du eine Rechnung wieder auf ignoriert, verschwindet es. Ältere bezahlte Rechnungen ohne Datum zählen im Monat ihrer Fälligkeit (ohne Frist: wann sie erkannt wurde), erscheinen aber nicht unter «bezahlt letzte Woche».
+
+Sofort: `/finanzen` in Telegram. Fürs Dashboard liefert `GET /api/finanzen` (nur Heimnetz/Tailscale, Token wie bei allen `/api/*`) dieselbe Übersicht als JSON; die Rechnungen darin enthalten nur Nummer, Empfänger, Betrag, Währung, Fälligkeit, Zahldatum und Status, keine IBAN und keine Referenz.
+
+Der Bericht kommt ohne Claude aus, kostet also keine Tokens, und die Rechnungsdaten verlassen den Pi nur Richtung Telegram. Ohne erfasste Rechnungen bleibt es still. Notaus und Notfall halten ihn an (nach `/weiter` holt Jarvis ihn im Nachholfenster `ZEITPLAN_NACHHOLEN_MIN` nach). Im Notfall gibt Jarvis keine Finanzdaten heraus, weder per `/finanzen` noch über den Endpunkt; kommt der Notfall mitten im Versand, geht der Rest weder hinaus noch in den Postausgang. **Bezahlt wird nie etwas:** der Bericht zeigt nur, du zahlst selbst in der Bank-App.
+
 ### Mail-Triage nach deinen Zielen
 
 `mail_triage` liest ungelesene Mails, fasst jede in einem Satz zusammen und sortiert in JETZT, BALD, KANN WARTEN, mit Blick darauf, ob eine Mail auf eines deiner Ziele einzahlt. Rechnungen markiert er zum Erfassen, Termine schlägt er vor. Lesen und Sortieren laufen frei, Senden und Termine anlegen über Freigabe.
@@ -523,8 +539,9 @@ Nur einzelne Anbindungen: `npm run check -- --nur Telegram,Frigate` (Namen wie i
 - **Abend-/Tagesrückblick** (`RUECKBLICK`): Jarvis schaut auf den Tag, notiert echte Entscheidungen, hält belegte Muster fest und sagt dir in wenigen Sätzen, was wichtig war und was ansteht. Das ist das Lernen über dich.
 - **Zielcheck wöchentlich** (`ZIELCHECK`, z. B. `so 18:00`): jedes Ziel durchgehen, konkreter nächster Schritt, ehrlich auch wenn etwas stillsteht; hilfreiche Termine kommen als Freigabe.
 - **Gedächtnis-Verdichtung nachts** (`VERDICHTUNG`, Standard 03:30): Fakten, alte Notizen und Entscheidungen zusammenfassen, nichts löschen (siehe «Nächtliche Verdichtung» in Abschnitt 16). Meldet sich nur, wenn sich etwas geändert hat.
+- **Finanz-Wochenbericht** (`FINANZBERICHT`, Standard `mo 07:45`): offen, überfällig, bald fällig, bezahlt und Summe pro Monat (siehe «Wochenbericht» in Abschnitt 16). Ohne Claude, nur Daten, löst nie eine Zahlung aus.
 
-Alle vier respektieren Notaus und Notfall und laufen je höchstens einmal am Tag. Der Tag des letzten Laufs steht in `data/routinen.json`, damit ein Neustart im Nachholfenster den Lauf nicht wiederholt. Verpasst ein Lauf seine Minute (Ausfall, Neustart), wird er im Nachholfenster `ZEITPLAN_NACHHOLEN_MIN` nachgeholt (siehe Robustheit unten).
+Alle fünf respektieren Notaus und Notfall und laufen je höchstens einmal am Tag. Der Tag des letzten Laufs steht in `data/routinen.json`, damit ein Neustart im Nachholfenster den Lauf nicht wiederholt. Verpasst ein Lauf seine Minute (Ausfall, Neustart), wird er im Nachholfenster `ZEITPLAN_NACHHOLEN_MIN` nachgeholt (siehe Robustheit unten).
 
 ### Robustheit: Wiederholen, Postausgang, Watchdog
 
@@ -571,7 +588,7 @@ Damit spricht der Raum mit demselben Jarvis wie Telegram, Alexa und die Zentrale
 
 `npm test` fährt die Tests in `test/` mit Nodes eingebautem Testläufer (`node --test`, dank tsx direkt aus TypeScript). Sie brauchen weder `.env` noch Netz: echte Dienste werden nie angesprochen, Aufrufe nach aussen bekommen Attrappen (`globalThis.fetch` wird ersetzt und zählt die Aufrufe), geschrieben wird nur in Temp-Verzeichnisse, die am Ende wieder verschwinden.
 
-Heute abgedeckt: die `.env`-Verarbeitung des Assistenten (Roundtrip gegen Nodes eigenen Parser `util.parseEnv`, Kommentare und Reihenfolge, Rechte, `.env.bak`), alle Prüffunktionen, das Schema gegen `.env.example` (jeder Schlüssel genau einmal, in beide Richtungen), der Assistent End-zu-End mit gepipten Antworten, `npm run check -- --nur`, und die Robustheit: Fehlereinordnung, Backoff und Watchdog (`robust.ts`), Telegram-Wiederholung und Postausgang, Claude-Anläufe, Home-Assistant-Lesen/Schalten, Nachholfenster und Zeitpläne, Notaus mitten in einer Anfrage (Zeit und Zufall werden injiziert, kein Test wartet echte Sekunden), und die Gedächtnis-Verdichtung: Umstellung alter Profile, Prompt mit Datum und Chronik, Eingabe-Grenzen, Prüfung jedes Verstosses, Anwenden ohne Verlust (Archiv), Ablauf mit Attrappe statt Modell und der nächtliche Lauf.
+Heute abgedeckt: die `.env`-Verarbeitung des Assistenten (Roundtrip gegen Nodes eigenen Parser `util.parseEnv`, Kommentare und Reihenfolge, Rechte, `.env.bak`), alle Prüffunktionen, das Schema gegen `.env.example` (jeder Schlüssel genau einmal, in beide Richtungen), der Assistent End-zu-End mit gepipten Antworten, `npm run check -- --nur`, und die Robustheit: Fehlereinordnung, Backoff und Watchdog (`robust.ts`), Telegram-Wiederholung und Postausgang, Claude-Anläufe, Home-Assistant-Lesen/Schalten, Nachholfenster und Zeitpläne, Notaus mitten in einer Anfrage (Zeit und Zufall werden injiziert, kein Test wartet echte Sekunden), und die Gedächtnis-Verdichtung: Umstellung alter Profile, Prompt mit Datum und Chronik, Eingabe-Grenzen, Prüfung jedes Verstosses, Anwenden ohne Verlust (Archiv), Ablauf mit Attrappe statt Modell und der nächtliche Lauf, und die Finanzen: Übersicht mit zwei Währungen und Monaten über die Jahresgrenze, Fristgrenzen, Zahldatum beim Abhaken, Wochenbericht (Schweizer Format, höchstens 25 Zeilen) und der wöchentliche Lauf.
 
 Vor und nach jeder Änderung am Code: `npm run typecheck` muss sauber und `npm test` grün sein. Neue Anbindungen bekommen Tests mit Attrappen, nie mit echten Zugängen.
 

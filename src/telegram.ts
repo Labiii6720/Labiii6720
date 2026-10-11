@@ -19,6 +19,7 @@ import { abuseSignal } from "./notfall.js";
 import { HttpFehler, fehlerArt, fehlerDetail, gesundheit, mitWiederholung, nutzerText, schwaerze, voruebergehend, wartezeit } from "./robust.js";
 import { clock } from "./time.js";
 import { berichtText, verdichteJetzt, vorschauText } from "./verdichtung.js";
+import { finanzUebersicht, rechnungen, wochenberichtText } from "./finanzen.js";
 
 const API = () => `https://api.telegram.org/bot${config.telegramToken}`;
 /** Claude und die Verdichtung sind hier ersetzbar (Tests mit Attrappen); im Betrieb die echten Funktionen. */
@@ -488,7 +489,7 @@ async function onCommand(cmd: string, arg: string): Promise<void> {
     case "/start":
     case "/hilfe":
       return void sendText(
-        "JARVIS, zu Diensten.\n\n/auftraege – offene Freigaben\n/vorgang <Auftrag> – grosse Aufgabe im Hintergrund, starkes Modell\n/vorgaenge – Stand der Vorgänge\n! vor einer Nachricht – starkes Modell für diese Antwort\n/modus normal|fokus|nacht\n/neu – Gespräch vergessen\n/pause – Notaus, /weiter hebt ihn auf\n/notfall – Angriff: alles sperren und alarmieren\n/protokoll <name> – Nacht, Abwesend, Werkstatt …\n/kosten – Tokenverbrauch heute und Monat\n/verdichten – Gedächtnis jetzt verdichten (/verdichten vorschau ändert nichts)\n/check – Selbsttest aller Anbindungen\n/status – was läuft",
+        "JARVIS, zu Diensten.\n\n/auftraege – offene Freigaben\n/vorgang <Auftrag> – grosse Aufgabe im Hintergrund, starkes Modell\n/vorgaenge – Stand der Vorgänge\n! vor einer Nachricht – starkes Modell für diese Antwort\n/modus normal|fokus|nacht\n/neu – Gespräch vergessen\n/pause – Notaus, /weiter hebt ihn auf\n/notfall – Angriff: alles sperren und alarmieren\n/protokoll <name> – Nacht, Abwesend, Werkstatt …\n/kosten – Tokenverbrauch heute und Monat\n/finanzen – Rechnungen: offen, überfällig, bezahlt, pro Monat (Zahlungen nur vorbereitet)\n/verdichten – Gedächtnis jetzt verdichten (/verdichten vorschau ändert nichts)\n/check – Selbsttest aller Anbindungen\n/status – was läuft",
       );
     case "/auftraege": {
       const offen = offeneAuftraege();
@@ -515,6 +516,11 @@ async function onCommand(cmd: string, arg: string): Promise<void> {
       return void sendText(listVorgaenge());
     case "/kosten":
       return void sendText(verbrauchBericht());
+    case "/finanzen":
+      // Notfall: womöglich kompromittierter Chat, keine Finanzdaten herausgeben
+      if (notfallAktiv()) return void sendText("Im Notfall gebe ich keine Finanzdaten heraus, Sir. Erst /entwarnung.");
+      if (rechnungen.length === 0) return void sendText("Noch keine Rechnungen erfasst, Sir. Nichts zu berichten.");
+      return void sendText(wochenberichtText(finanzUebersicht()));
     case "/protokoll": {
       const name = arg.trim().toLowerCase();
       const p = protokolle[name];

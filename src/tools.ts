@@ -11,7 +11,7 @@ import { listFiles, readFile, runCommand, writeFile } from "./workspace.js";
 import * as browser from "./browser.js";
 import { saveZeitplaene, zeitplaene } from "./zeitplaene.js";
 import { cameras, describeCameras, dynamicWachen, eventClip, formatEvents, hasCameras, look, recentEvents, saveWachen, allWachen } from "./cameras.js";
-import { addRechnung, erkenneRechnung, formatRechnung, offeneRechnungen, rechnungen, saveRechnungen } from "./finanzen.js";
+import { addRechnung, erkenneRechnung, formatRechnung, offeneRechnungen, rechnungen, setzeStatus } from "./finanzen.js";
 import { readMail as gmailRead, searchMails as gmailSearch } from "./gmail.js";
 import { beraterTools } from "./berater.js";
 import { profil, saveProfil } from "./profil.js";
@@ -505,8 +505,7 @@ const finanzen: Tool[] = [
       const r = rechnungen.find((x) => x.id === Number(i.id));
       if (!r) throw new Error("Rechnung nicht gefunden.");
       if (!["bezahlt", "ignoriert"].includes(String(i.status))) throw new Error("Status: bezahlt oder ignoriert.");
-      r.status = i.status as typeof r.status;
-      saveRechnungen();
+      setzeStatus(r, i.status as typeof r.status);
       return `#${r.id} ist jetzt ${r.status}.`;
     },
   },

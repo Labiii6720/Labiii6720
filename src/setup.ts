@@ -323,13 +323,14 @@ export const ABSCHNITTE: Abschnitt[] = [
   {
     name: "proaktiv",
     titel: "Proaktivität",
-    beschreibung: "Rückblick, Rechnungs- und Zielerinnerungen, Gedächtnis-Verdichtung, Ton des Beraters, Watchdog und Nachholfenster.",
+    beschreibung: "Rückblick, Rechnungs- und Zielerinnerungen, Finanz-Wochenbericht, Gedächtnis-Verdichtung, Ton des Beraters, Watchdog und Nachholfenster.",
     optional: true,
     felder: [
       { key: "RUECKBLICK", frage: "Täglicher Rückblick um", hinweis: "HH:MM oder off", art: "zeit", standard: "22:30", pruefen: pruefeZeit },
       { key: "RECHNUNG_ERINNERUNG", frage: "Rechnungs-Erinnerung täglich um", hinweis: "HH:MM oder off", art: "zeit", standard: "08:30", pruefen: pruefeZeit },
       { key: "RECHNUNG_VORLAUF_TAGE", frage: "Vorlauf in Tagen vor Fälligkeit", art: "zahl", standard: "3", pruefen: pruefeZahl },
       { key: "ZIELCHECK", frage: "Wöchentlicher Zielcheck", hinweis: "z. B. so 18:00 oder off", art: "zeit", standard: "so 18:00", pruefen: pruefeZielcheck },
+      { key: "FINANZBERICHT", frage: "Finanz-Wochenbericht", hinweis: "z. B. mo 07:45 oder off", art: "zeit", standard: "mo 07:45", pruefen: pruefeZielcheck },
       { key: "VERDICHTUNG", frage: "Nächtliche Gedächtnis-Verdichtung um", hinweis: "HH:MM oder off", art: "zeit", standard: "03:30", pruefen: pruefeZeit },
       { key: "VERDICHTUNG_TAGE", frage: "Entscheidungen nach so vielen Tagen in die Monats-Chronik", art: "zahl", standard: "90", pruefen: pruefeZahlAbEins },
       { key: "BERATER_TON", frage: "Ton des Beraters", art: "wahl", wahl: ["sanft", "direkt", "hart"], standard: "direkt", pruefen: pruefeWahl(["sanft", "direkt", "hart"]) },

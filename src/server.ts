@@ -10,7 +10,7 @@ import { closeBrowser } from "./browser.js";
 import { handleEvent } from "./events.js";
 import { startWatch } from "./watch.js";
 import { handlePanic } from "./notfall.js";
-import { auditTail, auftragAction, chat, dashboardAuth, geraete, kameraBild, modus, protokollAction, statusJson } from "./dashboard.js";
+import { auditTail, auftragAction, chat, dashboardAuth, finanzenJson, geraete, kameraBild, modus, protokollAction, statusJson } from "./dashboard.js";
 import { gesundheit, schwaerze } from "./robust.js";
 
 const app = express();
@@ -72,6 +72,7 @@ if (config.dashboard && config.eventToken) {
   app.get("/api/kamera/:name", lanOnly, dashboardAuth, sicher(kameraBild));
   app.get("/api/geraete", lanOnly, dashboardAuth, sicher(geraete));
   app.get("/api/audit", lanOnly, dashboardAuth, auditTail);
+  app.get("/api/finanzen", lanOnly, dashboardAuth, finanzenJson);
 }
 
 // Standard: nur lokal lauschen (Alexa kommt über den Cloudflare Tunnel). LISTEN_HOST=0.0.0.0 öffnet das Heimnetz für /events.
