@@ -558,11 +558,13 @@ export async function anDrucker(pfad: string, starten: boolean, erwarteterSha256
   const zeitMs = Math.max(60_000, Math.ceil(inhalt.length / (256 * 1024)) * 1000);
   // Letzte Sperre für alle Aufrufer (auch Protokolle): Notaus oder Notfall seit dem Start → kein Upload
   if (state.paused || state.notfall?.aktiv) throw new Error(`Notaus aktiv: nichts an den Drucker geschickt, Sir. ${relative(ROOT, datei)} bleibt im Arbeitsordner.`);
+  // OctoPrint druckt nur G-Code: eine STL wird nie mit Druckstart hochgeladen, sonst meldete Jarvis einen Druck, der nicht läuft
+  const druckStarten = starten && typ === "G-Code";
   await mitWiederholung("octoprint.upload", async () => {
     const form = new FormData();
     form.append("file", new Blob([new Uint8Array(inhalt)]), basename(datei));
     form.append("select", "true");
-    form.append("print", starten ? "true" : "false");
+    form.append("print", druckStarten ? "true" : "false");
     const res = await fetch(`${octoprint.url}/api/files/local`, {
       method: "POST",
       headers: { "X-Api-Key": octoprint.key },
@@ -571,7 +573,9 @@ export async function anDrucker(pfad: string, starten: boolean, erwarteterSha256
     });
     if (!res.ok) throw new HttpFehler(`OctoPrint HTTP ${res.status}: ${(await res.text()).slice(0, 200)}`, res.status);
   }, { versuche: 1, komponente: "octoprint" });
-  return starten ? `${typ} an den Drucker geschickt, Druck gestartet.` : `${typ} an den Drucker geschickt (nicht gestartet).`;
+  if (druckStarten) return `${typ} an den Drucker geschickt, Druck gestartet.`;
+  if (starten) return `${typ} an den Drucker geschickt, aber nicht gestartet: Eine STL kann OctoPrint nicht direkt drucken. Bitte in OctoPrint slicen oder PRUSASLICER_PATH und SLICER_PROFIL einrichten, Sir.`;
+  return `${typ} an den Drucker geschickt (nicht gestartet).`;
 }
 
 export { writeFile as schreibeScad };

@@ -459,6 +459,17 @@ describe("anDrucker", () => {
     assert.equal(uploads.length, 2, "Upload darf nicht automatisch wiederholt werden");
   });
 
+  it("STL mit starten=true: nie print=true an OctoPrint, ehrliche Meldung", async () => {
+    stl("cad/teil.stl");
+    uploads.length = 0;
+    antworten = [new Response("{}", { status: 201 })];
+    const meldung = await anDrucker("cad/teil.stl", true);
+    assert.equal(uploads.length, 1);
+    assert.equal(uploads[0]!.print, "false", "eine STL darf nie mit Druckstart hochgeladen werden");
+    assert.match(meldung, /^STL an den Drucker geschickt, aber nicht gestartet: /);
+    assert.doesNotMatch(meldung, /Druck gestartet/);
+  });
+
   it("andere Endung, fehlende Datei oder Pfad ausserhalb → Fehler ohne Upload", async () => {
     mkdirSync(ws("cad"), { recursive: true });
     writeFileSync(ws("cad/teil.scad"), "cube(1);");
@@ -664,8 +675,12 @@ describe("Werkzeuge cad_drucken und cad_slicen", () => {
       assert.match(await runProtokoll("Drucktest", ctx), /✓ cad_drucken: G-Code an den Drucker geschickt, Druck gestartet\./);
       config.slicerProfil = undefined;
       antworten = [new Response("{}", { status: 201 })];
-      assert.match(await runProtokoll("Drucktest", ctx), /✓ cad_drucken: STL an den Drucker geschickt, Druck gestartet\./);
+      // Ohne Slicer geht die STL, aber OctoPrint druckt keine STL: der Bericht darf keinen laufenden Druck melden
+      const ohneSlicer = await runProtokoll("Drucktest", ctx);
+      assert.match(ohneSlicer, /✓ cad_drucken: STL an den Drucker geschickt, aber nicht gestartet: /);
+      assert.doesNotMatch(ohneSlicer, /Druck gestartet/);
       assert.equal(uploads.length, 2);
+      assert.equal(uploads[1]!.print, "false");
     } finally {
       delete protokolle["Drucktest"];
     }

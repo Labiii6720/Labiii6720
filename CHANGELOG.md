@@ -10,6 +10,7 @@ Kurz und nur das Wichtigste. Details stehen im README.
 - Die Freigabe hält fest, ob G-Code oder STL gedruckt wird; ist der Slicer beim Tippen nicht mehr nutzbar, bricht der Druck ab. Notaus oder Notfall während Rendern/Slicen verhindern den Upload, die Datei bleibt liegen; der Upload an OctoPrint prüft das zusätzlich für alle Aufrufer.
 - Ein fertiger G-Code ist an die Freigabe gebunden: `cad_drucken` nimmt nur G-Code aus `cad_slicen` (Prüfsumme in `data/slicer-gcode.json`), die Freigabe nennt Herkunft, Angaben und Prüfsumme, und der Upload prüft die Prüfsumme auf genau den hochgeladenen Inhalt.
 
+- Ohne Slicer wird eine STL nie mit Druckstart an OctoPrint geschickt (OctoPrint druckt nur G-Code); die Meldung sagt das ehrlich.
 ## 0.20
 - Satellit: Entitäten «Lautstärke» (0–100, gespeichert, Start 60), «Nachtmodus» (Lautstärke 30, LED gedimmt, vorherige Lautstärke kommt zurück) und «Ton-Feedback». Kurzer Doppelton beim Wakeword vor dem Zuhören, tieferer Ton bei Fehlern; die Töne erzeugt `esphome/tools/ton.mjs` als `esphome/ton.yaml` (7680 Bytes im Flash).
 - Zweiter Satellit im Bad (`jarvis-satellit-bad.yaml`); das Gemeinsame steht in `jarvis-satellit-basis.yaml`, beide Satelliten binden es als Paket ein. Entitätsnamen des ersten bleiben. Antworten und Ansagen laufen über einen internen Media-Player.
