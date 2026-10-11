@@ -9,7 +9,7 @@ import { finanzUebersicht, offeneRechnungen, type Rechnung } from "./finanzen.js
 import { haStates } from "./homeassistant.js";
 import { ausloesen, notfallAktiv } from "./notfall.js";
 import { profil } from "./profil.js";
-import { protokolle, runProtokoll } from "./protokolle.js";
+import { protokolle, protokollGesperrt, runProtokoll } from "./protokolle.js";
 import { createAuftrag, getAuftrag, offeneAuftraege } from "./queue.js";
 import { gesundheit } from "./robust.js";
 import { save, state, type Mode } from "./state.js";
@@ -32,7 +32,33 @@ export function dashboardAuth(req: Request, res: Response, next: NextFunction): 
   next();
 }
 
+/** Antwort auf gesperrte Daten-Endpunkte im Notfall (423 Locked), ohne die Quelle anzufragen. */
+const NOTFALL_GESPERRT = { ok: false, error: "notfall", text: "Im Notfall gebe ich keine Daten heraus, Sir. Erst /entwarnung." } as const;
+
 export function statusJson(_req: Request, res: Response): void {
+  // Im Notfall nur der Zustand: keine Rechnungen, Ziele, Werte, Auftrags- oder Vorgangstexte, Kameras.
+  // Leere Listen statt fehlender Felder, damit das Dashboard weiter rendert und nur «NOTFALL» zeigt.
+  if (notfallAktiv()) {
+    return void res.json({
+      ok: true,
+      zeit: new Date().toISOString(),
+      name: config.name,
+      modus: state.mode ?? "normal",
+      pausiert: Boolean(state.paused),
+      notfall: true,
+      offeneAuftraege: offeneAuftraege().length,
+      auftraege: [],
+      rechnungen: [],
+      vorgaenge: [],
+      zeitplaene: [],
+      wachen: [],
+      kameras: [],
+      protokolle: [],
+      ziele: [],
+      werte: [],
+      gesundheit: gesundheit.alle(),
+    });
+  }
   res.json({
     ok: true,
     zeit: new Date().toISOString(),
@@ -89,6 +115,7 @@ export async function chat(req: Request, res: Response): Promise<void> {
 }
 
 export async function kameraBild(req: Request, res: Response): Promise<void> {
+  if (notfallAktiv()) return void res.status(423).json(NOTFALL_GESPERRT);
   const name = String(req.params.name);
   if (!cameras[name]) return void res.status(404).end();
   try {
@@ -100,6 +127,7 @@ export async function kameraBild(req: Request, res: Response): Promise<void> {
 }
 
 export function auditTail(_req: Request, res: Response): void {
+  if (notfallAktiv()) return void res.status(423).json({ ...NOTFALL_GESPERRT, lines: [] });
   try {
     const lines = readFileSync("data/audit.log", "utf8").trim().split("\n").slice(-60).reverse();
     res.json({ ok: true, lines });
@@ -112,6 +140,8 @@ export async function protokollAction(req: Request, res: Response): Promise<void
   const name = String((req.body ?? {}).name ?? "");
   const p = protokolle[name];
   if (!p) return void res.status(404).json({ ok: false, error: "Protokoll unbekannt" });
+  const gesperrt = protokollGesperrt();
+  if (gesperrt) return void res.status(423).json({ ok: false, error: gesperrt });
   if (p.stufe === "auto") {
     const out = await runProtokoll(name, hooks);
     audit("protokoll", { name, quelle: "dashboard" });
@@ -123,6 +153,7 @@ export async function protokollAction(req: Request, res: Response): Promise<void
 }
 
 export async function geraete(req: Request, res: Response): Promise<void> {
+  if (notfallAktiv()) return void res.status(423).json(NOTFALL_GESPERRT);
   if (!config.homeAssistant) return void res.json({ ok: true, text: "Home Assistant nicht eingerichtet." });
   try {
     res.json({ ok: true, text: await haStates(req.query.filter ? String(req.query.filter) : undefined) });

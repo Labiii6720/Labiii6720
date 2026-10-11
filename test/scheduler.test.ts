@@ -716,3 +716,155 @@ describe("Erster Start ohne routinen.json (Update auf 0.16)", () => {
     assert.deepEqual(routinenBeimErststart(am(11, 17, 59)), { rechnungen: "2026-10-11" });
   });
 });
+
+describe("Neustart mitten im Lauf: Startvermerk statt zweitem Lauf", () => {
+  const liesRoutinen = () => JSON.parse(readFileSync(ROUTINEN_DATEI, "utf8")) as { rueckblick?: string; zielcheck?: string; begonnen?: Record<string, string> };
+  const standard = abhaengigkeiten.handleMessage;
+  /** Attrappe: ein Werkzeug mit Nebenwirkung wirkt, dann «stirbt» der Prozess (die Antwort kommt nie). Läuft in einer eigenen Modulinstanz, damit die Sperre «laufend» keine anderen Tests blockiert. */
+  const wirktUndHaengt = (werkzeug: string) => (text: string, _hooks: unknown, opts: Opts = {}) => {
+    prompts.push(text);
+    opts.onStep?.(1, werkzeug);
+    return new Promise<string>(() => {});
+  };
+  async function neuGestartet(n: number) {
+    const modul = (await import(new URL(`../src/scheduler.js?mitten=${n}`, import.meta.url).href)) as typeof import("../src/scheduler.js");
+    modul.abhaengigkeiten.handleMessage = abhaengigkeiten.handleMessage;
+    modul.abhaengigkeiten.sendeSpaeter = abhaengigkeiten.sendeSpaeter;
+    return modul;
+  }
+
+  it("Zeitplan: Vermerk vor dem Lauf, nach Neustart abgehakt und einmal gemeldet, nichts erneut ausgeführt", async () => {
+    const z = plan(50, "08:00");
+    abhaengigkeiten.handleMessage = wirktUndHaengt("rechnung_erfassen");
+    try {
+      const vorNeustart = await neuGestartet(10);
+      void vorNeustart.zeitplanTick(am(19, 8, 0));
+      await new Promise((r) => setImmediate(r));
+    } finally {
+      abhaengigkeiten.handleMessage = standard;
+    }
+    assert.equal(prompts.length, 1);
+    assert.equal(liesRoutinen().begonnen?.["zeitplan:50"], "2026-10-19");
+    assert.equal(z.lastRun, undefined);
+
+    const neu = await neuGestartet(1);
+    await neu.zeitplanTick(am(19, 8, 1));
+    assert.equal(prompts.length, 1); // kein zweiter Lauf
+    assert.equal(z.lastRun, "2026-10-19");
+    assert.equal((JSON.parse(readFileSync(ZEITPLAENE_DATEI, "utf8")) as { id: number; lastRun?: string }[]).find((p) => p.id === 50)?.lastRun, "2026-10-19");
+    assert.equal(liesRoutinen().begonnen?.["zeitplan:50"], undefined);
+    assert.deepEqual(gesendet, ["⚠️ Zeitplan «Plan 50» wurde durch einen Neustart unterbrochen, das Ergebnis ist unklar. Ich wiederhole ihn nicht, um nichts doppelt auszuführen – bitte prüfen Sie es, Sir."]);
+    await neu.zeitplanTick(am(19, 8, 10));
+    assert.equal(prompts.length, 1);
+    assert.equal(gesendet.length, 1);
+    // am nächsten Tag wieder normal
+    await neu.zeitplanTick(am(20, 8, 0));
+    assert.equal(prompts.length, 2);
+    assert.deepEqual(gesendet.slice(1), ["🕒 Plan 50\n\nErledigt, Sir."]);
+    assert.equal(liesRoutinen().begonnen?.["zeitplan:50"], undefined);
+  });
+
+  it("Rückblick und Zielcheck: nach Neustart mitten im Lauf keine doppelten Einträge", async () => {
+    profil.ziele.push({ id: 50, text: "Marathon", status: "offen", angelegt: "2026-10-01" });
+    try {
+      // Vortag: ein alter Vermerk, der beim nächsten Vermerk wegfällt
+      abhaengigkeiten.handleMessage = wirktUndHaengt("entscheidung_notieren");
+      const vortag = await neuGestartet(11);
+      void vortag.rueckblickTick(new Date(2026, 10, 14, 22, 30, 0, 0));
+      await new Promise((r) => setImmediate(r));
+      assert.equal(liesRoutinen().begonnen?.rueckblick, "2026-11-14");
+
+      const vorNeustart = await neuGestartet(12);
+      void vorNeustart.zielcheckTick(new Date(2026, 10, 15, 18, 0, 0, 0)); // 15.11.2026 Sonntag
+      await new Promise((r) => setImmediate(r));
+      assert.deepEqual(liesRoutinen().begonnen, { zielcheck: "2026-11-15" });
+      abhaengigkeiten.handleMessage = wirktUndHaengt("muster_festhalten");
+      vorNeustart.abhaengigkeiten.handleMessage = abhaengigkeiten.handleMessage;
+      void vorNeustart.rueckblickTick(new Date(2026, 10, 15, 22, 30, 0, 0));
+      await new Promise((r) => setImmediate(r));
+    } finally {
+      abhaengigkeiten.handleMessage = standard;
+    }
+    assert.equal(prompts.length, 3);
+    assert.deepEqual(liesRoutinen().begonnen, { zielcheck: "2026-11-15", rueckblick: "2026-11-15" });
+
+    const neu = await neuGestartet(2);
+    await neu.zielcheckTick(new Date(2026, 10, 15, 18, 20, 0, 0));
+    await neu.rueckblickTick(new Date(2026, 10, 15, 22, 40, 0, 0));
+    await neu.rueckblickTick(new Date(2026, 10, 15, 22, 50, 0, 0));
+    assert.equal(prompts.length, 3);
+    assert.equal(gesendet.length, 2);
+    assert.match(gesendet[0]!, /^⚠️ Der Zielcheck wurde durch einen Neustart unterbrochen/);
+    assert.match(gesendet[1]!, /^⚠️ Der Rückblick wurde durch einen Neustart unterbrochen/);
+    const r = liesRoutinen();
+    assert.equal(r.rueckblick, "2026-11-15");
+    assert.equal(r.zielcheck, "2026-11-15");
+    assert.deepEqual(r.begonnen, {});
+  });
+
+  it("offen gehalten (vorübergehender Fehler ohne Wirkung) → Vermerk entfernt, Neustart darf nachholen", async () => {
+    const z = plan(51, "08:00");
+    fehler = [serverfehler()];
+    await zeitplanTick(am(24, 8, 0));
+    assert.equal(z.lastRun, undefined);
+    assert.equal(liesRoutinen().begonnen?.["zeitplan:51"], undefined);
+    const neu = await neuGestartet(3);
+    await neu.zeitplanTick(am(24, 8, 2));
+    assert.equal(prompts.length, 2);
+    assert.equal(z.lastRun, "2026-10-24");
+    assert.deepEqual(gesendet, ["🕒 Plan 51\n\nErledigt, Sir."]);
+  });
+});
+
+describe("Notfall: Daten aus Erinnerung, Zeitplan, Rückblick und Zielcheck gehen nicht hinaus", () => {
+  it("alle vier senden mit imNotfallZurueckhalten", async () => {
+    const optionen: unknown[] = [];
+    abhaengigkeiten.sendeSpaeter = async (text: string, o?: unknown) => { gesendet.push(text); optionen.push(o); };
+    try {
+      plan(60, "08:00");
+      await zeitplanTick(am(26, 8, 0));
+      await rueckblickTick(am(26, 22, 30));
+      addRechnung({ empfaenger: "Swisscom", betrag: 89.9, waehrung: "CHF", faellig: "2026-10-27", iban: "CH9300762011623852957" });
+      await rechnungsTick(am(26, 8, 30));
+      profil.ziele.push({ id: 60, text: "Marathon", status: "offen", angelegt: "2026-10-01" });
+      await zielcheckTick(new Date(2026, 10, 22, 18, 0, 0, 0)); // 22.11.2026 Sonntag
+    } finally {
+      abhaengigkeiten.sendeSpaeter = async (text: string) => { gesendet.push(text); };
+    }
+    assert.equal(gesendet.length, 4);
+    assert.deepEqual(optionen, Array(4).fill({ imNotfallZurueckhalten: true }));
+  });
+
+  it("Rechnungs-Erinnerung: Notfall während der Wiederholungspause → keine IBAN an Telegram, nichts im Postausgang", async () => {
+    const { sendeSpaeter, setzeWarten } = await import("../src/telegram.js");
+    const fetchVorher = globalThis.fetch;
+    const sendeVorher = abhaengigkeiten.sendeSpaeter;
+    const texte: string[] = [];
+    let aufrufe = 0;
+    globalThis.fetch = (async (eingabe: string | URL | Request, init?: RequestInit) => {
+      const url = String(eingabe instanceof Request ? eingabe.url : eingabe);
+      assert.ok(url.startsWith("https://api.telegram.org/bot"), `unerwarteter Aufruf: ${url}`);
+      texte.push(typeof init?.body === "string" ? ((JSON.parse(init.body) as { text?: string }).text ?? "") : "");
+      aufrufe++;
+      if (aufrufe === 1) return new Response(JSON.stringify({ ok: false, error_code: 500, description: "Internal Server Error" }), { status: 500, headers: { "content-type": "application/json" } });
+      return new Response(JSON.stringify({ ok: true, result: { message_id: aufrufe } }), { headers: { "content-type": "application/json" } });
+    }) as typeof fetch;
+    // Während der injizierten Wartezeit löst der Notfall aus
+    setzeWarten(async () => { state.notfall = { aktiv: true, seit: new Date().toISOString(), grund: "Test" }; }, () => 0.5);
+    abhaengigkeiten.sendeSpaeter = sendeSpaeter;
+    try {
+      addRechnung({ empfaenger: "Sunrise", betrag: 50, waehrung: "CHF", faellig: "2026-10-28", iban: "CH9300762011623852957", referenz: "RF18539007547034" });
+      await rechnungsTick(am(27, 8, 30));
+    } finally {
+      globalThis.fetch = fetchVorher;
+      abhaengigkeiten.sendeSpaeter = sendeVorher;
+      setzeWarten();
+      state.notfall = { aktiv: false };
+    }
+    assert.equal(aufrufe, 1); // kein zweiter sendMessage
+    assert.match(texte[0]!, /^💳 Rechnungen/);
+    const postausgang = join(temp, "data", "postausgang.json");
+    const liegt = existsSync(postausgang) ? (JSON.parse(readFileSync(postausgang, "utf8")) as { text: string }[]) : [];
+    assert.deepEqual(liegt, []);
+  });
+});

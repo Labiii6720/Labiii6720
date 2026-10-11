@@ -128,8 +128,20 @@ const isType = (input: HandlerInput, type: string) => Alexa.getRequestType(input
 const isIntent = (input: HandlerInput, ...names: string[]) =>
   isType(input, "IntentRequest") && names.includes(Alexa.getIntentName(input.requestEnvelope));
 
+/** Notaus oder Notfall: /alexa ist über den Tunnel erreichbar, also keine Termine, keine Gesundheitswerte, kein Claude-Aufruf. */
+const gesperrt = () => Boolean(state.paused) || Boolean(state.notfall?.aktiv);
+
+/** Statt Briefing oder Cardio nur der Sperrhinweis (gleicher Wortlaut wie aktuellerFreigabenHinweis im Notaus/Notfall). */
+const sperrHinweis = () =>
+  state.paused
+    ? aktuellerFreigabenHinweis()
+    : `Notfall aktiv, ${config.anrede}. Freigaben ruhen; aufheben nur mit /entwarnung in Telegram.`;
+
+const sperrSprechen = (i: HandlerInput) => sprich(i, [`Briefing und Gesundheitswerte ruhen, ${config.anrede}.`, sperrHinweis()]);
+
 /** Briefing, kurze Pause, offene Freigaben */
 const briefingSprechen = async (i: HandlerInput) => {
+  if (gesperrt()) return sperrSprechen(i);
   const t = await briefingTeile();
   return sprich(i, [t.text, t.hinweis]);
 };
@@ -137,12 +149,15 @@ const briefingSprechen = async (i: HandlerInput) => {
 /** «Alexa, öffne Butler Jarvis» und beide Routinen landen hier: erst Cardio, danach Tagesbriefing. */
 const Launch: RequestHandler = {
   canHandle: (i) => isType(i, "LaunchRequest"),
-  handle: async (i) => (morningDone() ? briefingSprechen(i) : sprich(i, await cardioText())),
+  handle: async (i) => {
+    if (gesperrt()) return sperrSprechen(i);
+    return morningDone() ? briefingSprechen(i) : sprich(i, await cardioText());
+  },
 };
 
 const Cardio: RequestHandler = {
   canHandle: (i) => isIntent(i, "CardioIntent"),
-  handle: async (i) => sprich(i, await cardioText()),
+  handle: async (i) => (gesperrt() ? sperrSprechen(i) : sprich(i, await cardioText())),
 };
 
 const Briefing: RequestHandler = {

@@ -2,6 +2,12 @@
 
 Kurz und nur das Wichtigste. Details stehen im README.
 
+## 0.21.1
+- Sicherheit: `EVENTS_VIA_TUNNEL` öffnet nur noch `/events` und `/gesture`; Dashboard, `/status.json` und `/api/*` nie über den Tunnel. Der Dienst startet ohne `ALEXA_SKILL_ID` (`/alexa` aus).
+- Home Assistant: Zusatzdaten dürfen kein eigenes Ziel setzen (`entity_id`, `target`, `area_id` …), `entity_id` lässt sich nicht mehr überschreiben. Auto-Stufe nur für gewöhnliche Bedien-Dienste; `scene.apply/create` brauchen die Freigabe, Schloss oder Alarm irgendwo im Aufruf die PIN.
+- Protokolle im Notaus/Notfall: Telegram `/protokoll` lehnt vor dem Auftrag ab, das Dashboard antwortet mit HTTP 423.
+- Zeitpläne, Rückblick und Zielcheck mit Startvermerk (`begonnen` in `data/routinen.json`): ein durch Neustart unterbrochener Lauf wird nicht wiederholt, sondern einmal als «Ergebnis unklar» gemeldet. Deren Antworten, Rechnungs-Erinnerung und Finanzbericht bleiben im Notfall zurück; abgelegte Meldungen tragen den Zeitpunkt ihrer Fälligkeit.
+
 ## 0.21
 - Werkstatt-Slicer: Mit PrusaSlicer (`PRUSASLICER_PATH`, sonst Suche über apt, `~/.local/bin` und Flatpak zuletzt) und einem exportierten Profil (`SLICER_PROFIL`, `.ini`) slict `cad_drucken` die STL vor dem Upload und schickt G-Code an OctoPrint. Ohne Slicer geht wie bisher die STL, mit Hinweis. Ein fertiger `.gcode` geht direkt. Die Freigabe-Nachricht nennt, ob G-Code oder STL. Scheitert das Slicen, wird nicht gedruckt.
 - Neues Werkzeug `cad_slicen` (extern): erzeugt nur `<name>.gcode` im Arbeitsordner und meldet Dauer, Grösse, geschätzte Druckzeit, Filament und Schichten.

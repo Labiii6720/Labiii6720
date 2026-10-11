@@ -1,7 +1,7 @@
 import express from "express";
 import { fileURLToPath } from "node:url";
 import { ExpressAdapter } from "ask-sdk-express-adapter";
-import { config, env } from "./config.js";
+import { config, opt } from "./config.js";
 import { buildSkill } from "./alexa.js";
 import { morningTick } from "./brain.js";
 import { startTelegram } from "./telegram.js";
@@ -16,12 +16,16 @@ import { gesundheit, schwaerze } from "./robust.js";
 const app = express();
 app.disable("x-powered-by");
 
-/** Nur Heimnetz, Tailscale oder localhost – alles, was über den Cloudflare Tunnel kommt, bekommt ein 404. */
+/** Heimnetz, Tailscale oder localhost. cloudflared verbindet von 127.0.0.1, deshalb zählen zusätzlich die Tunnel-Header. */
 const PRIVATE = /^(::1|::ffff:)?(127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.)|^::1$|^fe80:|^fc|^fd/i;
+/** Nur diese Pfade öffnet EVENTS_VIA_TUNNEL=on (die Konsole ist eine Seite ohne Daten, /events verlangt das Token). */
+const TUNNEL_SCHALTBAR = new Set(["/events", "/gesture"]);
+/** Tunnel → 404. Dashboard, /status.json und /api/* bleiben auch mit EVENTS_VIA_TUNNEL=on gesperrt (Leitplanke 6). */
 const lanOnly = (req: express.Request, res: express.Response, next: express.NextFunction) => {
   const viaTunnel = Boolean(req.headers["cf-connecting-ip"] || req.headers["cf-ray"]);
+  const tunnelErlaubt = config.eventsViaTunnel && TUNNEL_SCHALTBAR.has(req.path);
   const ip = req.socket.remoteAddress ?? "";
-  if ((viaTunnel && !config.eventsViaTunnel) || !PRIVATE.test(ip)) return void res.status(404).end();
+  if ((viaTunnel && !tunnelErlaubt) || !PRIVATE.test(ip)) return void res.status(404).end();
   next();
 };
 
@@ -38,9 +42,11 @@ app.get("/health", (_req, res) => {
   res.send("ok");
 });
 
-// Prüft bei jeder Anfrage Amazons Signatur und den Zeitstempel; fremde Skill-IDs weist buildSkill ab
-const adapter = new ExpressAdapter(buildSkill(env("ALEXA_SKILL_ID")), true, true);
-app.post("/alexa", adapter.getRequestHandlers());
+// Prüft bei jeder Anfrage Amazons Signatur und den Zeitstempel; fremde Skill-IDs weist buildSkill ab.
+// Alexa ist optional: ohne Skill-ID bleibt /alexa aus, der Rest des Dienstes läuft.
+const skillId = opt("ALEXA_SKILL_ID");
+if (skillId) app.post("/alexa", new ExpressAdapter(buildSkill(skillId), true, true).getRequestHandlers());
+else console.log("Alexa nicht konfiguriert (ALEXA_SKILL_ID), /alexa aus.");
 
 // Ereignisse aus dem Haus (Home Assistant) und aus der Gesten-Konsole, nur mit Token
 if (config.eventToken) {
@@ -60,7 +66,7 @@ app.get("/gesture", lanOnly, (_req, res) => {
   res.sendFile(fileURLToPath(new URL("../web/gesture.html", import.meta.url)));
 });
 
-// Kommandozentrale: der Kern. Seite und API nur aus dem Heimnetz/Tailscale, API zusätzlich mit Token.
+// Kommandozentrale: der Kern. Seite und API nur aus dem Heimnetz/Tailscale (nie über den Tunnel), API zusätzlich mit Token.
 if (config.dashboard && config.eventToken) {
   const json = express.json({ limit: "64kb" });
   app.get("/dashboard", lanOnly, (_req, res) => res.sendFile(fileURLToPath(new URL("../web/dashboard.html", import.meta.url))));

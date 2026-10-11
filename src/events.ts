@@ -31,6 +31,12 @@ export const briefingSatellit = {
   versandLaeuft: (): Promise<unknown> | undefined => briefingVersandLaeuft(),
 };
 
+/** Ereignis «briefing»: Quelle und Sprachnachricht als Container, damit Tests beides ersetzen können. */
+export const briefingEreignis = {
+  text: briefingText as () => Promise<string>,
+  sprache: sendVoiceReply as (text: string) => Promise<void>,
+};
+
 /**
  * Echtes Briefing oder nur der Platzhalter «gleich fertig»? brain.ts markiert den Platzhalter mit bereit: false;
  * der Abgleich mit dem Tages-Cache sichert zusätzlich ab (briefingTeile liefert ihn von dort oder hat ihn eben dort abgelegt).
@@ -134,15 +140,18 @@ export async function handleEvent(req: Request, res: Response): Promise<void> {
     switch (body.event) {
       case "briefing": {
         // Notaus/Notfall: keine Briefing-Daten an Claude oder Telegram (wie bei briefing_text)
-        if (gesperrt()) {
+        const abweisen = (): void => {
           audit("briefing_abgewiesen", { grund: "notaus" });
           res.json({ ok: false, gesperrt: true });
-          return;
-        }
+        };
+        if (gesperrt()) return abweisen();
         const already = Boolean(day().briefingDelivered);
-        const t = await briefingText(); // schickt beim ersten Mal selbst eine Telegram-Kopie
+        const t = await briefingEreignis.text(); // schickt beim ersten Mal selbst eine Telegram-Kopie
+        // Notaus/Notfall während des Livebaus (bis 6 s) oder der Dusch-Kopie: nichts mehr hinausschicken
+        if (gesperrt()) return abweisen();
         if (already) await sendText(`🚿 ${t}`);
-        await sendVoiceReply(t);
+        if (gesperrt()) return abweisen();
+        await briefingEreignis.sprache(t);
         break;
       }
       case "briefing_text": {

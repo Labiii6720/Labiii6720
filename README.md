@@ -126,6 +126,8 @@ Im Router wird kein Port geöffnet. Die Menünamen bei Cloudflare ändern sich g
 4. Die Skill-ID (beginnt mit `amzn1.ask.skill.`) als `ALEXA_SKILL_ID` in `.env` eintragen.
 5. Im Tab *Test* auf *Development* stellen und «öffne butler jarvis» eintippen.
 
+Ohne ALEXA_SKILL_ID bleibt /alexa aus, der übrige Dienst läuft normal.
+
 Im Entwicklermodus läuft der Skill auf den Echos deines eigenen Amazon-Kontos. Veröffentlichen ist nicht nötig.
 
 Nach einem Update mit neuen Intents (zuletzt `FreigabenIntent` in 0.19) den Inhalt von `alexa/interaction-model.json` erneut einfügen und *Build Model* klicken, sonst kennt Alexa die neuen Sätze nicht.
@@ -211,7 +213,7 @@ Shopify-Admin → *Einstellungen → Apps und Vertriebskanäle → Apps entwicke
 
 ### Smart Home (Home Assistant)
 
-Profil → *Sicherheit → Langlebige Zugriffstoken* → Token erstellen. In `.env`: `HA_URL` (z. B. `http://homeassistant.local:8123`) und `HA_TOKEN`. `HA_AUTO_DOMAINS` legt fest, was Jarvis ohne Rückfrage schalten darf (Standard: Licht, Schalter, Medien, Lüfter, Szenen, Klima). Schlösser und Alarmanlage sind immer «sensibel», alles andere «extern».
+Profil → *Sicherheit → Langlebige Zugriffstoken* → Token erstellen. In `.env`: `HA_URL` (z. B. `http://homeassistant.local:8123`) und `HA_TOKEN`. `HA_AUTO_DOMAINS` legt fest, was Jarvis ohne Rückfrage schalten darf (Standard: Licht, Schalter, Medien, Lüfter, Szenen, Klima). Ohne Rückfrage laufen dort nur die gewöhnlichen Bedien-Dienste (ein/aus/umschalten, bei Klima, Lüfter und Medien auch Temperatur, Stufe, Lautstärke); scene.apply/create und Zusatzdaten mit eigenem Ziel brauchen immer die Freigabe, Schloss oder Alarm irgendwo im Aufruf die PIN. Schlösser und Alarmanlage sind immer «sensibel», alles andere «extern».
 
 ### Beispiele
 
@@ -591,7 +593,7 @@ Nur einzelne Anbindungen: `npm run check -- --nur Telegram,Frigate` (Namen wie i
 - **Gedächtnis-Verdichtung nachts** (`VERDICHTUNG`, Standard 03:30): Fakten, alte Notizen und Entscheidungen zusammenfassen, nichts löschen (siehe «Nächtliche Verdichtung» in Abschnitt 16). Meldet sich nur, wenn sich etwas geändert hat.
 - **Finanz-Wochenbericht** (`FINANZBERICHT`, Standard `mo 07:45`): offen, überfällig, bald fällig, bezahlt und Summe pro Monat (siehe «Wochenbericht» in Abschnitt 16). Ohne Claude, nur Daten, löst nie eine Zahlung aus.
 
-Alle fünf respektieren Notaus und Notfall und laufen je höchstens einmal am Tag. Der Tag des letzten Laufs steht in `data/routinen.json`, damit ein Neustart im Nachholfenster den Lauf nicht wiederholt. Verpasst ein Lauf seine Minute (Ausfall, Neustart), wird er im Nachholfenster `ZEITPLAN_NACHHOLEN_MIN` nachgeholt (siehe Robustheit unten).
+Alle fünf respektieren Notaus und Notfall und laufen je höchstens einmal am Tag. Der Tag des letzten Laufs steht in `data/routinen.json`, damit ein Neustart im Nachholfenster den Lauf nicht wiederholt. Verpasst ein Lauf seine Minute (Ausfall, Neustart), wird er im Nachholfenster `ZEITPLAN_NACHHOLEN_MIN` nachgeholt (siehe Robustheit unten). Zeitpläne, Rückblick und Zielcheck setzen vor dem Lauf einen Startvermerk in `data/routinen.json` (Feld `begonnen`). Unterbricht ein Neustart den Lauf, wird er nicht wiederholt, sondern abgehakt und einmal gemeldet («… wurde durch einen Neustart unterbrochen, das Ergebnis ist unklar …»). Rechnungs-Erinnerung, Finanzbericht sowie die Antworten von Zeitplänen, Rückblick und Zielcheck werden im Notfall zurückgehalten (Abschnitt 16).
 
 ### Robustheit: Wiederholen, Postausgang, Watchdog
 
@@ -684,7 +686,7 @@ Ziel ist nicht «unhackbar», das gibt es nicht. Ziel ist: Wer eine Schicht durc
 
 | Angriff | Was ihn aufhält |
 |---|---|
-| Angreifer aus dem Internet | Kein offener Port. Über den Cloudflare Tunnel erreicht nur `/alexa` den Pi, und dort wird jede Anfrage auf Amazons Signatur, Zeitstempel und deine Skill-ID geprüft. `/events` und `/gesture` antworten von aussen mit 404 (`EVENTS_VIA_TUNNEL=off`, Standard). |
+| Angreifer aus dem Internet | Kein offener Port. Über den Cloudflare Tunnel erreicht nur `/alexa` den Pi, und dort wird jede Anfrage auf Amazons Signatur, Zeitstempel und deine Skill-ID geprüft. `/events` und `/gesture` antworten von aussen mit 404 (`EVENTS_VIA_TUNNEL=off`, Standard). Dashboard und /api/* antworten über den Tunnel immer mit 404, auch mit EVENTS_VIA_TUNNEL=on. |
 | Gestohlene Geheimnisse (`.env`, `data/`) | Eigener Systembenutzer ohne Login, Dateirechte 600, gehärteter Dienst, Festplattenverschlüsselung, Widerrufsplan unten. Die Tokens in `data/state.json` sind die Kronjuwelen: Gmail und WHOOP verlangen bei Verlust nur einen Klick zum Widerruf. |
 | Eingeschleuste Anweisungen in Mails, Webseiten, Terminen | Inhalte sind für Jarvis Daten. Alles, was nach aussen geht (Mail senden, Preise, Geräte, lange Adressen mit eingebetteten Daten, dauerhafte Zeitpläne und Wachen), wird zum Auftrag und wartet auf dein Tippen. Der schlimmste Fall ist ein Vorschlag, den du ablehnst. |
 | Übernahme deines Telegram-Kontos | Nur deine Chat-ID, PIN für sensible Aufträge, Notaus `/pause`, Alarm bei fremden Chats. Dazu auf deiner Seite: Telegram-Zweifaktor und Passcode-Sperre. |

@@ -1,7 +1,8 @@
 import { readFileSync } from "node:fs";
-import { resetHistory } from "./agent.js";
+import { pausiertText, resetHistory } from "./agent.js";
 import type { Stufe } from "./queue.js";
 import { save, state, type Mode } from "./state.js";
+import { notausVermerken } from "./telegram.js";
 import { toolByName, type ToolContext } from "./tools.js";
 
 /**
@@ -43,11 +44,28 @@ export function describeProtokolle(): string {
   );
 }
 
+/**
+ * Notaus oder Notfall: dann läuft kein Protokoll, auch keines der Stufe auto. Gibt den Ablehnungstext zurück, sonst undefined.
+ * state.notfall direkt gelesen (wie pausiertText), um keinen Importzyklus über notfall.ts zu erzeugen.
+ */
+export function protokollGesperrt(): string | undefined {
+  return state.paused || state.notfall?.aktiv ? pausiertText() : undefined;
+}
+
 export async function runProtokoll(name: string, ctx: ToolContext): Promise<string> {
   const p = protokolle[name];
   if (!p) throw new Error(`Protokoll «${name}» gibt es nicht.`);
+  const gesperrt = protokollGesperrt();
+  if (gesperrt) return `Protokoll «${name}» nicht ausgeführt. ${gesperrt}`;
   const zeilen: string[] = [];
+  let abgebrochen = false;
   for (const s of p.schritte) {
+    // Vor jedem Schritt neu prüfen: /pause oder /notfall können eintreffen, während ein Schritt auf das Netz wartet.
+    if (protokollGesperrt()) {
+      zeilen.push("✗ Notaus: übrige Schritte nicht ausgeführt");
+      abgebrochen = true;
+      break;
+    }
     try {
       if (s.tool) {
         const t = toolByName(s.tool);
@@ -61,10 +79,17 @@ export async function runProtokoll(name: string, ctx: ToolContext): Promise<stri
       } else if (s.aktion === "neu") {
         resetHistory();
         zeilen.push("✓ Gespräch vergessen");
-      } else if (s.aktion === "pause" || s.aktion === "weiter") {
-        state.paused = s.aktion === "pause";
+      } else if (s.aktion === "pause") {
+        state.paused = true;
         save();
-        zeilen.push(`✓ ${s.aktion}`);
+        // Ein schon eingereihtes /weiter hebt diesen Notaus nicht auf (wie POST /notfall)
+        notausVermerken();
+        zeilen.push("✓ pause");
+      } else if (s.aktion === "weiter") {
+        // Im Notfall hebt nur /entwarnung auf; den Notaus selbst hebt nur /weiter auf, nie ein Protokoll.
+        if (state.notfall?.aktiv) throw new Error("Notfall aktiv, nur /entwarnung hebt auf");
+        if (state.paused) throw new Error("Notaus aktiv, nur /weiter hebt auf");
+        zeilen.push("✓ weiter");
       } else if (s.nachricht) {
         zeilen.push(s.nachricht);
       }
@@ -72,5 +97,5 @@ export async function runProtokoll(name: string, ctx: ToolContext): Promise<stri
       zeilen.push(`✗ ${s.tool ?? s.aktion ?? "Schritt"}: ${e instanceof Error ? e.message : String(e)}`);
     }
   }
-  return `Protokoll «${name}» ausgeführt:\n${zeilen.join("\n")}`;
+  return `Protokoll «${name}» ${abgebrochen ? "abgebrochen" : "ausgeführt"}:\n${zeilen.join("\n")}`;
 }

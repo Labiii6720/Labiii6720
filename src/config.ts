@@ -105,7 +105,7 @@ export const config = {
   eventToken: opt("JARVIS_EVENT_TOKEN"),
   /** 127.0.0.1 = nur lokal; 0.0.0.0 = im Heimnetz erreichbar (für Home Assistant auf einem anderen Gerät) */
   listenHost: opt("LISTEN_HOST") ?? "127.0.0.1",
-  /** /events und /gesture auch über den Cloudflare Tunnel erlauben (Standard: nein, nur Heimnetz/Tailscale) */
+  /** /events und /gesture auch über den Cloudflare Tunnel erlauben (Standard: nein, nur Heimnetz/Tailscale). Dashboard, /status.json und /api/* nie über den Tunnel */
   eventsViaTunnel: opt("EVENTS_VIA_TUNNEL") === "on",
 
   // ---------- Kameras ----------

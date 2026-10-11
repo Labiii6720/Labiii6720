@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { chmodSync, constants, copyFileSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { todayKey } from "./time.js";
 
 /**
@@ -22,15 +22,75 @@ export interface Rechnung {
 }
 
 const FILE = "data/rechnungen.json";
-export const rechnungen: Rechnung[] = (() => {
+/** Unlesbare Rechnungs-Datei wird hierhin kopiert; liegt dort schon eine ältere Sicherung, mit Zeitstempel daneben */
+const SICHERUNG_DEFEKT = `${FILE}.defekt`;
+
+/** Kopiert die unlesbare Datei unter einen freien Namen (0o600, eine ältere Sicherung bleibt unberührt). */
+function sichereDefekt(): string | undefined {
   try {
-    return JSON.parse(readFileSync(FILE, "utf8")) as Rechnung[];
+    mkdirSync("data", { recursive: true, mode: 0o700 });
+    const stempel = new Date().toISOString().replace(/[:.]/g, "-");
+    for (let n = 0; n < 100; n++) {
+      const nach = n === 0 ? SICHERUNG_DEFEKT : `${SICHERUNG_DEFEKT}-${stempel}${n > 1 ? `-${n}` : ""}`;
+      try {
+        // EXCL: nie eine vorhandene Sicherung überschreiben, auch nicht bei gleichzeitigem Start
+        copyFileSync(FILE, nach, constants.COPYFILE_EXCL);
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code === "EEXIST") continue;
+        throw e;
+      }
+      chmodSync(nach, 0o600);
+      return nach;
+    }
+    throw new Error("kein freier Name für die Sicherung");
+  } catch (e) {
+    console.error("Rechnungs-Sicherung fehlgeschlagen:", e instanceof Error ? e.message : e);
+    return undefined;
+  }
+}
+
+/**
+ * true, wenn data/rechnungen.json vorhanden, aber nicht lesbar war (Rechte, kaputtes JSON …). Dann startet Jarvis ohne
+ * Rechnungen im Speicher, `saveRechnungen()` verweigert aber das Schreiben: sonst ersetzte das nächste Erfassen oder
+ * Abhaken die echte Liste samt bezahltAm durch eine leere.
+ */
+export let rechnungenNichtGeladen = false;
+
+export const rechnungen: Rechnung[] = (() => {
+  let text: string;
+  try {
+    text = readFileSync(FILE, "utf8");
+  } catch (e) {
+    // Nur eine fehlende Datei heisst «noch keine Rechnungen»
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return [];
+    rechnungenNichtGeladen = true;
+    console.error(
+      `Rechnungen nicht lesbar (${(e as NodeJS.ErrnoException).code ?? "Fehler"}) – Jarvis startet ohne Rechnungen und speichert keine, bis ${FILE} wieder lesbar ist und Jarvis neu startet.`,
+    );
+    return [];
+  }
+  try {
+    const roh = JSON.parse(text) as unknown;
+    if (!Array.isArray(roh)) throw new Error("keine Liste");
+    return roh as Rechnung[];
   } catch {
+    rechnungenNichtGeladen = true;
+    const kopie = sichereDefekt();
+    console.error(
+      `Rechnungen unlesbar – ${kopie ? `Kopie unter ${kopie}` : "Sicherung fehlgeschlagen"}. Jarvis startet ohne Rechnungen und speichert keine, bis ${FILE} repariert ist und Jarvis neu startet.`,
+    );
     return [];
   }
 })();
 
+const GESPERRT = `${FILE} war beim Start unlesbar, Sir. Ich speichere keine Rechnungen, bis die Datei repariert ist und ich neu gestartet bin – sonst wäre der Bestand weg.`;
+
+function pruefeSchreibbar(): void {
+  if (rechnungenNichtGeladen) throw new Error(GESPERRT);
+}
+
 export function saveRechnungen(): void {
+  pruefeSchreibbar();
   mkdirSync("data", { recursive: true, mode: 0o700 });
   writeFileSync(`${FILE}.tmp`, JSON.stringify(rechnungen.slice(-300), null, 2), { mode: 0o600 });
   renameSync(`${FILE}.tmp`, FILE);
@@ -104,6 +164,7 @@ export function erkenneRechnung(text: string): Erkannt {
 // ---------- Verwaltung ----------
 
 export function addRechnung(r: Omit<Rechnung, "id" | "erkanntAm" | "status"> & { status?: Rechnung["status"] }): Rechnung {
+  pruefeSchreibbar(); // vor dem push: sonst stünde im Speicher eine Rechnung, die nie gespeichert wird
   const rechnung: Rechnung = { id: (rechnungen.at(-1)?.id ?? 0) + 1, erkanntAm: new Date().toISOString(), status: "offen", ...r };
   rechnungen.push(rechnung);
   saveRechnungen();
@@ -124,6 +185,7 @@ export function formatRechnung(r: Rechnung): string {
  * weg von bezahlt wird es gelöscht. Speichert sofort. Hakt nur ab – gezahlt wird ausschliesslich in der Bank-App.
  */
 export function setzeStatus(r: Rechnung, status: Rechnung["status"], heute = todayKey()): void {
+  pruefeSchreibbar();
   r.status = status;
   if (status !== "bezahlt") delete r.bezahltAm;
   else if (!r.bezahltAm) r.bezahltAm = heute;

@@ -148,7 +148,7 @@ export async function selbsttest(nur?: string[], beiBefund?: (b: Befund) => void
     const warn: string[] = [];
     if (!config.pin) warn.push("keine PIN (JARVIS_PIN)");
     if (config.listenHost !== "127.0.0.1" && !config.eventToken) warn.push("im Heimnetz erreichbar ohne Ereignis-Token");
-    if (config.eventsViaTunnel) warn.push("/events über den Tunnel offen");
+    if (config.eventsViaTunnel) warn.push("/events und /gesture über den Tunnel offen");
     if (config.commands === "auto") warn.push("Shell-Befehle laufen ohne Freigabe");
     if (!config.panicToken) warn.push("kein Panik-Token");
     if (warn.length) throw new Error(warn.join("; "));

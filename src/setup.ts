@@ -200,7 +200,7 @@ export const ABSCHNITTE: Abschnitt[] = [
       { key: "JARVIS_EVENT_TOKEN", frage: "Ereignis-Token für POST /events", hinweis: "Enter = bestehenden Token behalten, sonst erzeugen (wie openssl rand -hex 24); «-» = Endpunkt aus; neu erzeugen: erst «-», dann nochmals npm run setup -- --abschnitt sicherheit", art: "token", erzeugen: true },
       { key: "JARVIS_PANIC_TOKEN", frage: "Panik-Token für POST /notfall", hinweis: "Enter = bestehenden Token behalten, sonst erzeugen; «-» = Endpunkt aus; neu erzeugen: erst «-», dann nochmals npm run setup -- --abschnitt sicherheit", art: "token", erzeugen: true },
       { key: "JARVIS_COMMANDS", frage: "Shell-Befehle", hinweis: "freigabe = jeder Befehl braucht Ihr OK (empfohlen), auto = läuft direkt", art: "wahl", wahl: ["freigabe", "auto"], standard: "freigabe", pruefen: pruefeWahl(["freigabe", "auto"]) },
-      { key: "EVENTS_VIA_TUNNEL", frage: "/events und /gesture auch über den Tunnel", hinweis: "off empfohlen (nur Heimnetz/Tailscale)", art: "wahl", wahl: ["off", "on"], standard: "off", pruefen: anAus },
+      { key: "EVENTS_VIA_TUNNEL", frage: "/events und /gesture auch über den Tunnel", hinweis: "off empfohlen (nur Heimnetz/Tailscale). Dashboard und /api/* bleiben auch mit on gesperrt", art: "wahl", wahl: ["off", "on"], standard: "off", pruefen: anAus },
       { key: "DASHBOARD", frage: "Dashboard unter /dashboard", hinweis: "nur Heimnetz/Tailscale, nutzt JARVIS_EVENT_TOKEN", art: "wahl", wahl: ["on", "off"], standard: "on", pruefen: anAus },
       { key: "ZAHLUNG_NUR_VORBEREITEN", frage: "Zahlungen nur vorbereiten, nie auslösen", hinweis: "on empfohlen", art: "wahl", wahl: ["on", "off"], standard: "on", pruefen: anAus },
     ],

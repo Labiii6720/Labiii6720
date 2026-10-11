@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { after, afterEach, beforeEach, describe, it } from "node:test";
@@ -39,6 +39,8 @@ const { abhaengigkeiten, annehmen, approveAuftrag, denyAuftrag, handleUpdate, is
 const { state } = await import("../src/state.js");
 const { reminders } = await import("../src/tools.js");
 const { createAuftrag, getAuftrag } = await import("../src/queue.js");
+const { config } = await import("../src/config.js");
+const { protokolle } = await import("../src/protokolle.js");
 
 const POSTAUSGANG = join(temp, "data", "postausgang.json");
 const netzfehler = () => Object.assign(new TypeError("fetch failed"), { cause: Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" }) });
@@ -691,7 +693,9 @@ describe("PIN-Abfrage: Notaus und abgelaufenes Warten", () => {
     assert.ok(aufrufe.some((x) => x.method === "deleteMessage"));
     assert.equal(getAuftrag(a.id)?.status, "offen");
     assert.equal(reminders.length, 0);
-    assert.ok(gesendet().some((t) => t.startsWith("⛔ Notaus aktiv")));
+    // im Notfall verweist der Hinweis auf /entwarnung, nicht auf /weiter
+    assert.ok(gesendet().some((t) => t === "🚨 Notfall aktiv, Sir. Erst /entwarnung."));
+    assert.ok(!gesendet().some((t) => t.includes("/weiter")));
   });
 
   it("/pause während die PIN erwartet wird: Notaus greift, Auftrag bleibt offen", async () => {
@@ -1431,5 +1435,266 @@ describe("/verdichten bei Telegram-Störung: kein Absturz, der Bericht geht nich
     }
     // Antworten ohne bleibenden Wert (Vorschau, Fehlertexte) gehen nicht in den Postausgang
     assert.deepEqual(liesPostausgang(), []);
+  });
+});
+
+describe("Gesamtprüfung Runde 1: Notfall gibt nichts heraus, PIN, Sprachnachricht, Absturzschutz", () => {
+  const nachricht = (id: number, text: string) => ({ update_id: id, message: { message_id: id, chat: { id: 12345 }, text } });
+  const knopf = (data: string) => ({ update_id: 1, callback_query: { id: "cb", data, from: { id: 12345 } } });
+  const sprachnachricht = (id: number) => ({ update_id: id, message: { message_id: id, chat: { id: 12345 }, voice: { file_id: "datei", duration: 3 } } });
+  const gesendet = () => aufrufe.filter((x) => x.method === "sendMessage").map((x) => x.text ?? "");
+  const origHandle = abhaengigkeiten.handleMessage;
+  const origErr = console.error;
+  const origStt = config.stt;
+  const notfallAn = () => {
+    state.notfall = { aktiv: true, seit: new Date().toISOString(), grund: "Test" };
+    state.paused = true;
+  };
+  const sensibel = () => createAuftrag({ tool: "erinnerung", input: { zeit: new Date(Date.now() + 3_600_000).toISOString(), text: "PIN-Test" }, stufe: "sensibel", summary: "sensibel" });
+  /** sendMessage scheitert dauerhaft mit Netzfehler */
+  const sendenKaputt = () => {
+    globalThis.fetch = (async (eingabe, init) => {
+      const url = String(eingabe instanceof Request ? eingabe.url : eingabe);
+      if (url.endsWith("/sendMessage")) {
+        aufrufe.push({ method: "sendMessage", text: (JSON.parse(String(init?.body)) as { text?: string }).text });
+        throw netzfehler();
+      }
+      return fetchAttrappe(eingabe, init);
+    }) as typeof fetch;
+  };
+  beforeEach(() => {
+    console.error = () => undefined;
+    state.paused = false;
+    state.notfall = { aktiv: false };
+    reminders.splice(0, reminders.length);
+  });
+  afterEach(async () => {
+    abhaengigkeiten.handleMessage = origHandle;
+    console.error = origErr;
+    globalThis.fetch = fetchAttrappe;
+    config.stt = origStt;
+    state.paused = false;
+    state.notfall = { aktiv: false };
+    reminders.splice(0, reminders.length);
+    await leeren();
+  });
+
+  it("Notfall während der Sendewiederholungen einer gewöhnlichen Meldung: der Rest wartet bis /entwarnung, nur der Alarm geht nach", async () => {
+    const { ausloesen, aufheben } = await import("../src/notfall.js");
+    sendenKaputt();
+    let ausgeloest = false;
+    setzeWarten(async () => {
+      if (ausgeloest) return;
+      ausgeloest = true;
+      await ausloesen("Panik während des Versands");
+    }, () => 0.5);
+    await sendeSpaeter("🕒 Mails: Kündigung von chef@firma.ch");
+    assert.equal(ausgeloest, true);
+    const wartend = liesPostausgang();
+    assert.equal(wartend.length, 2);
+    assert.match(wartend[0].text, /^🚨 NOTFALL ausgelöst/);
+    assert.equal(wartend[1].text, "🕒 Mails: Kündigung von chef@firma.ch");
+    assert.ok(wartend[1].ts <= (state.notfall?.seit ?? ""), "Zeitstempel = Fälligkeit vor der Auslösung, nicht das Scheitern danach");
+
+    globalThis.fetch = fetchAttrappe;
+    aufrufe = [];
+    await postausgangTick();
+    assert.equal(gesendet().length, 1);
+    assert.match(gesendet()[0], /^\(nachgereicht, \d{2}:\d{2}\) 🚨 NOTFALL ausgelöst/);
+    assert.deepEqual(liesPostausgang().map((e) => e.text), ["🕒 Mails: Kündigung von chef@firma.ch"], "die Meldung wartet");
+
+    aufheben();
+    aufrufe = [];
+    await postausgangTick();
+    assert.match(gesendet()[0] ?? "", /Kündigung von chef@firma\.ch$/);
+    assert.deepEqual(liesPostausgang(), []);
+  });
+
+  it("im Notfall fällige gewöhnliche Meldung: weder gesendet noch nachgereicht, auch nicht mit Zeitstempel nach der Auslösung", async () => {
+    notfallAn();
+    await sendeSpaeter("⚠️ Zeitplan-Ergebnis mit Daten");
+    assert.deepEqual(gesendet(), []);
+    await postausgangTick();
+    assert.deepEqual(gesendet(), []);
+    assert.deepEqual(liesPostausgang().map((e) => e.text), ["⚠️ Zeitplan-Ergebnis mit Daten"]);
+  });
+
+  it("langer Text, Notfall nach dem ersten Teil: kein weiterer Teil, der Rest wartet bis /entwarnung", async () => {
+    let teile = 0;
+    globalThis.fetch = (async (eingabe, init) => {
+      const r = await fetchAttrappe(eingabe, init);
+      if (String(eingabe).endsWith("/sendMessage") && ++teile === 1) notfallAn();
+      return r;
+    }) as typeof fetch;
+    await sendeSpaeter("a".repeat(4000) + "b".repeat(100));
+    assert.equal(teile, 1);
+    assert.deepEqual(liesPostausgang().map((e) => e.text), ["b".repeat(100)]);
+  });
+
+  it("Erinnerung im Notfall: nichts geht hinaus, nichts wird gelöscht; nach /entwarnung kommt sie", async () => {
+    const { aufheben } = await import("../src/notfall.js");
+    reminders.push({ at: new Date(Date.now() - 1000).toISOString(), text: "Arzttermin, privat" });
+    notfallAn();
+    await remindersTick();
+    assert.deepEqual(gesendet(), []);
+    assert.equal(reminders.length, 1);
+    assert.equal(existsSync(POSTAUSGANG) ? liesPostausgang().length : 0, 0);
+    aufheben();
+    await remindersTick();
+    assert.deepEqual(gesendet(), ["⏰ Arzttermin, privat"]);
+    assert.equal(reminders.length, 0);
+  });
+
+  it("/auftraege, /vorgaenge und /status im Notfall: nur Anzahl und Nummern, keine Inhalte, keine Knöpfe", async () => {
+    const a = createAuftrag({ tool: "mail_senden", input: {}, stufe: "extern", summary: "Mail an chef@firma.ch | Betreff: Kündigung | Vertraulicher Text" });
+    notfallAn();
+    aufrufe = [];
+    await handleUpdate(nachricht(9701, "/auftraege"));
+    await handleUpdate(nachricht(9702, "/vorgaenge"));
+    await handleUpdate(nachricht(9703, "/status"));
+    const texte = gesendet();
+    assert.equal(texte.length, 3);
+    assert.match(texte[0], new RegExp(`^🚨 Notfall aktiv\\. Offene Aufträge: \\d+ \\(.*#${a.id}.*\\)`));
+    assert.equal(texte[1], "Im Notfall gebe ich keine Daten heraus, Sir. Erst /entwarnung.");
+    assert.match(texte[2], /^🚨 NOTFALL AKTIV/);
+    for (const t of texte) assert.doesNotMatch(t, /chef@firma|Kündigung|Vertraulich|Werkzeuge:/);
+    assert.equal(getAuftrag(a.id)?.status, "offen");
+  });
+
+  it("Clip-Knopf im Notfall: kein Abruf bei Frigate, kein Video", async () => {
+    notfallAn();
+    const fremd: string[] = [];
+    globalThis.fetch = (async (eingabe, init) => {
+      const url = String(eingabe instanceof Request ? eingabe.url : eingabe);
+      if (!url.startsWith("https://api.telegram.org/bot")) fremd.push(url);
+      return fetchAttrappe(eingabe, init);
+    }) as typeof fetch;
+    aufrufe = [];
+    await handleUpdate(knopf("clip:ev123"));
+    assert.deepEqual(fremd, []);
+    assert.ok(!aufrufe.some((x) => x.method === "sendVideo"));
+    assert.deepEqual(gesendet(), ["Im Notfall gebe ich keine Aufnahmen heraus, Sir. Erst /entwarnung."]);
+  });
+
+  it("Dashboard: falsche PIN lehnt den Auftrag ab, Durchprobieren geht nicht", async () => {
+    const a = sensibel();
+    assert.equal(await approveAuftrag(a, "0000"), `Falsche PIN. #${a.id} abgelehnt.`);
+    assert.equal(getAuftrag(a.id)?.status, "abgelehnt");
+    assert.equal(await approveAuftrag(a, "4711"), `#${a.id} ist bereits abgelehnt.`);
+    assert.equal(reminders.length, 0, "nichts ausgeführt");
+    // die richtige PIN beim ersten Versuch führt weiterhin aus
+    const b = sensibel();
+    assert.match(await approveAuftrag(b, "4711"), new RegExp(`^✅ #${b.id} erledigt`));
+  });
+
+  it("Sprachnachricht, während eine PIN erwartet wird: kein STT, kein Echo, die Freigabe verfällt", async () => {
+    config.stt = { url: "http://stt.test/v1/audio/transcriptions", key: "", model: "whisper-1" };
+    const a = sensibel();
+    await handleUpdate(knopf(`ok:${a.id}`));
+    aufrufe = [];
+    let claude = 0;
+    abhaengigkeiten.handleMessage = async () => { claude++; return "nein"; };
+    await handleUpdate(sprachnachricht(9711));
+    assert.ok(!aufrufe.some((x) => x.method === "getFile"), "die Sprachnachricht geht nicht zum STT-Anbieter");
+    assert.ok(aufrufe.some((x) => x.method === "deleteMessage"));
+    assert.equal(gesendet().length, 1);
+    assert.match(gesendet()[0], /^Die PIN bitte tippen, Sir/);
+    assert.ok(!gesendet().some((t) => t.startsWith("🎙")));
+    assert.equal(getAuftrag(a.id)?.status, "offen");
+    assert.equal(reminders.length, 0);
+    assert.equal(claude, 0);
+  });
+
+  it("gesprochene PIN ohne wartende Freigabe: kein Echo, gelöscht, nie an Claude", async () => {
+    config.stt = { url: "http://stt.test/v1/audio/transcriptions", key: "", model: "whisper-1" };
+    globalThis.fetch = (async (eingabe, init) => {
+      const url = String(eingabe instanceof Request ? eingabe.url : eingabe);
+      if (url.startsWith("http://stt.test/")) return new Response(JSON.stringify({ text: " 4711 " }), { headers: { "content-type": "application/json" } });
+      if (url.startsWith("https://api.telegram.org/file/")) return new Response(new Uint8Array([1, 2, 3]));
+      if (url.endsWith("/getFile")) {
+        aufrufe.push({ method: "getFile" });
+        return new Response(JSON.stringify({ ok: true, result: { file_path: "voice/a.oga" } }), { headers: { "content-type": "application/json" } });
+      }
+      return fetchAttrappe(eingabe, init);
+    }) as typeof fetch;
+    let claude = 0;
+    abhaengigkeiten.handleMessage = async () => { claude++; return "nein"; };
+    aufrufe = [];
+    await handleUpdate(sprachnachricht(9712));
+    assert.ok(aufrufe.some((x) => x.method === "getFile"));
+    assert.ok(aufrufe.some((x) => x.method === "deleteMessage"));
+    assert.ok(!gesendet().some((t) => t.includes("4711")), "die PIN steht nicht im Chat");
+    assert.deepEqual(gesendet(), ["Die PIN bitte tippen, Sir, nie sprechen. Sprachnachricht gelöscht."]);
+    assert.equal(claude, 0);
+  });
+
+  it("/protokoll der Stufe auto im Notaus und im Notfall: kein Werkzeug läuft", async () => {
+    protokolle["testauto"] = { beschreibung: "Test", stufe: "auto", schritte: [{ tool: "erinnerung", input: { zeit: new Date(Date.now() + 3_600_000).toISOString(), text: "Protokoll" } }] };
+    try {
+      state.paused = true;
+      aufrufe = [];
+      await handleUpdate(nachricht(9721, "/protokoll testauto"));
+      assert.deepEqual(gesendet(), ["⛔ Notaus aktiv. Erst /weiter."]);
+      notfallAn();
+      aufrufe = [];
+      await handleUpdate(nachricht(9722, "/protokoll testauto"));
+      assert.deepEqual(gesendet(), ["🚨 Notfall aktiv, Sir. Erst /entwarnung."]);
+      assert.equal(reminders.length, 0);
+    } finally {
+      delete protokolle["testauto"];
+    }
+  });
+
+  it("/protokoll der Stufe extern im Notfall: kein Auftrag, nur die Ablehnung", async () => {
+    protokolle["testextern"] = { beschreibung: "Test", stufe: "extern", schritte: [{ tool: "erinnerung", input: { zeit: new Date(Date.now() + 3_600_000).toISOString(), text: "Protokoll" } }] };
+    try {
+      const zaehler = createAuftrag({ tool: "erinnerung", input: {}, stufe: "extern", summary: "Zähler" });
+      zaehler.status = "abgelehnt";
+      const naechste = zaehler.id + 1;
+      notfallAn();
+      aufrufe = [];
+      await handleUpdate(nachricht(9725, "/protokoll testextern"));
+      assert.deepEqual(gesendet(), ["🚨 Notfall aktiv, Sir. Erst /entwarnung."]);
+      assert.equal(getAuftrag(naechste), undefined, "im Notfall wird kein Auftrag angelegt");
+      assert.equal(reminders.length, 0);
+    } finally {
+      delete protokolle["testextern"];
+    }
+  });
+
+  it("Notaus-Hinweise im Notfall nennen /entwarnung, nicht /weiter (Knopf, Dashboard, /verdichten)", async () => {
+    const a = createAuftrag({ tool: "erinnerung", input: { zeit: new Date(Date.now() + 3_600_000).toISOString(), text: "x" }, stufe: "extern", summary: "x" });
+    notfallAn();
+    aufrufe = [];
+    await handleUpdate(knopf(`ok:${a.id}`));
+    await handleUpdate(nachricht(9731, "/verdichten"));
+    const dashboard = await approveAuftrag(a);
+    for (const t of [...gesendet(), dashboard]) assert.equal(t, "🚨 Notfall aktiv, Sir. Erst /entwarnung.");
+    assert.equal(gesendet().length, 2);
+    // ohne Notfall bleibt der Hinweis auf /weiter
+    state.notfall = { aktiv: false };
+    aufrufe = [];
+    await handleUpdate(knopf(`ok:${a.id}`));
+    assert.deepEqual(gesendet(), ["⛔ Notaus aktiv. Erst /weiter, dann nochmal freigeben."]);
+  });
+
+  it("Telegram-Störung bei einer Befehlsantwort: keine unbehandelte Rejection, der Fehler landet in der Kette", async () => {
+    const unbehandelt: unknown[] = [];
+    const merke = (e: unknown) => { unbehandelt.push(e); };
+    process.on("unhandledRejection", merke);
+    try {
+      sendenKaputt();
+      await verteileUpdate(nachricht(9741, "/status"));
+      await verteileUpdate(nachricht(9742, "/gibtsnicht"));
+      await handleUpdate(knopf("ok:999999")).then(
+        () => assert.fail("der Sendefehler muss beim Aufrufer ankommen"),
+        (e: unknown) => assert.match(String(e), /fetch failed/),
+      );
+      for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r));
+      assert.deepEqual(unbehandelt, []);
+      assert.equal(gesendet().length, 12); // je vier Versuche
+    } finally {
+      process.off("unhandledRejection", merke);
+    }
   });
 });

@@ -195,6 +195,20 @@ describe("Home Assistant POST (Dienste)", () => {
     await assert.rejects(haService("light.buero", "turn-on"), /Ungültige entity_id oder Dienst/);
     assert.equal(aufrufe.length, 0);
   });
+
+  it("Zusatzdaten mit eigenem Ziel werden abgewiesen, ohne Aufruf", async () => {
+    await assert.rejects(haService("switch.licht", "turn_on", { entity_id: "lock.haustuer" }), /Zusatzdaten dürfen kein Ziel setzen \(entity_id\)/);
+    for (const k of ["entities", "target", "device_id", "area_id", "floor_id", "label_id"]) {
+      await assert.rejects(haService("switch.licht", "turn_on", { [k]: "x" }), /kein Ziel/);
+    }
+    assert.equal(aufrufe.length, 0);
+  });
+
+  it("entity_id steht im Body immer zuletzt (nicht überschreibbar)", async () => {
+    antworten = [json([])];
+    await haService("light.buero", "turn_on", { brightness: 10 });
+    assert.deepEqual(JSON.parse(aufrufe[0]?.body ?? "{}"), { brightness: 10, entity_id: "light.buero" });
+  });
 });
 
 // ---------- isHome ----------

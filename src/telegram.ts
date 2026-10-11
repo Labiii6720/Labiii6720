@@ -1,3 +1,4 @@
+import { createHash, timingSafeEqual } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { audit, throttled } from "./audit.js";
 import { basename } from "node:path";
@@ -13,7 +14,7 @@ import { listVorgaenge, startVorgang } from "./vorgaenge.js";
 import { verbrauchBericht } from "./claude.js";
 import { aufheben, ausloesen, notfallAktiv } from "./notfall.js";
 import { createAuftrag } from "./queue.js";
-import { protokolle, runProtokoll } from "./protokolle.js";
+import { protokolle, protokollGesperrt, runProtokoll } from "./protokolle.js";
 import { formatBefund, selbsttest } from "./check.js";
 import { abuseSignal } from "./notfall.js";
 import { HttpFehler, fehlerArt, fehlerDetail, gesundheit, mitWiederholung, nutzerText, schwaerze, voruebergehend, wartezeit } from "./robust.js";
@@ -26,6 +27,18 @@ const API = () => `https://api.telegram.org/bot${config.telegramToken}`;
 export const abhaengigkeiten = { handleMessage, verdichteJetzt };
 const owner = () => config.telegramOwner ?? "";
 const log = (e: unknown) => console.error(e instanceof Error ? schwaerze(e.message) : e);
+
+/** PIN-Vergleich in konstanter Zeit; über die Hashes, damit auch die Länge nichts verrät. Ohne JARVIS_PIN nie wahr. */
+function pinStimmt(eingabe: string | undefined): boolean {
+  if (!config.pin || eingabe === undefined) return false;
+  const h = (s: string) => createHash("sha256").update(s).digest();
+  return timingSafeEqual(h(eingabe), h(config.pin));
+}
+
+/** Hinweis bei gesperrter Aktion: im Notfall hebt nur /entwarnung auf, nicht /weiter. */
+const notausHinweis = (nachsatz = ""): string =>
+  notfallAktiv() ? "🚨 Notfall aktiv, Sir. Erst /entwarnung." : `⛔ Notaus aktiv. Erst /weiter${nachsatz}.`;
+const NOCHMAL_FREIGEBEN = ", dann nochmal freigeben";
 
 // ---------- Senden ----------
 
@@ -177,8 +190,9 @@ function kuerzen(): void {
   }
 }
 
-function ablegen(text: string): void {
-  postausgang.push({ ts: new Date().toISOString(), text });
+/** `faellig`: Zeitpunkt des Sendeauftrags, nicht des Scheiterns – sonst gälte eine vor dem Notfall fällige Nachricht als neu. */
+function ablegen(text: string, faellig = new Date().toISOString()): void {
+  postausgang.push({ ts: faellig, text });
   kuerzen();
   speicherePostausgang();
 }
@@ -187,11 +201,16 @@ function ablegen(text: string): void {
  * Vor die gewöhnlichen Einträge einreihen (Vorrang), aber hinter ältere Vorrang-Einträge: sonst käme ein späteres
  * Freigabe-Ergebnis vor dem Notfall-Alarm an. Bei vollem Postausgang fliegen die ältesten übrigen Einträge raus, nicht dieser.
  */
-function voranstellen(text: string): void {
+function voranstellen(text: string, faellig = new Date().toISOString()): void {
   const i = postausgang.findIndex((e) => !e.vorrang);
-  postausgang.splice(i < 0 ? postausgang.length : i, 0, { ts: new Date().toISOString(), text, vorrang: true });
+  postausgang.splice(i < 0 ? postausgang.length : i, 0, { ts: faellig, text, vorrang: true });
   kuerzen();
   speicherePostausgang();
+}
+
+/** Im Notfall darf nur hinaus, was mit Vorrang nach der Auslösung fällig wurde (der Alarm, die neutrale Freigabe-Meldung). */
+function imNotfallErlaubt(e: Postausgang): boolean {
+  return !notfallAktiv() || (e.vorrang === true && e.ts >= (state.notfall?.seit ?? ""));
 }
 
 export interface SpaeterOptionen {
@@ -210,17 +229,30 @@ export interface SpaeterOptionen {
  * Nur ein client-Fehler (die Nachricht selbst ist unbrauchbar) wird weitergeworfen – Wiederholen hilft da nicht.
  */
 export async function sendeSpaeter(text: string, optionen: SpaeterOptionen = {}): Promise<void> {
+  await zustellen(text, optionen);
+}
+
+/**
+ * Wie sendeSpaeter, meldet aber, ob der Text zugestellt bzw. abgelegt (true) oder im Notfall verworfen wurde (false).
+ * Ohne Vorrang geht im Notfall nichts direkt hinaus, auch kein weiterer Teil: es bleibt bis /entwarnung im Postausgang.
+ */
+async function zustellen(text: string, optionen: SpaeterOptionen): Promise<boolean> {
+  const faellig = new Date().toISOString();
   const zurueckhalten = optionen.imNotfallZurueckhalten ? notfallAktiv : undefined;
-  if (zurueckhalten?.()) return;
-  if (postausgang.length > 0 && !optionen.vorrang) return void ablegen(text);
-  const r = await sendeTeile(text, {}, zurueckhalten);
-  if (r.ok) return;
-  // Notfall kam während des Versands (auch während der Wiederholungen): der Rest bleibt auch dem Postausgang fern
-  if (r.abgebrochen || zurueckhalten?.()) return;
-  if (fehlerArt(r.fehler) === "client") throw r.fehler;
-  // nur der nicht zugestellte Rest
-  if (optionen.vorrang) voranstellen(r.rest);
-  else ablegen(r.rest);
+  if (zurueckhalten?.()) return false;
+  if (!optionen.vorrang && (postausgang.length > 0 || notfallAktiv())) {
+    ablegen(text, faellig);
+    return true;
+  }
+  const r = await sendeTeile(text, {}, optionen.vorrang ? zurueckhalten : notfallAktiv);
+  if (r.ok) return true;
+  // Notfall kam während des Versands (auch während der Wiederholungen): Daten bleiben auch dem Postausgang fern
+  if (zurueckhalten && (r.abgebrochen || zurueckhalten())) return false;
+  if (!r.abgebrochen && fehlerArt(r.fehler) === "client") throw r.fehler;
+  // nur der nicht zugestellte Rest; ein Rest ohne Vorrang wartet im Notfall auf /entwarnung (postausgangTick)
+  if (optionen.vorrang) voranstellen(r.rest, faellig);
+  else ablegen(r.rest, faellig);
+  return true;
 }
 
 let nachreichenLaeuft = false;
@@ -231,14 +263,14 @@ export async function postausgangTick(): Promise<void> {
   nachreichenLaeuft = true;
   try {
     while (postausgang.length > 0) {
-      // Im Notfall nichts Altes herausgeben: nur, was seit der Auslösung abgelegt wurde (der Alarm). Der Rest wartet auf /entwarnung.
-      const seit = notfallAktiv() ? (state.notfall?.seit ?? "") : undefined;
-      const e = seit === undefined ? postausgang[0] : postausgang.find((x) => x.ts >= seit);
+      // Im Notfall nur den Alarm (Vorrang, nach der Auslösung fällig). Alles andere wartet auf /entwarnung.
+      const e = notfallAktiv() ? postausgang.find(imNotfallErlaubt) : postausgang[0];
       if (!e) break;
       const volltext = `(nachgereicht, ${clock(new Date(e.ts))}) ${e.text}`;
-      const r = await sendeTeile(volltext);
+      // Ein Notfall mitten im Nachreichen hält die übrigen Teile eines gewöhnlichen Eintrags zurück.
+      const r = await sendeTeile(volltext, {}, () => !imNotfallErlaubt(e));
       if (!r.ok) {
-        if (fehlerArt(r.fehler) !== "client") {
+        if (r.abgebrochen || fehlerArt(r.fehler) !== "client") {
           // weiterhin gestört → nächster Tick; schon zugestellte Teile fallen weg (Präfix liegt immer im ersten Teil)
           if (r.rest.length < volltext.length) {
             e.text = r.rest;
@@ -344,7 +376,7 @@ function beanspruche(a: Auftrag): string | undefined {
   if (aktuell.status !== "offen") return `#${a.id} ist bereits ${aktuell.status}.`;
   if (inArbeit.has(a.id)) return laeuftBereits(a);
   if (aktuell.gestartetAm) return ergebnisUnklar(a);
-  if (state.paused) return "⛔ Notaus aktiv. Erst /weiter, dann nochmal freigeben.";
+  if (state.paused) return notausHinweis(NOCHMAL_FREIGEBEN);
   inArbeit.add(a.id);
   return undefined;
 }
@@ -419,12 +451,17 @@ export async function approveAuftrag(a: Auftrag, pin?: string): Promise<string> 
   if (a.status !== "offen") return `#${a.id} ist bereits ${a.status}.`;
   if (inArbeit.has(a.id)) return laeuftBereits(a);
   if (a.gestartetAm) return ergebnisUnklar(a);
-  if (state.paused) return "⛔ Notaus aktiv. Erst /weiter.";
+  if (state.paused) return notausHinweis();
   if (a.stufe === "sensibel") {
     if (!config.pin) return "Für sensible Aufträge fehlt eine PIN (JARVIS_PIN).";
-    if (pin !== config.pin) {
+    if (!pinStimmt(pin)) {
+      // Wie in Telegram: eine falsche PIN lehnt den Auftrag ab, sonst liesse sich die PIN durchprobieren.
       audit("pin_falsch", { id: a.id, tool: a.tool, quelle: "dashboard" });
-      return "Falsche PIN.";
+      setStatus(a, "abgelehnt", "falsche PIN");
+      abuseSignal("pin");
+      if (a.messageId) knoepfeEntfernen(a.messageId);
+      void sendeSpaeter(`⚠️ Falsche PIN im Dashboard. #${a.id} abgelehnt, Sir.`).catch(log);
+      return `Falsche PIN. #${a.id} abgelehnt.`;
     }
   }
   // Zwischen Prüfung und Ausführung kein await: execute beansprucht den Auftrag synchron.
@@ -452,6 +489,8 @@ async function onCallback(cb: { id: string; data?: string; message?: { message_i
   void apiRobust("answerCallbackQuery", { callback_query_id: cb.id }).catch(log);
   const [action, idStr] = (cb.data ?? "").split(":");
   if (action === "clip") {
+    // Notfall: womöglich übernommenes Konto, keine Aufnahmen aus dem Haus
+    if (notfallAktiv()) return void await sendText("Im Notfall gebe ich keine Aufnahmen heraus, Sir. Erst /entwarnung.");
     try {
       await sendVideo(await eventClip(idStr ?? ""), `🎬 Clip ${idStr}`);
     } catch (e) {
@@ -460,23 +499,23 @@ async function onCallback(cb: { id: string; data?: string; message?: { message_i
     return;
   }
   const a = getAuftrag(Number(idStr));
-  if (!a) return void sendText("Diesen Auftrag kenne ich nicht mehr.");
+  if (!a) return void await sendText("Diesen Auftrag kenne ich nicht mehr.");
   if (cb.message) knoepfeEntfernen(cb.message.message_id);
-  if (a.status !== "offen") return void sendText(`#${a.id} ist bereits ${a.status}.`);
-  if (inArbeit.has(a.id)) return void sendText(laeuftBereits(a));
-  if (a.gestartetAm && action === "ok") return void sendText(ergebnisUnklar(a));
-  if (state.paused && action === "ok") return void sendText("⛔ Notaus aktiv. Erst /weiter, dann nochmal freigeben.");
+  if (a.status !== "offen") return void await sendText(`#${a.id} ist bereits ${a.status}.`);
+  if (inArbeit.has(a.id)) return void await sendText(laeuftBereits(a));
+  if (a.gestartetAm && action === "ok") return void await sendText(ergebnisUnklar(a));
+  if (state.paused && action === "ok") return void await sendText(notausHinweis(NOCHMAL_FREIGEBEN));
 
   if (action === "nein") {
     audit("auftrag_abgelehnt", { id: a.id, tool: a.tool });
     setStatus(a, "abgelehnt");
     addSystemNote(`Auftrag #${a.id} (${a.tool}) wurde vom Nutzer abgelehnt.`);
-    return void sendText(`❌ #${a.id} abgelehnt.`);
+    return void await sendText(`❌ #${a.id} abgelehnt.`);
   }
   if (a.stufe === "sensibel") {
-    if (!config.pin) return void sendText("Für sensible Aufträge fehlt eine PIN: JARVIS_PIN in .env setzen.");
+    if (!config.pin) return void await sendText("Für sensible Aufträge fehlt eine PIN: JARVIS_PIN in .env setzen.");
     pendingPin = { id: a.id, until: Date.now() + 2 * 60_000 };
-    return void sendText(`#${a.id} ist sensibel. PIN bitte, innerhalb von zwei Minuten.`);
+    return void await sendText(`#${a.id} ist sensibel. PIN bitte, innerhalb von zwei Minuten.`);
   }
   const hindernis = await execute(a);
   if (hindernis) await sendText(hindernis);
@@ -488,44 +527,54 @@ async function onCommand(cmd: string, arg: string): Promise<void> {
   switch (cmd) {
     case "/start":
     case "/hilfe":
-      return void sendText(
+      return void await sendText(
         "JARVIS, zu Diensten.\n\n/auftraege – offene Freigaben\n/vorgang <Auftrag> – grosse Aufgabe im Hintergrund, starkes Modell\n/vorgaenge – Stand der Vorgänge\n! vor einer Nachricht – starkes Modell für diese Antwort\n/modus normal|fokus|nacht\n/neu – Gespräch vergessen\n/pause – Notaus, /weiter hebt ihn auf\n/notfall – Angriff: alles sperren und alarmieren\n/protokoll <name> – Nacht, Abwesend, Werkstatt …\n/kosten – Tokenverbrauch heute und Monat\n/finanzen – Rechnungen: offen, überfällig, bezahlt, pro Monat (Zahlungen nur vorbereitet)\n/verdichten – Gedächtnis jetzt verdichten (/verdichten vorschau ändert nichts)\n/check – Selbsttest aller Anbindungen\n/status – was läuft",
       );
     case "/auftraege": {
       const offen = offeneAuftraege();
-      if (offen.length === 0) return void sendText("Keine offenen Aufträge.");
+      if (offen.length === 0) return void await sendText("Keine offenen Aufträge.");
+      // Notfall: nur Anzahl und Nummern, keine Inhalte (Mailtexte, Termine) in einen womöglich kompromittierten Chat
+      if (notfallAktiv()) {
+        return void await sendText(`🚨 Notfall aktiv. Offene Aufträge: ${offen.length} (${offen.map((a) => `#${a.id}`).join(", ")}). Inhalte erst nach /entwarnung, Sir.`);
+      }
       for (const a of offen) await sendAuftrag(a);
       return;
     }
     case "/modus": {
       const m = arg.trim().toLowerCase();
-      if (!["normal", "fokus", "nacht"].includes(m)) return void sendText(`Aktueller Modus: ${state.mode ?? "normal"}. Setzen mit /modus normal|fokus|nacht`);
+      if (!["normal", "fokus", "nacht"].includes(m)) return void await sendText(`Aktueller Modus: ${state.mode ?? "normal"}. Setzen mit /modus normal|fokus|nacht`);
       state.mode = m as Mode;
       save();
-      return void sendText(`Modus: ${m}.`);
+      return void await sendText(`Modus: ${m}.`);
     }
     case "/neu":
       resetHistory();
-      return void sendText("Gespräch vergessen. Clean Slate.");
+      return void await sendText("Gespräch vergessen. Clean Slate.");
     case "/vorgang": {
-      if (!arg.trim()) return void sendText("Benutzung: /vorgang <Auftrag>. Läuft im Hintergrund mit dem starken Modell; /vorgaenge zeigt den Stand.");
+      if (!arg.trim()) return void await sendText("Benutzung: /vorgang <Auftrag>. Läuft im Hintergrund mit dem starken Modell; /vorgaenge zeigt den Stand.");
       const v = startVorgang(arg.trim(), hooks);
-      return void sendText(`🧠 Vorgang #${v.id} gestartet. Fortschritt und Ergebnis folgen hier, der Chat bleibt währenddessen frei.`);
+      return void await sendText(`🧠 Vorgang #${v.id} gestartet. Fortschritt und Ergebnis folgen hier, der Chat bleibt währenddessen frei.`);
     }
     case "/vorgaenge":
-      return void sendText(listVorgaenge());
+      if (notfallAktiv()) return void await sendText("Im Notfall gebe ich keine Daten heraus, Sir. Erst /entwarnung.");
+      return void await sendText(listVorgaenge());
     case "/kosten":
-      return void sendText(verbrauchBericht());
+      return void await sendText(verbrauchBericht());
     case "/finanzen":
       // Notfall: womöglich kompromittierter Chat, keine Finanzdaten herausgeben
-      if (notfallAktiv()) return void sendText("Im Notfall gebe ich keine Finanzdaten heraus, Sir. Erst /entwarnung.");
-      if (rechnungen.length === 0) return void sendText("Noch keine Rechnungen erfasst, Sir. Nichts zu berichten.");
-      return void sendText(wochenberichtText(finanzUebersicht()));
+      if (notfallAktiv()) return void await sendText("Im Notfall gebe ich keine Finanzdaten heraus, Sir. Erst /entwarnung.");
+      if (rechnungen.length === 0) return void await sendText("Noch keine Rechnungen erfasst, Sir. Nichts zu berichten.");
+      return void await sendText(wochenberichtText(finanzUebersicht()));
     case "/protokoll": {
       const name = arg.trim().toLowerCase();
       const p = protokolle[name];
-      if (!p) return void sendText(`Protokolle: ${Object.keys(protokolle).join(", ") || "keine (protokolle.json)"}`);
-      if (p.stufe === "auto") return void sendText(await runProtokoll(name, hooks));
+      if (!p) return void await sendText(`Protokolle: ${Object.keys(protokolle).join(", ") || "keine (protokolle.json)"}`);
+      // Notaus: auch kein auto-Protokoll (dessen Werkzeuge liefen sonst an jeder Freigabe vorbei)
+      if (state.paused) return void await sendText(notausHinweis());
+      // Notfall: auch kein Auftrag für extern/sensibel anlegen
+      const gesperrt = protokollGesperrt();
+      if (gesperrt) return void await sendText(gesperrt);
+      if (p.stufe === "auto") return void await sendText(await runProtokoll(name, hooks));
       const a = createAuftrag({ tool: "protokoll_ausfuehren", input: { name }, stufe: p.stufe, summary: `Protokoll «${name}»: ${p.beschreibung}` });
       return sendAuftrag(a);
     }
@@ -533,32 +582,34 @@ async function onCommand(cmd: string, arg: string): Promise<void> {
       await ausloesen("Manuell über Telegram ausgelöst.");
       return;
     case "/entwarnung":
-      if (!notfallAktiv()) return void sendText("Es ist kein Notfall aktiv.");
+      if (!notfallAktiv()) return void await sendText("Es ist kein Notfall aktiv.");
       aufheben();
-      return void sendText("✅ Entwarnung. Notfall aufgehoben, Jarvis läuft wieder. Denk daran, erneuerte Tokens einzutragen.");
+      return void await sendText("✅ Entwarnung. Notfall aufgehoben, Jarvis läuft wieder. Denk daran, erneuerte Tokens einzutragen.");
     case "/pause":
       state.paused = true;
       save();
       audit("pause", {});
-      return void sendText("⛔ Notaus. Keine Werkzeuge, Zeitpläne oder Wachen, bis /weiter kommt. Offene Aufträge bleiben offen.");
+      return void await sendText("⛔ Notaus. Keine Werkzeuge, Zeitpläne oder Wachen, bis /weiter kommt. Offene Aufträge bleiben offen.");
     case "/weiter":
       // Im Notfall hebt nur /entwarnung den Notaus auf (bewusster Schritt mit Checkliste)
-      if (notfallAktiv()) return void sendText("Es läuft ein Notfall, Sir. Erst /entwarnung.");
+      if (notfallAktiv()) return void await sendText("Es läuft ein Notfall, Sir. Erst /entwarnung.");
       state.paused = false;
       save();
       audit("weiter", {});
-      return void sendText("▶️ Weiter geht's.");
+      return void await sendText("▶️ Weiter geht's.");
     case "/verdichten":
       return verdichtenBefehl(arg.trim().toLowerCase());
     case "/check":
       await sendText("Prüfe alle Anbindungen …");
-      return void sendText(formatBefund(await selbsttest()));
+      return void await sendText(formatBefund(await selbsttest()));
     case "/status":
-      return void sendText(
+      // Notfall: keine Einzelheiten (Werkzeuge, Modus) in einen womöglich kompromittierten Chat
+      if (notfallAktiv()) return void await sendText(`🚨 NOTFALL AKTIV\nOffene Aufträge: ${offeneAuftraege().length}\nAufheben nur mit /entwarnung.`);
+      return void await sendText(
         `${notfallAktiv() ? "🚨 NOTFALL AKTIV\n" : state.paused ? "⛔ PAUSIERT\n" : ""}Modus: ${state.mode ?? "normal"}\nOffene Aufträge: ${offeneAuftraege().length}\nErinnerungen: ${reminders.length}\nWerkzeuge: ${activeTools().map((t) => t.name).join(", ")}`,
       );
     default:
-      return void sendText("Kenne ich nicht. /hilfe zeigt die Befehle.");
+      return void await sendText("Kenne ich nicht. /hilfe zeigt die Befehle.");
   }
 }
 
@@ -573,7 +624,7 @@ async function verdichtenBefehl(arg: string): Promise<void> {
     return;
   }
   if (state.paused) {
-    await sendText("⛔ Notaus aktiv. Erst /weiter.");
+    await sendText(notausHinweis());
     return;
   }
   const vorschau = arg === "vorschau";
@@ -601,7 +652,7 @@ async function verdichtenBefehl(arg: string): Promise<void> {
   }
   // Die Verdichtung ist geschrieben: der Bericht darf bei einer Telegram-Störung nicht verloren gehen → Postausgang.
   if (r.bericht) {
-    await sendeSpaeter(berichtText(r.bericht)).catch(log);
+    await sendeSpaeter(berichtText(r.bericht), { imNotfallZurueckhalten: true }).catch(log);
     return;
   }
   await sendText("Nichts zu verdichten, Sir. Das Gedächtnis ist bereits schlank.").catch(log);
@@ -635,21 +686,35 @@ export async function handleUpdate(u: Update): Promise<void> {
   let spoken = false;
   let text = (m.text ?? "").trim();
   if (m.voice) {
-    if (!config.stt) return void sendText("Sprachnachrichten kann ich erst verstehen, wenn STT_URL eingerichtet ist.");
-    if (m.voice.duration > 120) return void sendText("Das ist mir zu lang, bitte unter zwei Minuten.");
+    if (!config.stt) return void await sendText("Sprachnachrichten kann ich erst verstehen, wenn STT_URL eingerichtet ist.");
+    // Wartet eine PIN, ist die Sprachnachricht vermutlich die PIN: weder zum STT-Anbieter noch als Echo in den Chat.
+    if (pendingPin && Date.now() <= pendingPin.until) {
+      const id = pendingPin.id;
+      pendingPin = undefined;
+      await apiRobust("deleteMessage", { chat_id: owner(), message_id: m.message_id }).catch(() => undefined);
+      return void await sendText(`Die PIN bitte tippen, Sir, nie sprechen. #${id} wartet nicht mehr; /auftraege zeigt ihn wieder.`);
+    }
+    if (m.voice.duration > 120) return void await sendText("Das ist mir zu lang, bitte unter zwei Minuten.");
     await typing();
     try {
       text = await transcribe(await downloadVoice(m.voice.file_id));
     } catch (e) {
-      return void sendText(`Konnte die Sprachnachricht nicht verstehen: ${schwaerze(e instanceof Error ? e.message : String(e))}`);
+      return void await sendText(`Konnte die Sprachnachricht nicht verstehen: ${schwaerze(e instanceof Error ? e.message : String(e))}`);
     }
-    if (!text) return void sendText("Da habe ich nichts verstanden.");
+    if (!text) return void await sendText("Da habe ich nichts verstanden.");
     spoken = true;
+    // Die PIN als Sprachnachricht (ohne wartende Freigabe): kein Echo, nie an Claude
+    if (pinStimmt(text)) {
+      pendingPin = undefined;
+      await apiRobust("deleteMessage", { chat_id: owner(), message_id: m.message_id }).catch(() => undefined);
+      audit("pin_gesprochen", {});
+      return void await sendText("Die PIN bitte tippen, Sir, nie sprechen. Sprachnachricht gelöscht.");
+    }
     await sendText(`🎙 ${text}`);
   }
 
   // Abgelaufen: nur die PIN selbst wird noch abgefangen (gelöscht statt an Claude), alles andere läuft normal.
-  if (pendingPin && Date.now() > pendingPin.until && text !== config.pin) pendingPin = undefined;
+  if (pendingPin && Date.now() > pendingPin.until && !pinStimmt(text)) pendingPin = undefined;
   // /weiter bzw. /entwarnung im Notaus ist nie die PIN: die wartende Freigabe verfällt (sie muss nach dem Notaus
   // ohnehin neu kommen), der Befehl läuft normal – sonst würde er gelöscht und der Notaus bliebe stehen.
   const ersterBefehl = text.split(/\s+/)[0]?.toLowerCase() ?? "";
@@ -660,14 +725,14 @@ export async function handleUpdate(u: Update): Promise<void> {
     pendingPin = undefined;
     await apiRobust("deleteMessage", { chat_id: owner(), message_id: m.message_id }).catch(() => undefined);
     const a = getAuftrag(p.id);
-    if (!a || a.status !== "offen") return void sendText("Dieser Auftrag ist nicht mehr offen.");
-    if (Date.now() > p.until) return void sendText(`Zeit abgelaufen. /auftraege zeigt #${a.id} nochmal.`);
-    if (state.paused) return void sendText("⛔ Notaus aktiv. Erst /weiter, dann nochmal freigeben.");
-    if (inArbeit.has(a.id)) return void sendText(laeuftBereits(a));
-    if (text !== config.pin) {
+    if (!a || a.status !== "offen") return void await sendText("Dieser Auftrag ist nicht mehr offen.");
+    if (Date.now() > p.until) return void await sendText(`Zeit abgelaufen. /auftraege zeigt #${a.id} nochmal.`);
+    if (state.paused) return void await sendText(notausHinweis(NOCHMAL_FREIGEBEN));
+    if (inArbeit.has(a.id)) return void await sendText(laeuftBereits(a));
+    if (!pinStimmt(text)) {
       audit("pin_falsch", { id: a.id, tool: a.tool });
       setStatus(a, "abgelehnt", "falsche PIN");
-      return void sendText(`Falsche PIN. #${a.id} abgelehnt.`);
+      return void await sendText(`Falsche PIN. #${a.id} abgelehnt.`);
     }
     const hindernis = await execute(a);
     if (hindernis) await sendText(hindernis);
@@ -675,10 +740,10 @@ export async function handleUpdate(u: Update): Promise<void> {
   }
 
   // Die PIN ohne wartende Freigabe (etwa nach einem Neustart erneut geliefert): löschen, nie an Claude und in die Historie.
-  if (config.pin && text === config.pin) {
+  if (pinStimmt(text)) {
     await apiRobust("deleteMessage", { chat_id: owner(), message_id: m.message_id }).catch(() => undefined);
     audit("pin_ohne_freigabe", {});
-    return void sendText("Keine Freigabe wartet auf eine PIN, Sir. Nachricht gelöscht.");
+    return void await sendText("Keine Freigabe wartet auf eine PIN, Sir. Nachricht gelöscht.");
   }
 
   if (text.startsWith("/")) {
@@ -688,7 +753,7 @@ export async function handleUpdate(u: Update): Promise<void> {
     // vorgezogen wurde, darf den Notaus nicht nachträglich aufheben: der zuletzt gegebene Befehl gilt.
     // Verglichen wird die Ankunftsreihenfolge, nicht die update_id (Telegram wählt sie nach einer Woche Ruhe neu und zufällig).
     if (AUFHEBEND.has(befehl) && ankunftsnummer(u) < letzterDringend) {
-      return void sendText(`${befehl} kam vor dem Notaus an und gilt nicht, Sir. Bitte erneut senden.`);
+      return void await sendText(`${befehl} kam vor dem Notaus an und gilt nicht, Sir. Bitte erneut senden.`);
     }
     return onCommand(befehl, rest.join(" "));
   }
@@ -746,11 +811,20 @@ export async function remindersTick(): Promise<void> {
   if (erinnerungenLaufen) return;
   erinnerungenLaufen = true;
   try {
+    // Notfall: Erinnerungen (Termine, private Notizen) bleiben liegen bis /entwarnung, nichts wird gelöscht.
+    if (notfallAktiv()) return;
     const now = Date.now();
     const due = reminders.filter((r) => Date.parse(r.at) <= now);
     if (due.length === 0) return;
-    for (const r of due) await sendeSpaeter(`⏰ ${r.text}`).catch(log);
-    reminders.splice(0, reminders.length, ...reminders.filter((r) => Date.parse(r.at) > now));
+    const erledigt = new Set<(typeof reminders)[number]>();
+    for (const r of due) {
+      if (notfallAktiv()) break;
+      // client-Fehler: die Nachricht ist unbrauchbar, Wiederholen hilft nicht → als erledigt verwerfen (wie bisher)
+      const ok = await zustellen(`⏰ ${r.text}`, { imNotfallZurueckhalten: true }).catch((e: unknown) => (log(e), true));
+      if (ok) erledigt.add(r);
+    }
+    if (erledigt.size === 0) return;
+    reminders.splice(0, reminders.length, ...reminders.filter((r) => !erledigt.has(r)));
     saveReminders();
   } finally {
     erinnerungenLaufen = false;

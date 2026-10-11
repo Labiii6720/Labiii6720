@@ -85,7 +85,9 @@ export async function haStates(filter?: string): Promise<string> {
 export async function haService(entityId: string, service: string, data: Record<string, unknown> = {}): Promise<string> {
   const domain = entityId.split(".")[0];
   if (!domain || !/^[a-z_]+$/.test(domain) || !/^[a-z_]+$/.test(service)) throw new Error("Ungültige entity_id oder Dienst.");
-  await haPost(`services/${domain}/${service}`, { entity_id: entityId, ...data }, service);
+  const ziel = ["entity_id", "entities", "target", "device_id", "area_id", "floor_id", "label_id"].filter((k) => Object.hasOwn(data, k));
+  if (ziel.length) throw new Error(`Zusatzdaten dürfen kein Ziel setzen (${ziel.join(", ")}).`);
+  await haPost(`services/${domain}/${service}`, { ...data, entity_id: entityId }, service);
   return `${service} auf ${entityId} ausgeführt`;
 }
 

@@ -44,7 +44,7 @@ globalThis.fetch = (async (eingabe: string | URL | Request, init?: RequestInit) 
 }) as typeof fetch;
 after(() => { globalThis.fetch = echteFetch; });
 
-const { handleEvent, briefingSatellit } = await import("../src/events.js");
+const { handleEvent, briefingSatellit, briefingEreignis } = await import("../src/events.js");
 const { BRIEFING_VERSION } = await import("../src/brain.js");
 const { day, save, state } = await import("../src/state.js");
 const { forSpeech } = await import("../src/voice.js");
@@ -83,6 +83,8 @@ const auditZeilen = (): { event: string; [k: string]: unknown }[] => {
 
 const echteTeile = briefingSatellit.teile;
 const echterVersand = briefingSatellit.versandLaeuft;
+const echterEreignisText = briefingEreignis.text;
+const echteSprache = briefingEreignis.sprache;
 const PLATZHALTER = "Das Briefing ist gleich fertig, Sir. Eine Minute.";
 
 beforeEach(() => {
@@ -91,6 +93,8 @@ beforeEach(() => {
   state.paused = false;
   briefingSatellit.teile = echteTeile;
   briefingSatellit.versandLaeuft = echterVersand;
+  briefingEreignis.text = echterEreignisText;
+  briefingEreignis.sprache = echteSprache;
   state.notfall = undefined;
   briefingSatellit.pauseMs = 1; // Zeit injiziert: Nachlieferung ohne echte Minute
   briefingSatellit.versuche = 3;
@@ -469,6 +473,64 @@ describe("Ereignis briefing_text (Satellit im Bad)", () => {
       state.paused = false;
       state.notfall = undefined;
     }
+  });
+
+  it("Notfall während des Briefing-Baus: Ereignis briefing schickt weder Text- noch Sprachkopie", async () => {
+    const d = day();
+    d.briefingDelivered = true; // sonst ginge die Dusch-Kopie ohnehin nicht hinaus
+    save();
+    const sprache: string[] = [];
+    briefingEreignis.sprache = async (t) => { sprache.push(t); };
+    briefingEreignis.text = async () => {
+      // POST /notfall trifft ein, während das Briefing noch live gebaut wird
+      state.notfall = { aktiv: true, seit: new Date().toISOString(), grund: "Test" };
+      return BRIEFING;
+    };
+    try {
+      const a = await sende({ event: "briefing" });
+      assert.deepEqual(a.body, { ok: false, gesperrt: true });
+      assert.equal(sendungen().length, 0, "keine Dusch-Kopie");
+      assert.equal(sprache.length, 0, "keine Sprachnachricht");
+      assert.ok(auditZeilen().some((z) => z.event === "briefing_abgewiesen"));
+    } finally {
+      state.notfall = undefined;
+    }
+  });
+
+  it("Notaus während der Dusch-Kopie: Ereignis briefing schickt keine Sprachnachricht mehr", async () => {
+    const d = day();
+    d.briefingDelivered = true;
+    save();
+    const sprache: string[] = [];
+    briefingEreignis.sprache = async (t) => { sprache.push(t); };
+    const echt = globalThis.fetch;
+    globalThis.fetch = (async (...args: Parameters<typeof fetch>) => {
+      const r = await echt(...args);
+      state.paused = true; // Notaus kommt, während die Text-Kopie unterwegs ist
+      return r;
+    }) as typeof fetch;
+    try {
+      const a = await sende({ event: "briefing" });
+      assert.deepEqual(a.body, { ok: false, gesperrt: true });
+      assert.equal(sendungen().length, 1, "Text-Kopie war schon unterwegs");
+      assert.equal(sprache.length, 0, "keine Sprachnachricht");
+    } finally {
+      globalThis.fetch = echt;
+      state.paused = false;
+    }
+  });
+
+  it("Ereignis briefing ohne Sperre: Dusch-Kopie und Sprachnachricht wie bisher", async () => {
+    const d = day();
+    d.briefingDelivered = true;
+    save();
+    const sprache: string[] = [];
+    briefingEreignis.sprache = async (t) => { sprache.push(t); };
+    const a = await sende({ event: "briefing" });
+    assert.deepEqual(a.body, { ok: true });
+    assert.equal(sendungen().length, 1);
+    assert.ok(sendungen()[0].text?.startsWith("🚿 "));
+    assert.equal(sprache.length, 1);
   });
 
   it("Notaus: briefingTeile stösst keine erste Telegram-Kopie an", async () => {

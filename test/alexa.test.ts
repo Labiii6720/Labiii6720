@@ -483,6 +483,60 @@ describe("Skill-Handler (ohne Netz)", () => {
     assert.ok(mit.includes(`${PAUSE}Ein Auftrag wartet`));
   });
 
+  it("Notfall und Notaus: Launch, Cardio und Briefing nur mit Sperrhinweis, ohne Briefing, WHOOP oder Claude", async () => {
+    auftraege.push(auftrag(12, "Mail an Müller AG"));
+    saveAuftraege();
+    const pausiertVorher = state.paused;
+    const notfallVorher = state.notfall;
+    const d = day();
+    const anfragen = () => [
+      ["Launch nach dem Morgenteil", anfrage({ type: "LaunchRequest" })],
+      ["BriefingIntent", intent("BriefingIntent")],
+      ["CardioIntent", intent("CardioIntent")],
+    ] as const;
+    const pruefe = async (erwartet: RegExp, fall: string) => {
+      for (const [name, env] of anfragen()) {
+        const a = await rufe(env);
+        const s = sprache(a);
+        assert.match(s, erwartet, `${fall}: ${name}`);
+        assert.ok(s.startsWith("<speak>Briefing und Gesundheitswerte ruhen, Sir."), `${fall}: ${name}: ${s}`);
+        assert.ok(!s.includes("Zwei Termine") && !s.includes("Müller"), `${fall}: ${name}: keine Inhalte`);
+        assert.equal(a.response.shouldEndSession, true);
+      }
+    };
+    try {
+      // Notfall (notfall.ts setzt beides)
+      state.paused = true;
+      state.notfall = { aktiv: true, seit: "2026-10-11T06:00:00.000Z", grund: "Test" };
+      await pruefe(/Notfall aktiv, Sir\. Freigaben ruhen; aufheben nur mit \/entwarnung in Telegram\./, "Notfall");
+
+      // Ohne Cache würde briefingTeile live bei Claude bauen; vor dem Morgenteil liefe Launch über WHOOP
+      d.briefing = undefined;
+      d.cardioDelivered = false;
+      save();
+      await pruefe(/Notfall aktiv, Sir\./, "Notfall ohne Cache, vor dem Morgenteil");
+      assert.equal(d.cardioDelivered, false, "Cardio gilt nicht als zugestellt");
+
+      // Notfall-Merker ohne paused: trotzdem gesperrt, Notfall-Wortlaut
+      state.paused = false;
+      await pruefe(/Notfall aktiv, Sir\./, "Notfall-Merker allein");
+
+      // Nur Notaus
+      state.notfall = undefined;
+      state.paused = true;
+      await pruefe(/Notaus aktiv, Sir\. Freigaben ruhen bis \/weiter in Telegram\./, "Notaus");
+
+      await durchlaufen();
+      await durchlaufen();
+      assert.equal(aufrufe.length, 0, "kein Aufruf an Claude, WHOOP, Wetter oder Telegram");
+      assert.equal(d.briefing, undefined, "kein Livebau");
+      assert.equal(d.briefingDelivered, false);
+    } finally {
+      state.paused = pausiertVorher;
+      state.notfall = notfallVorher;
+    }
+  });
+
   it("Stop und SessionEnded", async () => {
     const stop = await rufe(intent("AMAZON.StopIntent"));
     assert.equal(sprache(stop), "<speak>Wie Sie wünschen, Sir.</speak>");

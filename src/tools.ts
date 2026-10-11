@@ -297,15 +297,50 @@ const haus: Tool[] = [
       properties: { entity_id: str("z. B. light.buero"), dienst: str("turn_on, turn_off, toggle, lock, unlock …"), daten: { type: "object", description: "Zusatzdaten, z. B. {\"brightness_pct\": 40}" } },
       required: ["entity_id", "dienst"],
     },
-    stufe: (i) => {
-      const d = haDomain(String(i.entity_id));
-      if (d === "lock" || d === "alarm_control_panel") return "sensibel";
-      return config.haAutoDomains.includes(d) ? "auto" : "extern";
-    },
-    summary: (i) => `Gerät schalten: ${i.dienst} auf ${i.entity_id}`,
-    run: (i) => haService(String(i.entity_id), String(i.dienst), i.daten ?? {}),
+    stufe: (i) => geraetStufe(i),
+    summary: (i) => `Gerät schalten: ${i.dienst} auf ${i.entity_id}${hatDaten(i.daten) ? ` mit ${JSON.stringify(i.daten).slice(0, 400)}` : ""}`,
+    run: async (i) => haService(String(i.entity_id), String(i.dienst), geraetDaten(i.daten)),
   },
 ];
+
+// Ohne Rückfrage nur die gewöhnlichen Bedien-Dienste: scene.apply oder scene.create setzen beliebige Entitäten,
+// auch Schloss und Alarm. Alles andere in einer Auto-Domain braucht deine Freigabe.
+const HA_AUTO_DIENSTE = ["turn_on", "turn_off", "toggle"];
+const HA_AUTO_DIENSTE_JE_DOMAIN: Record<string, string[]> = {
+  scene: ["turn_on"],
+  climate: [...HA_AUTO_DIENSTE, "set_temperature", "set_hvac_mode", "set_preset_mode", "set_fan_mode", "set_humidity", "set_swing_mode"],
+  fan: [...HA_AUTO_DIENSTE, "set_percentage", "increase_speed", "decrease_speed", "oscillate", "set_direction", "set_preset_mode"],
+  media_player: [...HA_AUTO_DIENSTE, "volume_set", "volume_up", "volume_down", "volume_mute", "media_play", "media_pause", "media_play_pause", "media_stop", "media_next_track", "media_previous_track", "select_source"],
+};
+/** Schlüssel, mit denen daten ein anderes Ziel als die geprüfte entity_id setzen würde. */
+const HA_ZIEL_SCHLUESSEL = ["entity_id", "entities", "target", "device_id", "area_id", "floor_id", "label_id"];
+const SICHERHEITS_ENTITAET = /\b(lock|alarm_control_panel)\.[a-z0-9_]/i;
+
+const hatDaten = (daten: unknown): boolean => daten != null && typeof daten === "object" && Object.keys(daten).length > 0;
+
+function geraetStufe(i: Input): Stufe {
+  const entity = String(i.entity_id);
+  const dienst = String(i.dienst);
+  const d = haDomain(entity);
+  let daten: string;
+  try { daten = JSON.stringify(i.daten ?? {}); } catch { return "sensibel"; }
+  // Schloss oder Alarm irgendwo im Aufruf, auch versteckt in daten: immer mit PIN
+  if (d === "lock" || d === "alarm_control_panel" || SICHERHEITS_ENTITAET.test(entity) || SICHERHEITS_ENTITAET.test(daten)) return "sensibel";
+  if (!config.haAutoDomains.includes(d) || !/^[a-z_]+\.[a-z0-9_]+$/.test(entity)) return "extern";
+  if (!(HA_AUTO_DIENSTE_JE_DOMAIN[d] ?? HA_AUTO_DIENSTE).includes(dienst)) return "extern";
+  if (i.daten != null && (typeof i.daten !== "object" || Array.isArray(i.daten))) return "extern";
+  if (hatDaten(i.daten) && HA_ZIEL_SCHLUESSEL.some((k) => Object.hasOwn(i.daten, k))) return "extern";
+  return "auto";
+}
+
+/** Freigegeben ist genau die entity_id: daten darf kein anderes Ziel setzen. */
+function geraetDaten(daten: unknown): Record<string, unknown> {
+  if (daten == null) return {};
+  if (typeof daten !== "object" || Array.isArray(daten)) throw new Error("daten muss ein Objekt sein, Sir.");
+  const ziel = HA_ZIEL_SCHLUESSEL.filter((k) => Object.hasOwn(daten, k));
+  if (ziel.length) throw new Error(`daten darf kein Ziel setzen (${ziel.join(", ")}); das Gerät gehört in entity_id. Nichts geschaltet, Sir.`);
+  return daten as Record<string, unknown>;
+}
 
 const web: Tool[] = [
   {
@@ -595,7 +630,9 @@ const werkstatt: Tool[] = [
       // Die Entscheidung G-Code/STL gilt ab hier: run() führt aus, was freigegeben wurde, nicht was später gerade da ist
       if (/\.gcode$/i.test(p)) return `3D-Druck: ${i.pfad} → ${gcodeFreigabe(i, p)}${i.starten ? " (sofort starten)" : ""}`;
       i.freigegeben_als = hasSlicer() ? "gcode" : "stl";
-      return `3D-Druck: ${i.pfad} → ${druckArt(p, i.freigegeben_als)}${i.starten ? " (sofort starten)" : ""}`;
+      // Eine STL startet OctoPrint nie (werkstatt.ts anDrucker): kein Druckstart freigeben, der nicht kommt
+      const start = !i.starten ? "" : i.freigegeben_als === "stl" ? " (nur hochladen, eine STL startet OctoPrint nicht)" : " (sofort starten)";
+      return `3D-Druck: ${i.pfad} → ${druckArt(p, i.freigegeben_als)}${start}`;
     },
     run: async (i) => {
       const p = String(i.pfad);
