@@ -35,6 +35,8 @@ export interface DayState {
     v?: number;
   };
   briefingDelivered?: boolean;
+  /** Briefing am Satelliten (Bad) ohne Telegram-Kopie vorgelesen: morningTick baut nicht mehr neu */
+  briefingVorgelesen?: boolean;
 }
 
 export type Mode = "normal" | "fokus" | "nacht";

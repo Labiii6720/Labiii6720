@@ -20,7 +20,7 @@ Drei Etappen in einem Dienst:
 
 1. **05:30** klingelt der normale Alexa-Wecker. Sobald du ihn ausschaltest, startet eine Routine den Skill «Butler Jarvis». Er liest deine WHOOP-Recovery und sagt dir dein Cardio: grün = Intervalle, gelb = lockeres Zone 2, rot = Spaziergang oder Pause.
 2. **Im Hintergrund** holt der Pi zwischen 05:00 und 10:00 alle 5 Minuten Wetter, Recovery und Workouts. Ab 05:45 bereitet er das Tagesbriefing vor. Hat WHOOP dein Training erkannt, baut er es mit einer kurzen Trainingsbilanz neu.
-3. **Nach dem Duschen** sagst du «Alexa, ich bin bereit». Jarvis liest dir deine Termine aus Google und Outlook vor, priorisiert und mit Hinweis auf Überschneidungen. Optional kommt eine Textkopie auf Telegram.
+3. **Nach dem Duschen** sagst du «Alexa, ich bin bereit». Jarvis liest dir deine Termine aus Google und Outlook vor, priorisiert und mit Hinweis auf Überschneidungen. Optional kommt eine Textkopie auf Telegram. Steht ein Satellit im Bad, liest Jarvis es dir auch ohne Frage dort vor (Abschnitt 20).
 
 ```
 Echo ─ Routine ─> Alexa-Cloud ─ HTTPS ─> Cloudflare ─ Tunnel ─> Pi: Jarvis (127.0.0.1:3000)
@@ -295,11 +295,11 @@ Was das Relais schaltet, bleibt dir überlassen. Fang mit 12 V oder 24 V an. Fü
 ### Flashen
 
 1. Auf dem PC `pip install esphome` (oder in Home Assistant das Add-on «ESPHome Device Builder»).
-2. `esphome/secrets.yaml.example` nach `secrets.yaml` kopieren und ausfüllen. API-Schlüssel erzeugen mit `openssl rand -base64 32`.
-3. Board per USB anstecken, dann im Ordner `esphome`: `esphome run jarvis-node-1.yaml`. Ab dem zweiten Mal geht das per WLAN (OTA, verschlüsselt mit dem API-Schlüssel).
+2. `esphome/secrets.yaml.example` nach `secrets.yaml` kopieren und ausfüllen. API-Schlüssel erzeugen mit `openssl rand -base64 32`, das OTA-Passwort (`ota_password`) mit `openssl rand -hex 16`.
+3. Board per USB anstecken, dann im Ordner `esphome`: `esphome run jarvis-node-1.yaml`. Ab dem zweiten Mal geht das per WLAN (OTA, geschützt mit `ota_password`).
 4. Im Log tauchen der I2C-Scan und die ersten Messwerte auf.
 
-Die Konfiguration ist mit ESPHome 2026.9 geprüft.
+Vor dem Flashen prüft `esphome config jarvis-node-1.yaml` die Datei ohne Board. Seit 0.20 läuft sie damit fehlerfrei durch (ESPHome 2026.6.5); vorher scheiterte sie an `ota: encryption: {}`, das es nicht gibt. Hast du eine ältere Kopie, ergänze `ota_password` in deiner `secrets.yaml`.
 
 ### In Home Assistant
 
@@ -311,10 +311,12 @@ Jarvis braucht nur `HA_URL` und `HA_TOKEN` aus Abschnitt 8. Danach: «Wie warm i
 
 ### Ereignisse zurück an Jarvis
 
-Home Assistant kann Jarvis anstossen. Dafür in `.env` ein Geheimnis setzen (`JARVIS_EVENT_TOKEN`, z. B. `openssl rand -hex 24`) und `LISTEN_HOST=0.0.0.0`, damit der Pi im Heimnetz erreichbar ist. Dann `homeassistant/jarvis.yaml` als Paket einbinden (steht oben in der Datei) und `JARVIS-IP` ersetzen. Das Paket bringt zwei Automationen mit:
+Home Assistant kann Jarvis anstossen. Dafür in `.env` ein Geheimnis setzen (`JARVIS_EVENT_TOKEN`, z. B. `openssl rand -hex 24`) und `LISTEN_HOST=0.0.0.0`, damit der Pi im Heimnetz erreichbar ist. Dann `homeassistant/jarvis.yaml` als Paket einbinden (steht oben in der Datei) und `JARVIS-IP` ersetzen. Das Paket bringt diese Automationen mit:
 
-- Dusche vorbei (05:00 bis 10:00) → Jarvis schickt das Tagesbriefing per Telegram, als Sprachnachricht falls TTS eingerichtet ist.
+- Dusche vorbei (05:00 bis 10:00) → mit Satellit im Bad liest Jarvis das Tagesbriefing dort vor, sonst kommt es per Telegram, als Sprachnachricht falls TTS eingerichtet ist (Ablauf in Abschnitt 20, «Zweiter Satellit im Bad»).
 - Taster lange gedrückt → Jarvis meldet Raumklima und Relais.
+- Person im Raum (Frigate über Home Assistant) → Kamera-Meldung an Jarvis (Abschnitt 12). Ohne Frigate löst sie nie aus.
+- Satelliten: 22:00 Nachtmodus an, 06:30 aus, 06:35 Lautstärke 60 («Satellit Nachtmodus», «Lautstärke tagsüber 60», Abschnitt 20). Sie schalten fest `switch.jarvis_satellit_nachtmodus`, `switch.jarvis_satellit_bad_nachtmodus`, `number.jarvis_satellit_lautstarke` und `number.jarvis_satellit_bad_lautstarke`. Ohne Satelliten diese beiden Automationen aus dem Paket löschen, mit nur einem die Entitäten des fehlenden streichen; sonst meldet Home Assistant jeden Abend und Morgen fehlende Entitäten im Log.
 
 Eigene Ereignisse: `{"event": "frage", "text": "…"}` lässt Jarvis mit allen Werkzeugen arbeiten, `{"event": "nachricht", "text": "…"}` schickt einen Text 1:1. So wird aus jedem Sensor ein Auslöser für Jarvis.
 
@@ -596,7 +598,7 @@ Jarvis ist auf Sparsamkeit gebaut, ohne an Qualität zu verlieren: fester System
 
 Der zweite Bausatz, `esphome/jarvis-satellit.yaml`, ist ein kleiner Sprachlautsprecher wie ein Echo, nur mit deinem Jarvis dahinter. Das Wakeword «Hey Jarvis» läuft lokal auf dem Chip; sagst du es, hört der Ring auf zu pulsieren, du sprichst, und Jarvis antwortet aus dem Lautsprecher.
 
-Hardware (rund 20 bis 30 Franken): ESP32-S3-DevKitC-1 (mit PSRAM), ein I2S-Mikrofon INMP441, ein I2S-Verstärker MAX98357A mit kleinem Lautsprecher, eine WS2812-LED. Verdrahtung steht oben in der YAML.
+Hardware (rund 20 bis 30 Franken): ESP32-S3-DevKitC-1 (mit PSRAM), ein I2S-Mikrofon INMP441, ein I2S-Verstärker MAX98357A mit kleinem Lautsprecher, eine WS2812-LED. Verdrahtung steht oben in `esphome/jarvis-satellit-basis.yaml` (gilt für beide Satelliten).
 
 So läuft die Sprache zusammen:
 
@@ -607,11 +609,45 @@ So läuft die Sprache zusammen:
 
 Damit spricht der Raum mit demselben Jarvis wie Telegram, Alexa und die Zentrale: dasselbe Gespräch, dieselben Werkzeuge, dieselben Freigaben. Die Spracherkennung und die Stimme kannst du über Piper/Whisper komplett lokal betreiben; dann verlässt nur noch die eigentliche Frage das Haus Richtung Claude.
 
+Seit 0.20 besteht der Satellit aus drei Dateien: `jarvis-satellit-basis.yaml` enthält alles Gemeinsame (Pins, Wakeword, Sprachassistent, LED, Entitäten), `jarvis-satellit.yaml` und `jarvis-satellit-bad.yaml` setzen nur Gerätename und Anzeigename und binden die Basis über `packages:` ein. Änderst du etwas, dann in der Basis; beide Satelliten bekommen es beim nächsten Flashen. Gerätename und Entitätsnamen des ersten Satelliten (`Ring`, `Verbunden`, `Neustart`) sind gleich geblieben, deine Automationen laufen weiter. Neu in `secrets.yaml` ist `ota_password` (siehe Node 1).
+
+Prüfen ohne Board, im Ordner `esphome`: `esphome config jarvis-satellit.yaml` und `esphome config jarvis-satellit-bad.yaml`. Beide laufen mit ESPHome 2026.6.5 fehlerfrei durch. Ältere Versionen kennen den Media-Player `platform: speaker` womöglich noch nicht; dann zuerst ESPHome aktualisieren.
+
+**Lautstärke und Nachtmodus.** Jeder Satellit bringt drei neue Entitäten mit, die du in Home Assistant schaltest oder in Automationen nutzt:
+
+| Entität (erster Satellit) | Was sie tut |
+|---|---|
+| `number.jarvis_satellit_lautstarke` | «Lautstärke», 0 bis 100 in Fünferschritten, Start 60. Gilt für Antworten, Ansagen und Töne und bleibt über einen Neustart erhalten. |
+| `switch.jarvis_satellit_nachtmodus` | «Nachtmodus»: Lautstärke 30 und LED auf 15 % gedimmt. Beim Ausschalten kommt die vorherige Lautstärke zurück. |
+| `switch.jarvis_satellit_ton_feedback` | «Ton-Feedback», Standard an (siehe unten). |
+
+Home Assistant macht aus «Lautstärke» die ID `…_lautstarke` (ohne ä); beim Bad-Satelliten heissen sie `…_jarvis_satellit_bad_…`. Die genauen IDs siehst du unter *Einstellungen → Geräte*. Das Paket `homeassistant/jarvis.yaml` bringt zwei Beispiele mit: «Satellit Nachtmodus» schaltet beide Satelliten um 22:00 in den Nachtmodus und um 06:30 zurück, «Lautstärke tagsüber 60» setzt um 06:35 beide auf 60. Gesetzt wird die Lautstärke über `media_player.volume_set` am internen Media-Player; für ESPHome-Versionen ohne ihn steht die Variante `speaker.volume_set` als Kommentar in der Basis.
+
+**Ton-Feedback.** Hört der Satellit «Hey Jarvis», spielt er zuerst einen kurzen aufsteigenden Doppelton (880 → 1320 Hz, 120 ms) und hört erst danach zu, damit der Ton nicht in der Spracherkennung landet. Bei einem Fehler kommt ein tieferer, absteigender Doppelton (392 → 262 Hz) und der Ring leuchtet kurz rot. Mit dem Schalter «Ton-Feedback» stellst du beides ab. Die Töne liegen als Rohdaten (16 kHz, mono, 16 bit, zusammen 7680 Bytes) im Flash des Chips, es braucht dafür weder Netz noch Jarvis. Erzeugt werden sie vom Skript `esphome/tools/ton.mjs` (Node, ohne Abhängigkeiten): `node esphome/tools/ton.mjs` zeigt das YAML, `node esphome/tools/ton.mjs --schreiben` schreibt `esphome/ton.yaml` neu. Die Datei nicht von Hand ändern; `npm test` prüft, dass sie zum Skript passt.
+
+### Zweiter Satellit im Bad: Briefing nach der Dusche
+
+Gleiche Hardware und Pins wie der erste, im Ordner `esphome` geflasht mit `esphome run jarvis-satellit-bad.yaml`. In Home Assistant heisst er «Jarvis Satellit Bad»; denselben Sprachassistenten (Konversationsagent *Jarvis*) zuweisen.
+
+So läuft der Morgen damit:
+
+1. Node 1 merkt an der Luftfeuchte, dass die Dusche vorbei ist (fünf Minuten unter der Schwelle), zwischen 05:00 und 10:00.
+2. Ist `binary_sensor.jarvis_satellit_bad_verbunden` an und die Assist-Satellit-Entität des Geräts «Jarvis Satellit Bad» verfügbar (die Automation sucht sie über das Gerät des Sensors «Verbunden»; ESPHome nennt sie je nach Sprache der Instanz z. B. `assist_satellite.jarvis_satellit_bad_assist_satellite`), holt Home Assistant mit `rest_command.jarvis_briefing_text` das Briefing als Text (`{"event": "briefing_text"}` an `/events`).
+3. Jarvis antwortet sofort mit `{"ok": true, "bereit": true, "text": "…"}`: das vorbereitete Tagesbriefing samt Hinweis auf offene Freigaben, für die Stimme aufbereitet. Zeitbudget wie bei `frage_sync` (Standard 25 s, `budget` in Millisekunden), das `rest_command` wartet 30 s. Ist das Briefing noch nicht fertig, antwortet Jarvis `{"ok": false, "bereit": false, "text": "", "nachlieferung": "telegram"}` und liefert es innerhalb von 10 Minuten per Telegram nach (Versuch jede Minute); Home Assistant liest dann nichts vor und schickt auch kein zweites Briefing. Klappt das nicht, meldet Jarvis per Telegram, dass das Briefing heute nicht zustande gekommen ist. Im Notaus oder Notfall weist Jarvis ab: `{"ok": false, "bereit": false, "text": "", "gesperrt": true}`, ohne Briefing, ohne Claude-Aufruf, ohne Telegram-Kopie und ohne Nachlieferung. Home Assistant weicht auf `briefing` aus, das ebenfalls nichts schickt.
+4. Home Assistant spricht den Text mit `assist_satellite.announce` aus dem Satelliten im Bad, in der Stimme deines Sprachassistenten.
+5. Ist der Satellit nicht verbunden, oder antwortet Jarvis nicht bzw. ohne Text und ohne Nachlieferung, läuft wie bisher das Ereignis `briefing`: Tagesbriefing per Telegram. Im Notaus oder Notfall antwortet `briefing` mit `{"ok": false, "gesperrt": true}` und schickt nichts.
+
+Ohne Angabe geht beim Vorlesen nichts an Telegram, und das Briefing gilt nicht als zugestellt (ob die Ansage wirklich lief, weiss nur Home Assistant). Die Textkopie kommt dann beim nächsten Abruf, etwa wenn du Alexa nach deinem Tag fragst. Willst du sie gleich, ergänze im `rest_command` `"kopie": "telegram"`: Beim ersten Mal ist das die übliche Kopie, ist das Briefing schon zugestellt, kommt es nochmals mit 🚿 davor. Jeder Abruf steht als `briefing_satellit` in `data/audit.log`.
+
+Das Briefing enthält Termine und Gesundheitswerte. `briefing_text` gibt es deshalb nur aus dem Heimnetz und mit `JARVIS_EVENT_TOKEN`: Über den Cloudflare Tunnel antwortet Jarvis mit 404, auch wenn `EVENTS_VIA_TUNNEL=on` gesetzt ist.
+
+`assist_satellite.announce` braucht ein aktuelles Home Assistant, nach meinem Stand ab 2024.12. Ich bin nicht sicher; bitte in der HA-Doku zur Integration «Assist Satellite» prüfen. Die Antwort des `rest_command` als `response_variable` gibt es seit 2024.1. Stimmt die ID von `binary_sensor.jarvis_satellit_bad_verbunden` nicht oder hat das Gerät keine Assist-Satellit-Entität, greift einfach der Telegram-Weg; prüf die IDs unter *Einstellungen → Geräte → Jarvis Satellit Bad*.
+
 ## Tests
 
 `npm test` fährt die Tests in `test/` mit Nodes eingebautem Testläufer (`node --test`, dank tsx direkt aus TypeScript). Sie brauchen weder `.env` noch Netz: echte Dienste werden nie angesprochen, Aufrufe nach aussen bekommen Attrappen (`globalThis.fetch` wird ersetzt und zählt die Aufrufe), geschrieben wird nur in Temp-Verzeichnisse, die am Ende wieder verschwinden.
 
-Heute abgedeckt: die `.env`-Verarbeitung des Assistenten (Roundtrip gegen Nodes eigenen Parser `util.parseEnv`, Kommentare und Reihenfolge, Rechte, `.env.bak`), alle Prüffunktionen, das Schema gegen `.env.example` (jeder Schlüssel genau einmal, in beide Richtungen), der Assistent End-zu-End mit gepipten Antworten, `npm run check -- --nur`, und die Robustheit: Fehlereinordnung, Backoff und Watchdog (`robust.ts`), Telegram-Wiederholung und Postausgang, Claude-Anläufe, Home-Assistant-Lesen/Schalten, Nachholfenster und Zeitpläne, Notaus mitten in einer Anfrage (Zeit und Zufall werden injiziert, kein Test wartet echte Sekunden), und die Gedächtnis-Verdichtung: Umstellung alter Profile, Prompt mit Datum und Chronik, Eingabe-Grenzen, Prüfung jedes Verstosses, Anwenden ohne Verlust (Archiv), Ablauf mit Attrappe statt Modell und der nächtliche Lauf, und die Finanzen: Übersicht mit zwei Währungen und Monaten über die Jahresgrenze, Fristgrenzen, Zahldatum beim Abhaken, Wochenbericht (Schweizer Format, höchstens 25 Zeilen) und der wöchentliche Lauf, und Alexa: Nachtfenster (über Mitternacht, Grenzen, `off`, Nachtmodus), SSML-Escaping samt eingeschleuster Tags, der Freigaben-Hinweis (0 bis 5 Aufträge, Kürzung, Anrede), das Interaction Model und die Skill-Handler ohne Netz – inklusive der Prüfung, dass per Stimme nichts freigegeben wird.
+Heute abgedeckt: die `.env`-Verarbeitung des Assistenten (Roundtrip gegen Nodes eigenen Parser `util.parseEnv`, Kommentare und Reihenfolge, Rechte, `.env.bak`), alle Prüffunktionen, das Schema gegen `.env.example` (jeder Schlüssel genau einmal, in beide Richtungen), der Assistent End-zu-End mit gepipten Antworten, `npm run check -- --nur`, und die Robustheit: Fehlereinordnung, Backoff und Watchdog (`robust.ts`), Telegram-Wiederholung und Postausgang, Claude-Anläufe, Home-Assistant-Lesen/Schalten, Nachholfenster und Zeitpläne, Notaus mitten in einer Anfrage (Zeit und Zufall werden injiziert, kein Test wartet echte Sekunden), und die Gedächtnis-Verdichtung: Umstellung alter Profile, Prompt mit Datum und Chronik, Eingabe-Grenzen, Prüfung jedes Verstosses, Anwenden ohne Verlust (Archiv), Ablauf mit Attrappe statt Modell und der nächtliche Lauf, und die Finanzen: Übersicht mit zwei Währungen und Monaten über die Jahresgrenze, Fristgrenzen, Zahldatum beim Abhaken, Wochenbericht (Schweizer Format, höchstens 25 Zeilen) und der wöchentliche Lauf, und Alexa: Nachtfenster (über Mitternacht, Grenzen, `off`, Nachtmodus), SSML-Escaping samt eingeschleuster Tags, der Freigaben-Hinweis (0 bis 5 Aufträge, Kürzung, Anrede), das Interaction Model und die Skill-Handler ohne Netz – inklusive der Prüfung, dass per Stimme nichts freigegeben wird, und der Satellit: `briefing_text` (Text ohne Telegram, Kopie mit `kopie: telegram`, 401 ohne Token, 404 über den Tunnel), die Töne aus `ton.mjs` (Länge, Wertebereich, `ton.yaml` aktuell), die Satelliten-YAML (Pakete, Entitäten, keine Geheimnisse) und das Home-Assistant-Paket.
 
 Vor und nach jeder Änderung am Code: `npm run typecheck` muss sauber und `npm test` grün sein. Neue Anbindungen bekommen Tests mit Attrappen, nie mit echten Zugängen.
 
@@ -693,6 +729,9 @@ In dieser Reihenfolge, alles dauert zusammen keine zehn Minuten:
 | Alexa kennt «offene Aufträge» nicht oder spricht nachts nicht leiser | Interaction Model aus `alexa/` neu einspielen und bauen (FreigabenIntent); `ALEXA_NACHT` prüfen (`npm run check -- --nur Alexa-Skill`) |
 | Sprachnachricht wird nicht verstanden | `STT_URL`/`STT_KEY` prüfen; `journalctl -u jarvis -f` zeigt die Antwort des Servers |
 | Node 1 taucht nicht in Home Assistant auf | WLAN-Daten in `secrets.yaml` prüfen; der Notfall-Hotspot «Jarvis Node 1 Setup» erscheint, wenn das WLAN nicht erreichbar ist |
+| Satellit im Bad liest das Briefing nicht vor, es kommt per Telegram | Fallback hat gegriffen: `binary_sensor.jarvis_satellit_bad_verbunden` und die Assist-Satellit-Entität (`assist_satellite.…_assist_satellite`) am selben Gerät unter *Einstellungen → Geräte* prüfen, im Automations-Ablauf die Antwort von `jarvis_briefing_text` ansehen; `data/audit.log` zeigt `briefing_satellit` |
+| Satellit piept nicht beim Wakeword | Schalter «Ton-Feedback» an? Lautstärke über 0 und Nachtmodus bedacht? |
+| `esphome config` meldet einen Fehler bei `ota` | `ota_password` fehlt in `secrets.yaml` (seit 0.20, siehe `secrets.yaml.example`) |
 | Sensor liefert `nan` | I2C-Adresse (0x76/0x77) und SDA/SCL vertauscht? Log zeigt den Scan |
 | Home Assistant erreicht Jarvis nicht | `LISTEN_HOST=0.0.0.0`, Token in beiden Dateien gleich, `curl http://JARVIS-IP:3000/health` vom HA-Gerät aus |
 | Konsole: «LADE MODELL…» bleibt stehen | Internet für den ersten Aufruf nötig; Konsole in Chrome öffnen; Seite über http://JARVIS-IP oder localhost, nicht per file:// |

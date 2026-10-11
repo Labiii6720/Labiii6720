@@ -2,6 +2,13 @@
 
 Kurz und nur das Wichtigste. Details stehen im README.
 
+## 0.20
+- Satellit: Entitäten «Lautstärke» (0–100, gespeichert, Start 60), «Nachtmodus» (Lautstärke 30, LED gedimmt, vorherige Lautstärke kommt zurück) und «Ton-Feedback». Kurzer Doppelton beim Wakeword vor dem Zuhören, tieferer Ton bei Fehlern; die Töne erzeugt `esphome/tools/ton.mjs` als `esphome/ton.yaml` (7680 Bytes im Flash).
+- Zweiter Satellit im Bad (`jarvis-satellit-bad.yaml`); das Gemeinsame steht in `jarvis-satellit-basis.yaml`, beide Satelliten binden es als Paket ein. Entitätsnamen des ersten bleiben. Antworten und Ansagen laufen über einen internen Media-Player.
+- Briefing nach der Dusche: neues Ereignis `briefing_text` liefert das Briefing synchron als Vorlesetext ohne Telegram (`kopie: telegram` optional, nur Heimnetz, Audit `briefing_satellit`). Home Assistant sagt es per `assist_satellite.announce` im Bad an, ohne Satellit wie bisher per Telegram. Ist das Briefing noch nicht fertig, sagt der Satellit nichts an und Jarvis liefert es innerhalb von 10 Minuten per Telegram nach, sonst mit kurzem Hinweis; Notaus und Notfall stoppen die Nachlieferung, das Ereignis `briefing` und die erste Telegram-Kopie. Beispiel-Automationen für Nachtmodus und Lautstärke.
+- `briefing_text` weist im Notaus/Notfall ab (keine Briefing-Daten, kein Claude-Aufruf).
+- ESPHome: `esphome config` lief bei Node 1 und Satellit nicht durch; `ota` nutzt jetzt `ota_password` (neu in `secrets.yaml`), LED mit `rgb_order`.
+
 ## 0.19
 - Alexa liest offene Freigaben vor: am Ende des Tagesbriefings nach kurzer Pause (höchstens drei Aufträge mit Nummer und gekürzter Zusammenfassung, Rest gezählt, immer frisch statt aus dem Cache) und direkt mit «frag Butler Jarvis nach offenen Aufträgen» (neuer `FreigabenIntent`, Interaction Model neu einspielen). Telegram-Kopie und Sprachnachricht enthalten den Hinweis als Klartext.
 - Per Stimme wird nie etwas freigegeben: Sätze wie «gib Auftrag 12 frei» gehen nicht an Claude, Antwort «Freigaben nehme ich nur per Telegram oder Dashboard entgegen» (Dashboard nur genannt, wenn es mit `JARVIS_EVENT_TOKEN` wirklich läuft). Das Briefing-Modell zählt die Freigaben nicht mehr selbst.

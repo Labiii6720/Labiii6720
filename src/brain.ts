@@ -282,6 +282,8 @@ export interface BriefingTeile {
   text: string;
   /** leer, wenn nichts auf Freigabe wartet */
   hinweis: string;
+  /** false: nur der Platzhalter «gleich fertig», noch kein echtes Briefing */
+  bereit?: boolean;
 }
 
 /** Klartext für Telegram und TTS: Briefing, Absatz, Hinweis (ohne SSML). */
@@ -292,16 +294,29 @@ export function briefingVerbinden(t: BriefingTeile): string {
 /**
  * Tagesbriefing aus dem Cache, sonst kurz live versuchen; der Freigaben-Hinweis wird bei jedem Aufruf frisch
  * gebildet (das Briefing kann bis zu 45 Minuten alt sein, die Warteschlange nicht).
+ * `telegramKopie: false` (Satellit im Bad): nur vorlesen, keine Telegram-Kopie und kein «zugestellt»-Merker –
+ * ob die Ansage wirklich lief, weiss nur Home Assistant; der nächste Abruf holt die Kopie nach.
  */
-export async function briefingTeile(): Promise<BriefingTeile> {
+export async function briefingTeile(opts: { telegramKopie?: boolean } = {}): Promise<BriefingTeile> {
+  const { telegramKopie = true } = opts;
   const d = day();
   let text = d.briefing && !briefingAltbestand(d.briefing) ? d.briefing.text : undefined;
+  const ausCache = Boolean(text);
   if (!text) {
     text = await withTimeout(buildBriefing(), 6000).catch(() => undefined);
-    if (!text) return { text: `Das Briefing ist gleich fertig, ${config.anrede}. Eine Minute.`, hinweis: aktuellerFreigabenHinweis() };
+    if (!text) return { text: `Das Briefing ist gleich fertig, ${config.anrede}. Eine Minute.`, hinweis: aktuellerFreigabenHinweis(), bereit: false };
   }
   const hinweis = aktuellerFreigabenHinweis();
-  if (!d.briefingDelivered && !briefingVersand) {
+  // Ein echtes Briefing ging an den Satelliten: morningTick baut es danach nicht mehr alle 45 Minuten neu (Kosten).
+  // Nur aus dem Cache: Der Livebau (bis 6 s) kann das Zeitbudget des Aufrufers überdauern; dann hat Home Assistant
+  // längst «nicht bereit» erhalten und nichts vorgelesen – den Merker setzt in dem Fall nur der Aufrufer nach Erfolg.
+  if (!telegramKopie && ausCache && !d.briefingVorgelesen) {
+    d.briefingVorgelesen = true;
+    save();
+  }
+  // Im Notaus/Notfall keine Kopie anstossen: mitWiederholung könnte sie sonst noch rund eine Minute später zustellen
+  const gesperrt = Boolean(state.paused) || Boolean(state.notfall?.aktiv);
+  if (telegramKopie && !gesperrt && !d.briefingDelivered && !briefingVersand) {
     // Flag erst nach erfolgreichem Senden: ein endgültig gescheiterter Versand wird beim nächsten Aufruf nachgeholt.
     // Der Merker verhindert einen zweiten Versand, solange der erste noch wiederholt (bis rund eine Minute).
     briefingVersand = sendTelegram(briefingVerbinden({ text, hinweis }))
@@ -309,7 +324,7 @@ export async function briefingTeile(): Promise<BriefingTeile> {
       .catch(log)
       .finally(() => { briefingVersand = undefined; });
   }
-  return { text, hinweis };
+  return { text, hinweis, bereit: true };
 }
 
 /** Text fürs Tagesbriefing (Telegram, TTS): Briefing plus Freigaben-Hinweis, ohne SSML. */
@@ -319,6 +334,23 @@ export async function briefingText(): Promise<string> {
 
 /** Laufender Telegram-Versand des Briefings (nur einer gleichzeitig). */
 let briefingVersand: Promise<void> | undefined;
+/** Laufender Telegram-Versand des Briefings, falls einer läuft (events.ts wartet im Nachlauf darauf). */
+export const briefingVersandLaeuft = (): Promise<void> | undefined => briefingVersand;
+
+/**
+ * Soll morningTick das Briefing neu bauen? Nicht mehr, sobald es zugestellt oder am Satelliten vorgelesen wurde;
+ * sonst wenn es fehlt, aus älterer Version stammt, ein neues Training dazukam oder es älter als 45 Minuten ist.
+ */
+export function briefingNeuBauen(d: DayState, jetzt = Date.now()): boolean {
+  if (d.briefingDelivered || d.briefingVorgelesen) return false;
+  const b = d.briefing;
+  return Boolean(
+    !b ||
+    briefingAltbestand(b) || // vor dem Update gebaut, zählt die Freigaben noch selbst
+    (d.workout && b.workoutId !== d.workout.id) || // neues Training → Trainingsbilanz ergänzen
+    jetzt - Date.parse(b.builtAt) > 45 * 60_000, // Kalender frisch halten
+  );
+}
 
 /** Morgenteil erledigt? Dann führt «Alexa, öffne Jarvis» direkt zum Tagesbriefing. */
 export function morningDone(d: DayState = day()): boolean {
@@ -348,12 +380,6 @@ export async function morningTick(): Promise<void> {
     save();
   }
 
-  if (now < hhmm(config.briefingPrepFrom) || d.briefingDelivered) return;
-  const b = d.briefing;
-  const stale =
-    !b ||
-    briefingAltbestand(b) || // vor dem Update gebaut, zählt die Freigaben noch selbst
-    (d.workout && b.workoutId !== d.workout.id) || // neues Training → Trainingsbilanz ergänzen
-    Date.now() - Date.parse(b.builtAt) > 45 * 60_000; // Kalender frisch halten
-  if (stale) await buildBriefing().catch((e) => quellenFehler("claude", e));
+  if (now < hhmm(config.briefingPrepFrom)) return;
+  if (briefingNeuBauen(d)) await buildBriefing().catch((e) => quellenFehler("claude", e));
 }

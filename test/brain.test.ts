@@ -31,7 +31,7 @@ const tg = (daten: unknown, status = 200) =>
 const sources = await import("../src/sources.js");
 sources._testOptionen.warten = async () => {};
 sources._testOptionen.zufall = () => 0.5;
-const { briefingText, briefingAltbestand, BRIEFING_VERSION, aktuellerFreigabenHinweis, dashboardErreichbar, freigabenHinweis, kurzFuerStimme, HINWEIS_MAX_ZEICHEN } = await import("../src/brain.js");
+const { briefingText, briefingTeile, briefingNeuBauen, briefingAltbestand, BRIEFING_VERSION, aktuellerFreigabenHinweis, dashboardErreichbar, freigabenHinweis, kurzFuerStimme, HINWEIS_MAX_ZEICHEN } = await import("../src/brain.js");
 const { config } = await import("../src/config.js");
 const { day, save, state } = await import("../src/state.js");
 const { auftraege } = await import("../src/queue.js");
@@ -48,6 +48,7 @@ beforeEach(() => {
   const d = day();
   d.briefing = { text: "Guten Morgen, Sir. Zwei Termine, kein Regen.", builtAt: new Date().toISOString() };
   d.briefingDelivered = false;
+  delete (d as { briefingVorgelesen?: boolean }).briefingVorgelesen;
   save();
 });
 
@@ -99,6 +100,116 @@ describe("briefingText – Telegram-Versand", () => {
     } finally {
       console.error = err;
     }
+  });
+});
+
+// =====================================================================
+// Steht vor den Freigaben-Tests: deren Notaus-Test lässt einen Telegram-Versand hängen, der weitere Kopien sperrt
+describe("Satellit ohne Telegram-Kopie – kein Neubau alle 45 Minuten", () => {
+  const vorgelesen = () => (day() as { briefingVorgelesen?: boolean }).briefingVorgelesen;
+
+  it("briefingNeuBauen: veraltet ohne Ansage, nach der Ansage am Satelliten nicht mehr", async () => {
+    const d = day();
+    const spaeter = Date.parse(d.briefing!.builtAt) + 50 * 60_000;
+    d.briefing!.v = BRIEFING_VERSION;
+    assert.equal(briefingNeuBauen(d, spaeter), true, "älter als 45 Minuten → neu bauen");
+
+    const t = await briefingTeile({ telegramKopie: false });
+    assert.equal(t.text, "Guten Morgen, Sir. Zwei Termine, kein Regen.");
+    assert.equal(t.bereit, true);
+    await durchlaufen();
+    assert.equal(sendungen().length, 0, "keine Telegram-Kopie");
+    assert.equal(vorgelesen(), true);
+    assert.equal(day().briefingDelivered, false, "Kopie bleibt nachholbar");
+    // Über den ganzen Morgen (bis 10:00) kein weiterer Claude-Aufruf
+    for (let min = 50; min <= 240; min += 45) {
+      assert.equal(briefingNeuBauen(day(), Date.parse(d.briefing!.builtAt) + min * 60_000), false, `nach ${min} min`);
+    }
+    // Neues Training ändert daran nichts (wie nach der Zustellung)
+    d.workout = { id: "w-neu", sport: "Laufen", start: d.briefing!.builtAt, end: d.briefing!.builtAt } as typeof d.workout;
+    assert.equal(briefingNeuBauen(d, spaeter), false);
+    delete d.workout;
+
+    // Der nächste Abruf mit Kopie (Alexa/briefing) holt die Telegram-Kopie weiterhin nach
+    await briefingText();
+    await durchlaufen();
+    assert.equal(sendungen().length, 1);
+    sendungen()[0].antworte(tg({ ok: true, result: { message_id: 7 } }));
+    await durchlaufen();
+    await durchlaufen();
+    assert.equal(day().briefingDelivered, true);
+  });
+
+  it("Platzhalter «gleich fertig» zählt nicht als vorgelesen", async () => {
+    const err = console.error;
+    console.error = () => {};
+    const d = day();
+    d.briefing = undefined;
+    try {
+      // Build scheitert sofort (Claude-Attrappe antwortet 400), statt das 6-s-Zeitlimit abzuwarten → Platzhalter
+      const p = briefingTeile({ telegramKopie: false });
+      for (let i = 0; i < 50 && !offen.some((o) => o.url.includes("anthropic")); i++) {
+        await durchlaufen();
+        for (const o of offen.splice(0)) {
+          if (o.url.includes("anthropic")) { offen.push(o); break; }
+          o.antworte(tg({ error: "nicht da" }, 404));
+        }
+      }
+      const claudeAnfrage = offen.find((o) => o.url.includes("anthropic"));
+      assert.ok(claudeAnfrage, "Build fragt Claude");
+      claudeAnfrage.antworte(tg({ type: "error", error: { type: "invalid_request_error", message: "attrappe" } }, 400));
+      const t = await p;
+      assert.match(t.text, /gleich fertig/);
+      assert.equal(t.bereit, false, "Platzhalter ausdrücklich markiert");
+      assert.notEqual(vorgelesen(), true);
+      assert.equal(briefingNeuBauen(day()), true, "ohne echtes Briefing weiter bauen");
+    } finally {
+      console.error = err;
+    }
+  });
+
+  it("Livebau (kann das Budget des Satelliten überdauern) setzt den Merker nicht", async () => {
+    const err = console.error;
+    console.error = () => {};
+    const d = day();
+    d.briefing = undefined;
+    try {
+      const p = briefingTeile({ telegramKopie: false });
+      for (let i = 0; i < 50 && !offen.some((o) => o.url.includes("anthropic")); i++) {
+        await durchlaufen();
+        for (const o of offen.splice(0)) {
+          if (o.url.includes("anthropic")) { offen.push(o); break; }
+          o.antworte(tg({ error: "nicht da" }, 404));
+        }
+      }
+      const claudeAnfrage = offen.find((o) => o.url.includes("anthropic"));
+      assert.ok(claudeAnfrage, "Build fragt Claude");
+      claudeAnfrage.antworte(tg({
+        id: "msg_attrappe", type: "message", role: "assistant", model: "attrappe", stop_reason: "end_turn", stop_sequence: null,
+        content: [{ type: "text", text: "Frisch gebaut, Sir." }], usage: { input_tokens: 10, output_tokens: 5 },
+      }));
+      const t = await p;
+      assert.equal(t.text, "Frisch gebaut, Sir.");
+      assert.equal(t.bereit, true);
+      await durchlaufen();
+      assert.equal(vorgelesen(), undefined, "ob der Aufrufer noch wartete, weiss nur er");
+      assert.equal(sendungen().length, 0, "keine Telegram-Kopie");
+      // Ein späterer Abruf aus dem Cache (sicher innerhalb des Budgets) setzt ihn dann
+      await briefingTeile({ telegramKopie: false });
+      assert.equal(vorgelesen(), true);
+    } finally {
+      console.error = err;
+    }
+  });
+
+  it("zugestellt verhindert den Neubau wie bisher", () => {
+    const d = day();
+    d.briefingDelivered = true;
+    assert.equal(briefingNeuBauen(d, Date.now() + 3 * 3_600_000), false);
+    d.briefingDelivered = false;
+    assert.equal(briefingNeuBauen(d, Date.now() + 3 * 3_600_000), true);
+    d.briefing = undefined;
+    assert.equal(briefingNeuBauen(d), true);
   });
 });
 

@@ -51,7 +51,6 @@ Du arbeitest am persönlichen Assistenten **JARVIS** von Labinot (Service Specia
 ## Offener Plan (Schicht 2, nach Nutzen sortiert)
 
 1. Dashboard: Freigabe-Historie, Kosten (aus usage.json), Zeitpläne und Wachen bearbeiten; Finanz-Wochenbericht aus `/api/finanzen` darstellen.
-2. Satellit: Lautstärke per HA, Ton-Feedback beim Wakeword, zweiter Satellit (Bad) für das Briefing nach der Dusche statt Telegram.
-3. Werkstatt: Slicer-Anbindung (PrusaSlicer CLI) damit `cad_drucken` G-Code statt STL schickt.
+2. Werkstatt: Slicer-Anbindung (PrusaSlicer CLI) damit `cad_drucken` G-Code statt STL schickt.
 
 Was nicht kommt: Anzug, Gegenangriff, Selbstmodifikation, Zahlungsauslösung.
