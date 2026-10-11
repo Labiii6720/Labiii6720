@@ -1,6 +1,7 @@
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { addSystemNote, runTask, type AgentHooks } from "./agent.js";
-import { sendText } from "./telegram.js";
+import { schwaerze } from "./robust.js";
+import { sendText, sendeSpaeter } from "./telegram.js";
 
 /**
  * Vorgänge: grössere Aufträge, die im Hintergrund laufen, mit eigener Historie, starkem Modell
@@ -44,21 +45,30 @@ export function startVorgang(auftrag: string, hooks: AgentHooks): Vorgang {
       }
     },
   })
-    .then(async (result) => {
-      v.status = "fertig";
-      v.result = result.slice(0, 4000);
-      v.finishedAt = new Date().toISOString();
-      save();
-      addSystemNote(`Vorgang #${v.id} («${auftrag.slice(0, 80)}») ist fertig: ${v.result.slice(0, 1500)}`);
-      await sendText(`✅ Vorgang #${v.id} fertig (${v.steps} Werkzeugschritte)\n\n${result}`);
-    })
-    .catch(async (e: Error) => {
-      v.status = "fehler";
-      v.result = e.message;
-      v.finishedAt = new Date().toISOString();
-      save();
-      await sendText(`⚠️ Vorgang #${v.id} abgebrochen: ${e.message}`).catch(() => undefined);
-    });
+    // Zweites Argument von then statt angehängtem .catch: ein Sendefehler darf das Ergebnis nicht als «fehler» überschreiben.
+    // Gesendet wird über den Postausgang – ist Telegram gestört, kommt die Meldung nach.
+    .then(
+      async (result) => {
+        v.status = "fertig";
+        v.result = result.slice(0, 4000);
+        v.finishedAt = new Date().toISOString();
+        save();
+        addSystemNote(`Vorgang #${v.id} («${auftrag.slice(0, 80)}») ist fertig: ${v.result.slice(0, 1500)}`);
+        await sendeSpaeter(`✅ Vorgang #${v.id} fertig (${v.steps} Werkzeugschritte)\n\n${result}`).catch((e: unknown) =>
+          console.error(`Vorgang #${v.id}: Ergebnis nicht zustellbar (${schwaerze(e instanceof Error ? e.message : String(e))}).`),
+        );
+      },
+      async (e: unknown) => {
+        const meldung = e instanceof Error ? e.message : String(e);
+        v.status = "fehler";
+        v.result = meldung;
+        v.finishedAt = new Date().toISOString();
+        save();
+        await sendeSpaeter(`⚠️ Vorgang #${v.id} abgebrochen: ${schwaerze(meldung)}`).catch(() => undefined);
+      },
+    )
+    // nur noch Unvorhergesehenes (z. B. save() bei voller Platte) – nie als unbehandelte Ablehnung den Dienst beenden
+    .catch((e: unknown) => console.error(`Vorgang #${v.id}: ${schwaerze(e instanceof Error ? e.message : String(e))}`));
   return v;
 }
 

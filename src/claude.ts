@@ -14,8 +14,8 @@ export const anthropic = () => (client ??= new Anthropic({ maxRetries: 2 }));
 
 /**
  * Nur diese Fehler lohnen einen späten zweiten Anlauf; BadRequest, Auth, NotFound und Abbruch nie.
- * Notaus (state.paused) schaltet die Wiederholung ab statt einen Abbruchfehler zu werfen: so bleibt der echte,
- * vorübergehende Fehler erhalten und die Gesundheit verbucht keinen Nutzer-Abbruch als Claude-Störung.
+ * Notaus (state.paused) schaltet die Wiederholung ab (beim Fehler und nochmals nach der Wartezeit, siehe claudeAufruf):
+ * der Aufrufer erhält den echten, vorübergehenden Fehler, und die Gesundheit verbucht keinen Nutzer-Abbruch als Claude-Störung.
  */
 const claudeWiederholen = (e: unknown): boolean =>
   !state.paused && (e instanceof Anthropic.RateLimitError || e instanceof Anthropic.APIConnectionError || e instanceof Anthropic.InternalServerError);
@@ -26,9 +26,23 @@ const claudeWiederholen = (e: unknown): boolean =>
  * `test` erlaubt Tests, Warten und Zufall zu injizieren.
  */
 export async function claudeAufruf<T>(zweck: string, fn: (versuch: number) => Promise<T>, test: Pick<WiederholOptionen, "warten" | "zufall"> = {}): Promise<T> {
+  let echterFehler: unknown;
+  // Notaus kann auch während der Wartezeit kommen: vor jedem weiteren Anlauf erneut prüfen. Der Abbruch ist ein
+  // APIUserAbortError (wird nicht wiederholt, zählt nicht als Störung) und wird unten durch den echten Fehler ersetzt.
+  const abbruch = new Anthropic.APIUserAbortError({ message: "Pausiert (Notaus)" });
+  const versuch = async (v: number): Promise<T> => {
+    if (v > 1 && state.paused) throw abbruch;
+    try {
+      return await fn(v);
+    } catch (e) {
+      echterFehler = e;
+      throw e;
+    }
+  };
   try {
-    return await mitWiederholung(`claude.${zweck}`, fn, { versuche: 3, basisMs: 5000, maxMs: 30000, komponente: "claude", wiederholen: claudeWiederholen, ...test });
+    return await mitWiederholung(`claude.${zweck}`, versuch, { versuche: 3, basisMs: 5000, maxMs: 30000, komponente: "claude", wiederholen: claudeWiederholen, ...test });
   } catch (e) {
+    if (e === abbruch) throw echterFehler;
     if (e instanceof Anthropic.AuthenticationError) gesundheit.melde("claude", false, "API-Schlüssel abgelehnt");
     throw e;
   }

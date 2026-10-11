@@ -25,6 +25,15 @@ const lanOnly = (req: express.Request, res: express.Response, next: express.Next
   next();
 };
 
+/** Async-Handler absichern: ein Fehler wird geschwärzt geloggt und mit 500 beantwortet statt als unbehandelte Rejection. */
+const sicher =
+  (h: (req: express.Request, res: express.Response) => Promise<unknown>) =>
+  (req: express.Request, res: express.Response): void =>
+    void h(req, res).catch((e: unknown) => {
+      console.error(e instanceof Error ? schwaerze(e.message) : e);
+      if (!res.headersSent) res.status(500).json({ ok: false });
+    });
+
 app.get("/health", (_req, res) => {
   res.send("ok");
 });
@@ -40,11 +49,11 @@ if (config.eventToken) {
     next();
   };
   app.options("/events", lanOnly, cors, (_req, res) => void res.sendStatus(204));
-  app.post("/events", lanOnly, cors, express.json({ limit: "64kb" }), (req, res) => void handleEvent(req, res));
+  app.post("/events", lanOnly, cors, express.json({ limit: "64kb" }), sicher(handleEvent));
 }
 
 // Panik-Auslöser fürs Handy (eigener Token), auch über den Tunnel erreichbar – im Notfall zählt Erreichbarkeit
-if (config.panicToken) app.post("/notfall", express.json({ limit: "4kb" }), (req, res) => void handlePanic(req, res));
+if (config.panicToken) app.post("/notfall", express.json({ limit: "4kb" }), sicher(handlePanic));
 
 // Gesten- und Sprachkonsole (Webcam-Handtracking im Browser)
 app.get("/gesture", lanOnly, (_req, res) => {
@@ -56,12 +65,12 @@ if (config.dashboard && config.eventToken) {
   const json = express.json({ limit: "64kb" });
   app.get("/dashboard", lanOnly, (_req, res) => res.sendFile(fileURLToPath(new URL("../web/dashboard.html", import.meta.url))));
   app.get("/status.json", lanOnly, dashboardAuth, statusJson);
-  app.post("/api/auftrag", lanOnly, dashboardAuth, json, (req, res) => void auftragAction(req, res));
-  app.post("/api/chat", lanOnly, dashboardAuth, json, (req, res) => void chat(req, res));
-  app.post("/api/protokoll", lanOnly, dashboardAuth, json, (req, res) => void protokollAction(req, res));
+  app.post("/api/auftrag", lanOnly, dashboardAuth, json, sicher(auftragAction));
+  app.post("/api/chat", lanOnly, dashboardAuth, json, sicher(chat));
+  app.post("/api/protokoll", lanOnly, dashboardAuth, json, sicher(protokollAction));
   app.post("/api/modus", lanOnly, dashboardAuth, json, modus);
-  app.get("/api/kamera/:name", lanOnly, dashboardAuth, (req, res) => void kameraBild(req, res));
-  app.get("/api/geraete", lanOnly, dashboardAuth, (req, res) => void geraete(req, res));
+  app.get("/api/kamera/:name", lanOnly, dashboardAuth, sicher(kameraBild));
+  app.get("/api/geraete", lanOnly, dashboardAuth, sicher(geraete));
   app.get("/api/audit", lanOnly, dashboardAuth, auditTail);
 }
 

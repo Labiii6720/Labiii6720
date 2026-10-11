@@ -12,6 +12,7 @@ after(() => { process.chdir(projekt); rmSync(temp, { recursive: true, force: tru
 process.env.TELEGRAM_BOT_TOKEN = "123456789:ABCdefGHIjklMNOpqrSTUvwxYZ0123456789";
 process.env.TELEGRAM_CHAT_ID = "12345";
 process.env.WATCHDOG_MINUTEN = "10";
+process.env.JARVIS_PIN = "4711";
 
 type Antwort = { status: number; body: unknown } | Error;
 /** Geplante Antworten der Attrappe, in Reihenfolge; danach immer ok */
@@ -34,7 +35,10 @@ globalThis.fetch = (async (eingabe: string | URL | Request, init?: RequestInit) 
 const fetchAttrappe = globalThis.fetch;
 
 const { HttpFehler, gesundheit } = await import("../src/robust.js");
-const { abhaengigkeiten, handleUpdate, pollWartezeit, postausgangTick, sendText, sendeSpaeter, setzeWarten } = await import("../src/telegram.js");
+const { abhaengigkeiten, approveAuftrag, handleUpdate, istDringend, pollFehlerMelden, pollWartezeit, postausgangTick, remindersTick, sendText, sendeSpaeter, setzeWarten, verteileUpdate } = await import("../src/telegram.js");
+const { state } = await import("../src/state.js");
+const { reminders } = await import("../src/tools.js");
+const { createAuftrag, getAuftrag } = await import("../src/queue.js");
 
 const POSTAUSGANG = join(temp, "data", "postausgang.json");
 const netzfehler = () => Object.assign(new TypeError("fetch failed"), { cause: Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" }) });
@@ -42,6 +46,7 @@ const telegramFehler = (code: number, description: string, retryAfter?: number) 
   status: code,
   body: { ok: false, error_code: code, description, ...(retryAfter ? { parameters: { retry_after: retryAfter } } : {}) },
 });
+const okAntwort = (): Antwort => ({ status: 200, body: { ok: true, result: { message_id: 1 } } });
 const liesPostausgang = (): { ts: string; text: string }[] => JSON.parse(readFileSync(POSTAUSGANG, "utf8")) as { ts: string; text: string }[];
 
 /** Alle wartenden Einträge zustellen (Attrappe antwortet ok) */
@@ -119,6 +124,39 @@ describe("sendText mit Wiederholung", () => {
     await sendText("x".repeat(8001));
     assert.equal(aufrufe.length, 3);
     assert.equal(aufrufe[0].text?.length, 4000);
+  });
+
+  it("Abbruch beim Lesen der Antwort (Netz) wird als Netzfehler wiederholt, nicht als HTTP 200", async () => {
+    let erster = true;
+    globalThis.fetch = (async (eingabe, init) => {
+      if (erster) {
+        erster = false;
+        const abbruch = Object.assign(new TypeError("terminated"), { cause: Object.assign(new Error("other side closed"), { code: "UND_ERR_SOCKET" }) });
+        const body = new ReadableStream<Uint8Array>({ start(c) { c.error(abbruch); } });
+        return new Response(body, { status: 200, headers: { "content-type": "application/json" } });
+      }
+      return fetchAttrappe(eingabe, init);
+    }) as typeof fetch;
+    try {
+      await sendText("Hallo");
+    } finally {
+      globalThis.fetch = fetchAttrappe;
+    }
+    assert.deepEqual(gewartet, [1000]);
+    assert.equal(aufrufe.length, 1); // nur der zweite Versuch geht durch die Attrappe
+  });
+
+  it("Zeitlimit beim Lesen der Antwort bleibt ein Zeitlimit-Fehler", async () => {
+    globalThis.fetch = (async () => {
+      const body = new ReadableStream<Uint8Array>({ start(c) { c.error(new DOMException("The operation was aborted due to timeout", "TimeoutError")); } });
+      return new Response(body, { status: 200 });
+    }) as typeof fetch;
+    try {
+      await assert.rejects(sendText("Hallo"), (e: unknown) => !(e instanceof HttpFehler) && (e as Error).name === "TimeoutError");
+    } finally {
+      globalThis.fetch = fetchAttrappe;
+    }
+    assert.deepEqual(gewartet, [1000, 2000, 4000]);
   });
 });
 
@@ -256,10 +294,44 @@ describe("Postausgang", () => {
     assert.deepEqual(liesPostausgang(), []);
   });
 
+  it("langer Text, zweiter Teil scheitert: nur der Rest landet im Postausgang, nichts kommt doppelt", async () => {
+    const text = "A".repeat(4000) + "B".repeat(100);
+    antworten = [okAntwort(), netzfehler(), netzfehler(), netzfehler(), netzfehler()];
+    await sendeSpaeter(text);
+    assert.deepEqual(liesPostausgang().map((e) => e.text), ["B".repeat(100)]);
+    aufrufe = [];
+    await postausgangTick();
+    assert.equal(aufrufe.length, 1);
+    assert.match(aufrufe[0].text ?? "", /^\(nachgereicht, \d{2}:\d{2}\) B{100}$/);
+    assert.deepEqual(liesPostausgang(), []);
+  });
+
+  it("Nachreichen eines langen Eintrags bricht nach Teil 1 ab: beim nächsten Tick nur der Rest", async () => {
+    antworten = [netzfehler(), netzfehler(), netzfehler(), netzfehler()];
+    await sendeSpaeter("A".repeat(4500) + "B".repeat(200));
+    aufrufe = [];
+    antworten = [okAntwort(), netzfehler(), netzfehler(), netzfehler(), netzfehler()];
+    await postausgangTick();
+    const erster = aufrufe[0].text ?? "";
+    assert.equal(erster.length, 4000);
+    const restText = liesPostausgang().map((e) => e.text);
+    assert.equal(restText.length, 1);
+    // zugestellt + liegengeblieben = genau der Originaltext (nach dem Präfix)
+    assert.equal(erster.replace(/^\(nachgereicht, \d{2}:\d{2}\) /, "") + restText[0], "A".repeat(4500) + "B".repeat(200));
+    aufrufe = [];
+    antworten = [];
+    await postausgangTick();
+    assert.equal(aufrufe.length, 1);
+    assert.equal(aufrufe[0].text?.replace(/^\(nachgereicht, \d{2}:\d{2}\) /, ""), restText[0]);
+    assert.deepEqual(liesPostausgang(), []);
+  });
+
   it("Watchdog-Melder: gesundheit.tick schickt die Meldung über den Postausgang", async () => {
     gesundheit.setzeMelder(sendeSpaeter);
     const start = Date.now();
+    // Dauerstörung: Fehler über die ganze Watchdog-Schwelle (10 Min), der letzte frisch
     gesundheit.melde("homeassistant", false, "HTTP 502", start);
+    gesundheit.melde("homeassistant", false, "HTTP 502", start + 10 * 60_000);
     aufrufe = [];
     await gesundheit.tick(start + 11 * 60_000);
     assert.equal(aufrufe.length, 1);
@@ -328,6 +400,18 @@ describe("handleUpdate: Antwort von Claude und Telegram-Sendefehler", () => {
     assert.deepEqual(liesPostausgang(), []);
   });
 
+  it("lange Antwort, zweiter Teil scheitert: nur der Rest landet im Postausgang", async () => {
+    abhaengigkeiten.handleMessage = async () => "A".repeat(4000) + "B".repeat(50);
+    let n = 0;
+    globalThis.fetch = (async (eingabe, init) => {
+      const url = String(eingabe instanceof Request ? eingabe.url : eingabe);
+      if (url.endsWith("/sendMessage") && n++ > 0) throw netzfehler();
+      return fetchAttrappe(eingabe, init);
+    }) as typeof fetch;
+    await handleUpdate(nachricht("Liste bitte"));
+    assert.deepEqual(liesPostausgang().map((e) => e.text), ["B".repeat(50)]);
+  });
+
   it("client-Fehler beim Senden: Antwort wird nicht abgelegt", async () => {
     abhaengigkeiten.handleMessage = async () => "x".repeat(10);
     globalThis.fetch = (async (eingabe, init) => {
@@ -338,5 +422,290 @@ describe("handleUpdate: Antwort von Claude und Telegram-Sendefehler", () => {
     await handleUpdate(nachricht("Hallo"));
     assert.equal(aufrufe.filter((a) => a.method === "sendMessage").length, 1);
     assert.deepEqual(liesPostausgang(), []);
+  });
+});
+
+describe("remindersTick", () => {
+  it("überlappende Ticks schicken dieselbe Erinnerung nur einmal", async () => {
+    reminders.splice(0, reminders.length, { at: new Date(Date.now() - 1000).toISOString(), text: "Zahnarzt" });
+    let freigeben!: () => void;
+    const gesperrt = new Promise<void>((r) => { freigeben = r; });
+    globalThis.fetch = (async (eingabe, init) => {
+      await gesperrt; // Telegram hängt, bis der zweite Tick gelaufen ist
+      return fetchAttrappe(eingabe, init);
+    }) as typeof fetch;
+    try {
+      const a = remindersTick();
+      await remindersTick(); // läuft, während der erste noch sendet
+      freigeben();
+      await a;
+    } finally {
+      globalThis.fetch = fetchAttrappe;
+    }
+    assert.deepEqual(aufrufe.filter((x) => x.method === "sendMessage").map((x) => x.text), ["⏰ Zahnarzt"]);
+    assert.equal(reminders.length, 0);
+    // nach dem Lauf ist die Sperre wieder offen
+    reminders.push({ at: new Date(Date.now() - 1000).toISOString(), text: "Post" });
+    await remindersTick();
+    assert.equal(aufrufe.at(-1)?.text, "⏰ Post");
+  });
+});
+
+describe("pollFehlerMelden", () => {
+  it("HTTP 409 (zweiter Poller) ist keine Telegram-Störung: keine Watchdog-Schleife", async () => {
+    const meldungen: string[] = [];
+    gesundheit.setzeMelder(async (t) => { meldungen.push(t); });
+    for (let i = 0; i < 5; i++) pollFehlerMelden(new HttpFehler("Conflict: terminated by other getUpdates request (getUpdates)", 409));
+    assert.notEqual(gesundheit.zustand("telegram-empfang")?.ok, false);
+    assert.notEqual(gesundheit.zustand("telegram")?.ok, false);
+    await gesundheit.tick(Date.now() + 11 * 60_000);
+    assert.deepEqual(meldungen, []);
+  });
+
+  it("Netzfehler: Telegram-Empfang und internet gestört, Senden nicht", () => {
+    pollFehlerMelden(netzfehler());
+    assert.equal(gesundheit.zustand("telegram-empfang")?.ok, false);
+    assert.notEqual(gesundheit.zustand("telegram")?.ok, false);
+    assert.equal(gesundheit.zustand("internet")?.ok, false);
+  });
+
+  it("502: Telegram-Empfang gestört, internet nicht", () => {
+    pollFehlerMelden(new HttpFehler("Bad Gateway (getUpdates)", 502));
+    assert.equal(gesundheit.zustand("telegram-empfang")?.ok, false);
+    assert.notEqual(gesundheit.zustand("internet")?.ok, false);
+  });
+});
+
+describe("pollFehlerMelden: Empfang getrennt vom Senden", () => {
+  it("Senden klappt, Empfang bleibt gestört: Watchdog meldet den Telegram-Empfang", async () => {
+    const meldungen: string[] = [];
+    gesundheit.setzeMelder(async (t) => { meldungen.push(t); });
+    const t0 = Date.now();
+    gesundheit.melde("telegram-empfang", false, "telegram.getUpdates: HTTP 502", t0);
+    gesundheit.melde("telegram", true, undefined, t0 + 5 * 60_000);
+    gesundheit.melde("telegram-empfang", false, "telegram.getUpdates: HTTP 502", t0 + 10 * 60_000);
+    assert.equal(gesundheit.zustand("telegram-empfang")?.ok, false);
+    await gesundheit.tick(t0 + 11 * 60_000);
+    assert.equal(meldungen.length, 1);
+    assert.match(meldungen[0], /^Sir, der Telegram-Empfang antwortet seit 11 Minuten nicht/);
+  });
+});
+
+describe("verteileUpdate: Notaus wartet nicht auf laufende Anfragen", () => {
+  const origHandle = abhaengigkeiten.handleMessage;
+  const nachricht = (id: number, text: string) => ({ update_id: id, message: { message_id: id, chat: { id: 12345 }, text } });
+  afterEach(() => {
+    abhaengigkeiten.handleMessage = origHandle;
+    state.paused = false;
+  });
+
+  it("istDringend: nur /pause und /notfall", () => {
+    assert.equal(istDringend(nachricht(1, "/pause")), true);
+    assert.equal(istDringend(nachricht(1, "  /NOTFALL jetzt")), true);
+    assert.equal(istDringend(nachricht(1, "/weiter")), false);
+    assert.equal(istDringend(nachricht(1, "pause")), false);
+    assert.equal(istDringend({ update_id: 1 }), false);
+  });
+
+  it("/pause greift, während eine Anfrage noch hängt; normale Nachrichten bleiben in Reihenfolge", async () => {
+    let freigeben!: () => void;
+    const haengt = new Promise<void>((r) => { freigeben = r; });
+    const reihenfolge: string[] = [];
+    abhaengigkeiten.handleMessage = async (text: string) => {
+      reihenfolge.push(`start ${text}`);
+      if (text === "erste") await haengt;
+      reihenfolge.push(`ende ${text}`);
+      return `Antwort auf ${text}`;
+    };
+    const erste = verteileUpdate(nachricht(1, "erste"));
+    const zweite = verteileUpdate(nachricht(2, "zweite"));
+    for (let i = 0; i < 100 && reihenfolge.length === 0; i++) await new Promise((r) => setImmediate(r));
+    assert.deepEqual(reihenfolge, ["start erste"]); // die erste Anfrage hängt bei Claude
+    await verteileUpdate(nachricht(3, "/pause"));
+    assert.equal(state.paused, true);
+    assert.ok(aufrufe.some((a) => a.method === "sendMessage" && /^⛔ Notaus\./.test(a.text ?? "")));
+    assert.deepEqual(reihenfolge, ["start erste"]);
+    freigeben();
+    await Promise.all([erste, zweite]);
+    assert.deepEqual(reihenfolge, ["start erste", "ende erste", "start zweite", "ende zweite"]);
+  });
+});
+
+describe("Freigabe bei Telegram-Störung: Ausführung und Meldung getrennt", () => {
+  const origErr = console.error;
+  beforeEach(() => {
+    state.paused = false;
+    console.error = () => undefined;
+  });
+  afterEach(() => {
+    console.error = origErr;
+    globalThis.fetch = fetchAttrappe;
+    reminders.splice(0, reminders.length);
+  });
+
+  /** sendMessage scheitert dauerhaft mit Netzfehler */
+  const sendenKaputt = () => {
+    globalThis.fetch = (async (eingabe, init) => {
+      const url = String(eingabe instanceof Request ? eingabe.url : eingabe);
+      if (url.endsWith("/sendMessage")) {
+        aufrufe.push({ method: "sendMessage", text: (JSON.parse(String(init?.body)) as { text?: string }).text });
+        throw netzfehler();
+      }
+      return fetchAttrappe(eingabe, init);
+    }) as typeof fetch;
+  };
+  const erinnerung = (zeit: string) =>
+    createAuftrag({ tool: "erinnerung", input: { zeit, text: "Zahnarzt" }, stufe: "extern", summary: "Erinnerung Zahnarzt" });
+
+  it("Dashboard-Freigabe: Werkzeug lief → «erledigt», kein Wurf, Meldung im Postausgang", async () => {
+    sendenKaputt();
+    const a = erinnerung(new Date(Date.now() + 3_600_000).toISOString());
+    const antwort = await approveAuftrag(a);
+    assert.match(antwort, new RegExp(`^✅ #${a.id} erledigt: Erinnerung gesetzt`));
+    assert.equal(getAuftrag(a.id)?.status, "erledigt");
+    assert.equal(reminders.length, 1); // die Nebenwirkung genau einmal
+    assert.equal(aufrufe.filter((x) => x.method === "sendMessage").length, 4); // nur die Erfolgsmeldung, kein ⚠️ hinterher
+    assert.deepEqual(liesPostausgang().map((e) => e.text), [`✅ #${a.id} erledigt: ${getAuftrag(a.id)?.result}`]);
+    const chat = readFileSync(join(temp, "data", "chat.json"), "utf8");
+    assert.ok(chat.includes(`Auftrag #${a.id} (erinnerung) wurde freigegeben und ausgeführt`));
+    assert.ok(!chat.includes(`Auftrag #${a.id} (erinnerung) wurde freigegeben, schlug aber fehl`));
+  });
+
+  it("Werkzeug scheitert und Telegram auch: «fehler», kein Wurf, Warnung im Postausgang", async () => {
+    sendenKaputt();
+    const a = erinnerung("kein Datum");
+    const antwort = await approveAuftrag(a);
+    assert.equal(antwort, `⚠️ #${a.id}: Ungültige Zeit.`);
+    assert.equal(getAuftrag(a.id)?.status, "fehler");
+    assert.deepEqual(liesPostausgang().map((e) => e.text), [`⚠️ #${a.id} fehlgeschlagen: Ungültige Zeit.`]);
+  });
+
+  it("ohne Störung: Erfolgsmeldung geht direkt raus, auch wenn Altes im Postausgang wartet (Vorrang)", async () => {
+    antworten = [netzfehler(), netzfehler(), netzfehler(), netzfehler()];
+    await sendeSpaeter("alt");
+    aufrufe = [];
+    const a = erinnerung(new Date(Date.now() + 3_600_000).toISOString());
+    await approveAuftrag(a);
+    assert.deepEqual(aufrufe.filter((x) => x.method === "sendMessage").map((x) => x.text), [`✅ #${a.id} erledigt: ${getAuftrag(a.id)?.result}`]);
+    assert.deepEqual(liesPostausgang().map((e) => e.text), ["alt"]);
+  });
+});
+
+describe("sendeSpaeter mit Vorrang", () => {
+  it("sendet sofort, obwohl etwas wartet; die Warteschlange bleibt unberührt", async () => {
+    antworten = [netzfehler(), netzfehler(), netzfehler(), netzfehler()];
+    await sendeSpaeter("alt");
+    aufrufe = [];
+    await sendeSpaeter("🚨 Alarm", { vorrang: true });
+    assert.deepEqual(aufrufe.map((x) => x.text), ["🚨 Alarm"]);
+    assert.deepEqual(liesPostausgang().map((e) => e.text), ["alt"]);
+  });
+
+  it("scheitert es, kommt der Text vorn in den Postausgang und wird zuerst nachgereicht", async () => {
+    antworten = [netzfehler(), netzfehler(), netzfehler(), netzfehler()];
+    await sendeSpaeter("alt");
+    antworten = [netzfehler(), netzfehler(), netzfehler(), netzfehler()];
+    await sendeSpaeter("🚨 Alarm", { vorrang: true });
+    assert.deepEqual(liesPostausgang().map((e) => e.text), ["🚨 Alarm", "alt"]);
+    aufrufe = [];
+    await postausgangTick();
+    assert.match(aufrufe[0]?.text ?? "", /^\(nachgereicht, \d{2}:\d{2}\) 🚨 Alarm$/);
+  });
+
+  it("voller Postausgang: der Vorrang-Text bleibt, der älteste übrige fliegt raus", async () => {
+    antworten = [netzfehler(), netzfehler(), netzfehler(), netzfehler()];
+    for (let i = 0; i < 100; i++) await sendeSpaeter(`n${i}`);
+    antworten = [netzfehler(), netzfehler(), netzfehler(), netzfehler()];
+    await sendeSpaeter("🚨 Alarm", { vorrang: true });
+    const inhalt = liesPostausgang().map((e) => e.text);
+    assert.equal(inhalt.length, 100);
+    assert.equal(inhalt[0], "🚨 Alarm");
+    assert.equal(inhalt[1], "n1");
+    assert.equal(inhalt[99], "n99");
+  });
+});
+
+describe("PIN-Abfrage: Notaus und abgelaufenes Warten", () => {
+  const origHandle = abhaengigkeiten.handleMessage;
+  const nachricht = (id: number, text: string) => ({ update_id: id, message: { message_id: id, chat: { id: 12345 }, text } });
+  const freigabeTippen = (id: number) =>
+    handleUpdate({ update_id: 1, callback_query: { id: "cb", data: `ok:${id}`, from: { id: 12345 } } });
+  const sensibel = () => createAuftrag({ tool: "erinnerung", input: { zeit: new Date(Date.now() + 3_600_000).toISOString(), text: "PIN" }, stufe: "sensibel", summary: "sensibel" });
+  const gesendet = () => aufrufe.filter((x) => x.method === "sendMessage").map((x) => x.text ?? "");
+  const origNow = Date.now;
+  afterEach(() => {
+    abhaengigkeiten.handleMessage = origHandle;
+    Date.now = origNow;
+    state.paused = false;
+    state.notfall = { aktiv: false };
+    reminders.splice(0, reminders.length);
+  });
+
+  it("/notfall während die PIN erwartet wird: Notfall greift, nichts wird gelöscht", async () => {
+    const a = sensibel();
+    await freigabeTippen(a.id);
+    aufrufe = [];
+    await verteileUpdate(nachricht(20, "/notfall"));
+    assert.equal(state.notfall?.aktiv, true);
+    assert.equal(state.paused, true);
+    assert.ok(!aufrufe.some((x) => x.method === "deleteMessage"));
+    assert.ok(gesendet().some((t) => t.startsWith("🚨 NOTFALL")));
+    assert.equal(getAuftrag(a.id)?.status, "offen");
+    // eine danach getippte PIN wird gelöscht, führt aber nichts aus (Notaus)
+    aufrufe = [];
+    await handleUpdate(nachricht(21, "4711"));
+    assert.ok(aufrufe.some((x) => x.method === "deleteMessage"));
+    assert.equal(getAuftrag(a.id)?.status, "offen");
+    assert.equal(reminders.length, 0);
+    assert.ok(gesendet().some((t) => t.startsWith("⛔ Notaus aktiv")));
+  });
+
+  it("/pause während die PIN erwartet wird: Notaus greift, Auftrag bleibt offen", async () => {
+    const a = sensibel();
+    await freigabeTippen(a.id);
+    aufrufe = [];
+    await verteileUpdate(nachricht(22, "/pause"));
+    assert.equal(state.paused, true);
+    assert.ok(!aufrufe.some((x) => x.method === "deleteMessage"));
+    assert.ok(gesendet().some((t) => /^⛔ Notaus\./.test(t)));
+    assert.equal(getAuftrag(a.id)?.status, "offen");
+  });
+
+  it("abgelaufen: eine spätere normale Nachricht geht an Claude und wird nicht gelöscht", async () => {
+    const a = sensibel();
+    await freigabeTippen(a.id);
+    const jetzt = origNow();
+    Date.now = () => jetzt + 3 * 60 * 60_000;
+    let erhalten = "";
+    abhaengigkeiten.handleMessage = async (text: string) => { erhalten = text; return "Gern, Sir."; };
+    aufrufe = [];
+    await handleUpdate(nachricht(23, "Wie wird das Wetter?"));
+    assert.equal(erhalten, "Wie wird das Wetter?");
+    assert.ok(!aufrufe.some((x) => x.method === "deleteMessage"));
+    assert.equal(getAuftrag(a.id)?.status, "offen");
+  });
+
+  it("abgelaufen, aber die PIN selbst: gelöscht statt an Claude, Hinweis auf /auftraege", async () => {
+    const a = sensibel();
+    await freigabeTippen(a.id);
+    const jetzt = origNow();
+    Date.now = () => jetzt + 3 * 60_000;
+    let claudeGefragt = false;
+    abhaengigkeiten.handleMessage = async () => { claudeGefragt = true; return ""; };
+    aufrufe = [];
+    await handleUpdate(nachricht(24, "4711"));
+    assert.equal(claudeGefragt, false);
+    assert.ok(aufrufe.some((x) => x.method === "deleteMessage"));
+    assert.ok(gesendet().some((t) => t === `Zeit abgelaufen. /auftraege zeigt #${a.id} nochmal.`));
+    assert.equal(getAuftrag(a.id)?.status, "offen");
+  });
+
+  it("rechtzeitig mit richtiger PIN: Auftrag läuft wie bisher", async () => {
+    const a = sensibel();
+    await freigabeTippen(a.id);
+    aufrufe = [];
+    await handleUpdate(nachricht(25, "4711"));
+    assert.equal(getAuftrag(a.id)?.status, "erledigt");
+    assert.ok(gesendet().some((t) => t.startsWith(`✅ #${a.id} erledigt:`)));
   });
 });

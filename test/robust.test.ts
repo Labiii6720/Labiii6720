@@ -329,27 +329,65 @@ describe("gesundheit", () => {
   });
 
   it("istOffline", () => {
-    assert.equal(gesundheit.istOffline(), false);
+    assert.equal(gesundheit.istOffline(0), false);
     gesundheit.melde("telegram", false, "Netz: ECONNREFUSED", 0);
-    assert.equal(gesundheit.istOffline(), false);
+    assert.equal(gesundheit.istOffline(0), false);
     gesundheit.melde("claude", false, "claude.messages: HTTP 500", 0);
-    assert.equal(gesundheit.istOffline(), false);
+    assert.equal(gesundheit.istOffline(0), false);
     gesundheit.melde("claude", false, "claude.messages: Zeitlimit: Request timed out.", 0);
-    assert.equal(gesundheit.istOffline(), true);
+    assert.equal(gesundheit.istOffline(0), true);
+    assert.equal(gesundheit.istOffline(5 * MIN), true);
     gesundheit.melde("claude", true, undefined, 0);
-    assert.equal(gesundheit.istOffline(), false);
+    assert.equal(gesundheit.istOffline(0), false);
     gesundheit.melde("internet", false, undefined, 0);
+    assert.equal(gesundheit.istOffline(0), true);
     assert.equal(gesundheit.istOffline(), true);
     gesundheit.melde("internet", true, undefined, 0);
+    assert.equal(gesundheit.istOffline(0), false);
     assert.equal(gesundheit.istOffline(), false);
+  });
+
+  it("istOffline: veraltete Sende- und Claude-Fehler sperren nicht ewig", () => {
+    const t0 = 7_000_000;
+    gesundheit.melde("telegram", false, "telegram.sendPhoto: Netz: ENOTFOUND", t0);
+    gesundheit.melde("claude", false, "claude.sehen: Netz: Connection error.", t0);
+    assert.equal(gesundheit.istOffline(t0 + MIN), true);
+    // ohne Polling (kein Internet-Zustand) gilt die Paarregel nur kurz
+    assert.equal(gesundheit.istOffline(t0 + 6 * MIN), false);
+    assert.equal(gesundheit.istOffline(t0 + 180 * MIN), false);
+    // erneuter frischer Fehler sperrt wieder
+    gesundheit.melde("telegram", false, "telegram.sendMessage: Netz: ENOTFOUND", t0 + 179 * MIN);
+    gesundheit.melde("claude", false, "claude.messages: Netz: Connection error.", t0 + 179 * MIN);
+    assert.equal(gesundheit.istOffline(t0 + 180 * MIN), true);
+  });
+
+  it("istOffline: Polling meldet Internet und Empfang ok → nicht offline, trotz alter Sende-/Claude-Fehler", () => {
+    const t0 = 7_000_000;
+    gesundheit.melde("telegram", false, "telegram.sendPhoto: Netz: ENOTFOUND", t0);
+    gesundheit.melde("claude", false, "claude.sehen: Netz: Connection error.", t0);
+    gesundheit.melde("telegram-empfang", false, "telegram.getUpdates: Netz: ENOTFOUND", t0);
+    gesundheit.melde("internet", false, "Netz: ENOTFOUND", t0);
+    assert.equal(gesundheit.istOffline(t0 + MIN), true);
+    gesundheit.melde("telegram-empfang", true, undefined, t0 + 5 * MIN);
+    gesundheit.melde("internet", true, undefined, t0 + 5 * MIN);
+    assert.equal(gesundheit.istOffline(t0 + 5 * MIN), false);
+    assert.equal(gesundheit.istOffline(t0 + 20 * MIN), false);
+    // Sende- und Claude-Zustand sind weiterhin gestört (sie heilen erst beim nächsten Aufruf) – das darf nicht sperren
+    assert.equal(gesundheit.zustand("telegram")!.ok, false);
+    assert.equal(gesundheit.zustand("claude")!.ok, false);
+    // Polling meldet erneut Netzfehler → offline
+    gesundheit.melde("internet", false, "Netz: ENOTFOUND", t0 + 30 * MIN);
+    assert.equal(gesundheit.istOffline(t0 + 30 * MIN), true);
   });
 
   it("Watchdog meldet erst ab Schwelle und genau einmal, Erholung einmal", async () => {
     gesundheit.setzeMelder(async (t) => { gesendet.push(t); });
     const t0 = 5_000_000;
     gesundheit.melde("homeassistant", false, "HTTP 502", t0);
+    gesundheit.melde("homeassistant", false, "HTTP 502", t0 + 5 * MIN);
     await gesundheit.tick(t0 + 9 * MIN);
     assert.deepEqual(gesendet, []);
+    gesundheit.melde("homeassistant", false, "HTTP 502", t0 + 11 * MIN);
     assert.equal(gesundheit.zustand("homeassistant")!.gemeldet, false);
     await gesundheit.tick(t0 + 12 * MIN);
     assert.deepEqual(gesendet, ["Sir, Home Assistant antwortet seit 12 Minuten nicht (HTTP 502). Ich versuche es weiter."]);
@@ -375,20 +413,25 @@ describe("gesundheit", () => {
 
   it("Internet-Sammelmeldung unterdrückt Einzelmeldungen", async () => {
     gesundheit.setzeMelder(async (t) => { gesendet.push(t); });
-    gesundheit.melde("internet", false, undefined, 0);
-    gesundheit.melde("claude", false, "Netz: ENOTFOUND", 0);
-    gesundheit.melde("homeassistant", false, "Netz: EHOSTUNREACH", 0);
+    for (const t of [0, 5 * MIN, 10 * MIN, 15 * MIN]) {
+      gesundheit.melde("internet", false, undefined, t);
+      gesundheit.melde("claude", false, "Netz: ENOTFOUND", t);
+      gesundheit.melde("homeassistant", false, "ha.get: Netz: EHOSTUNREACH", t);
+    }
     await gesundheit.tick(15 * MIN);
     assert.deepEqual(gesendet, ["Sir, die Internetverbindung ist seit 15 Minuten gestört."]);
+    gesundheit.melde("internet", false, undefined, 20 * MIN);
+    gesundheit.melde("homeassistant", false, "ha.get: Netz: EHOSTUNREACH", 20 * MIN);
     await gesundheit.tick(20 * MIN);
     assert.equal(gesendet.length, 1);
     assert.equal(gesundheit.zustand("claude")!.gemeldet, false);
+    gesundheit.melde("homeassistant", false, "ha.get: Netz: EHOSTUNREACH", 30 * MIN);
     gesundheit.melde("internet", true, undefined, 30 * MIN);
     gesundheit.melde("claude", true, undefined, 30 * MIN);
     await gesundheit.tick(31 * MIN);
     assert.deepEqual(gesendet.slice(1), [
       "Die Internetverbindung ist wieder da (Ausfall 30 Minuten).",
-      "Sir, Home Assistant antwortet seit 31 Minuten nicht (Netz: EHOSTUNREACH). Ich versuche es weiter.",
+      "Sir, Home Assistant antwortet seit 31 Minuten nicht (Netzfehler). Ich versuche es weiter.",
     ]);
   });
 
@@ -396,6 +439,7 @@ describe("gesundheit", () => {
     let kaputt = true;
     gesundheit.setzeMelder(async (t) => { if (kaputt) throw new Error("Telegram weg"); gesendet.push(t); });
     gesundheit.melde("claude", false, "HTTP 500", 0);
+    gesundheit.melde("claude", false, "HTTP 500", 10 * MIN);
     await gesundheit.tick(11 * MIN);
     assert.deepEqual(gesendet, []);
     assert.equal(gesundheit.zustand("claude")!.gemeldet, false);
@@ -411,6 +455,79 @@ describe("gesundheit", () => {
     kaputt = false;
     await gesundheit.tick(22 * MIN);
     assert.equal(gesendet[1], "Die Claude-API ist wieder erreichbar (Ausfall 20 Minuten).");
+  });
+
+  it("einzelner Fehlschlag ohne weitere Versuche ist keine Dauerstörung", async () => {
+    gesundheit.setzeMelder(async (t) => { gesendet.push(t); });
+    const t0 = 7_000_000;
+    gesundheit.melde("homeassistant", false, "ha.get: Home Assistant HTTP 502 (states)", t0);
+    gesundheit.melde("homeassistant", false, "ha.get: Home Assistant HTTP 502 (states)", t0 + 1_000);
+    await gesundheit.tick(t0 + 10 * MIN);
+    await gesundheit.tick(t0 + 30 * MIN);
+    assert.deepEqual(gesendet, []);
+    assert.equal(gesundheit.bericht(t0 + 240 * MIN), "❌ homeassistant seit 240 Min: ha.get: Home Assistant HTTP 502 (states) (letzter Versuch vor 240 Min)");
+    // Neuer Einzelfehler Stunden später beginnt eine neue Störung statt «seit 240 Minuten»
+    f.fehler.length = 0;
+    gesundheit.melde("homeassistant", false, "ha.get: Home Assistant HTTP 503 (states)", t0 + 240 * MIN);
+    assert.equal(gesundheit.zustand("homeassistant")!.seit, t0 + 240 * MIN);
+    assert.equal(gesundheit.zustand("homeassistant")!.fehler, 1);
+    assert.match(f.fehler[0]!, /Home Assistant: Störung/);
+    await gesundheit.tick(t0 + 241 * MIN);
+    assert.deepEqual(gesendet, []);
+    // Dauerhafte Fehler über die Schwelle werden weiterhin gemeldet
+    gesundheit.melde("homeassistant", false, "ha.get: Home Assistant HTTP 503 (states)", t0 + 245 * MIN);
+    gesundheit.melde("homeassistant", false, "ha.get: Home Assistant HTTP 503 (states)", t0 + 250 * MIN);
+    await gesundheit.tick(t0 + 251 * MIN);
+    assert.deepEqual(gesendet, ["Sir, Home Assistant antwortet seit 11 Minuten nicht (HTTP 503). Ich versuche es weiter."]);
+  });
+
+  it("Watchdog-Meldung ohne Aufrufnamen und Roh-JSON, letzterFehler bleibt ausführlich", async () => {
+    gesundheit.setzeMelder(async (t) => { gesendet.push(t); });
+    const ueberlastet = new Anthropic.InternalServerError(529, { type: "error", error: { type: "overloaded_error", message: "Overloaded" } }, undefined, sdkHeaders());
+    const fall = async (k: "claude" | "homeassistant" | "telegram" | "shopify" | "mqtt", e: unknown, name: string) => {
+      // genau das Detail, das mitWiederholung meldet: «name: fehlerDetail(e)»
+      for (const t of [0, 5 * MIN, 11 * MIN]) gesundheit.melde(k, false, `${name}: ${fehlerDetail(e)}`, t);
+    };
+    await fall("claude", ueberlastet, "claude.chat");
+    await fall("homeassistant", new HttpFehler("Home Assistant HTTP 502 (states)", 502), "ha.get");
+    await fall("telegram", new HttpFehler("Telegram HTTP 429: Too Many Requests: retry after 5", 429, 5000), "telegram.getUpdates");
+    await fall("shopify", Object.assign(new Error("connect ECONNREFUSED 10.0.0.2:443"), { code: "ECONNREFUSED" }), "shopify.get");
+    gesundheit.melde("mqtt", false, "Verbindung verloren", 0);
+    gesundheit.melde("mqtt", false, "Verbindung verloren", 11 * MIN);
+    assert.match(gesundheit.zustand("claude")!.letzterFehler!, /^claude\.chat: HTTP 529/);
+    await gesundheit.tick(12 * MIN);
+    assert.deepEqual(gesendet, [
+      "Sir, die Claude-API antwortet seit 12 Minuten nicht (HTTP 529). Ich versuche es weiter.",
+      "Sir, Home Assistant antwortet seit 12 Minuten nicht (HTTP 502). Ich versuche es weiter.",
+      "Sir, der MQTT-Broker antwortet seit 12 Minuten nicht (Verbindung verloren). Ich versuche es weiter.",
+      "Sir, Shopify antwortet seit 12 Minuten nicht (Netzfehler). Ich versuche es weiter.",
+      "Sir, Telegram antwortet seit 12 Minuten nicht (Rate-Limit). Ich versuche es weiter.",
+    ]);
+    for (const t of gesendet) assert.doesNotMatch(t, /claude\.chat|ha\.get|telegram\.|shopify\.|\{/);
+  });
+
+  it("Einzahl bei 1 Minute", async () => {
+    gesundheit.setzeMelder(async (t) => { gesendet.push(t); });
+    const alt = config.watchdogMinuten;
+    config.watchdogMinuten = 1;
+    try {
+      gesundheit.melde("internet", false, undefined, 0);
+      gesundheit.melde("internet", false, undefined, MIN);
+      await gesundheit.tick(70_000);
+      gesundheit.melde("internet", true, undefined, 80_000);
+      gesundheit.melde("claude", false, "HTTP 500", 2 * MIN);
+      gesundheit.melde("claude", false, "HTTP 500", 3 * MIN);
+      await gesundheit.tick(3 * MIN);
+      gesundheit.melde("claude", true, undefined, 4 * MIN);
+      await gesundheit.tick(4 * MIN);
+      assert.deepEqual(gesendet, [
+        "Sir, die Internetverbindung ist seit 1 Minute gestört.",
+        "Die Internetverbindung ist wieder da (Ausfall 1 Minute).",
+        "Sir, die Claude-API antwortet seit 1 Minute nicht (HTTP 500). Ich versuche es weiter.",
+        "Die Claude-API ist wieder erreichbar (Ausfall 2 Minuten).",
+      ]);
+      assert.ok(f.logs.some((l) => /wieder da \(nach 1 Minute\)/.test(l)), f.logs.join("\n"));
+    } finally { config.watchdogMinuten = alt; }
   });
 
   it("ohne Melder oder mit WATCHDOG_MINUTEN=0 passiert nichts", async () => {

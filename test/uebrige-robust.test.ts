@@ -39,6 +39,13 @@ const bild = () => new Response(new Uint8Array([0xff, 0xd8, 0xff]), { status: 20
 /** undici-Form: TypeError «fetch failed» mit der Ursache in cause.code */
 const netz = (code: string) => Object.assign(new TypeError("fetch failed"), { cause: Object.assign(new Error(`connect ${code}`), { code }) });
 const zeitlimit = () => new DOMException("The operation was aborted due to timeout", "TimeoutError");
+/** Header kommen mit 200, der Body bricht mittendrin ab (undici: TypeError «terminated» mit cause.code, oder Zeitlimit) */
+const abgebrochen = (grund: string | Error) => new Response(new ReadableStream<Uint8Array>({
+  start(c) {
+    c.enqueue(new Uint8Array([0xff, 0xd8]));
+    c.error(typeof grund === "string" ? Object.assign(new TypeError("terminated"), { cause: Object.assign(new Error("other side closed"), { code: grund }) }) : grund);
+  },
+}), { status: 200 });
 
 globalThis.fetch = (async (eingabe: string | URL | Request, init?: RequestInit) => {
   aufrufe.push({ url: String(eingabe instanceof Request ? eingabe.url : eingabe), method: init?.method ?? "GET" });
@@ -130,6 +137,36 @@ describe("Frigate GET", () => {
     assert.equal(list.length, 1);
     assert.equal(gesundheit.zustand("frigate")?.ok, true);
   });
+
+  it("Abbruch beim Body-Download (UND_ERR_SOCKET) wird wiederholt und an die Gesundheit gemeldet", async () => {
+    antworten = [abgebrochen("UND_ERR_SOCKET"), abgebrochen("UND_ERR_SOCKET")];
+    await assert.rejects(cameras.eventClip("1234.5"), (e: unknown) => e instanceof TypeError && e.message === "terminated");
+    assert.equal(aufrufe.length, 2);
+    assert.equal(aufrufe[0]!.url, "http://frigate.test:5000/api/events/1234.5/clip.mp4");
+    assert.deepEqual(gewartet, [500]);
+    const z = gesundheit.zustand("frigate");
+    assert.equal(z?.ok, false);
+    assert.equal(z?.fehler, 2);
+    // zweiter Versuch klappt: Inhalt vollständig, Gesundheit wieder ok
+    aufrufe.length = 0;
+    gewartet.length = 0;
+    antworten = [abgebrochen("UND_ERR_SOCKET"), bild()];
+    const b = await cameras.snapshot("hof");
+    assert.equal(b.length, 3);
+    assert.equal(aufrufe.length, 2);
+    assert.deepEqual(gewartet, [500]);
+    assert.equal(gesundheit.zustand("frigate")?.ok, true);
+  });
+
+  it("Zeitlimit beim Body der Ereignisliste wird wiederholt", async () => {
+    antworten = [abgebrochen(zeitlimit()), json([])];
+    const list = await cameras.recentEvents();
+    assert.deepEqual(list, []);
+    assert.equal(aufrufe.length, 2);
+    assert.deepEqual(gewartet, [500]);
+    assert.equal(gesundheit.zustand("frigate")?.ok, true);
+    assert.equal(logs.fehler.length, 1);
+  });
 });
 
 // ---------- OctoPrint ----------
@@ -192,6 +229,44 @@ describe("Shopify", () => {
     antworten = [json({ errors: [{ message: "Field 'x' doesn't exist" }] })];
     await assert.rejects(shopify.recentOrders(1), /Shopify: Field 'x'/);
     assert.equal(aufrufe.length, 1);
+  });
+
+  const gedrosselt = (kosten?: unknown) => json({
+    errors: [{ message: "Throttled", extensions: { code: "THROTTLED", documentation: "https://shopify.dev/api/usage/rate-limits" } }],
+    ...(kosten ? { extensions: { cost: kosten } } : {}),
+  });
+
+  it("THROTTLED (Antwort 200) wird bei Lese-Queries einmal wiederholt, Wartezeit aus throttleStatus", async () => {
+    antworten = [
+      gedrosselt({ requestedQueryCost: 152, actualQueryCost: null, throttleStatus: { maximumAvailable: 1000, currentlyAvailable: 2, restoreRate: 50 } }),
+      json({ data: { orders: { nodes: [] } } }),
+    ];
+    assert.equal(await shopify.recentOrders(1), "Keine Bestellungen.");
+    assert.equal(aufrufe.length, 2);
+    assert.deepEqual(gewartet, [3000]);
+    assert.equal(gesundheit.zustand("shopify")?.ok, true);
+  });
+
+  it("THROTTLED ohne Kostenangaben: 1 s warten; dauerhaft → HttpFehler 429, zählt als Störung", async () => {
+    antworten = [gedrosselt(), gedrosselt()];
+    await assert.rejects(shopify.searchProducts("x"), (e: unknown) => e instanceof HttpFehler && e.status === 429 && e.message === "Shopify gedrosselt");
+    assert.equal(aufrufe.length, 2);
+    assert.deepEqual(gewartet, [1000]);
+    assert.equal(gesundheit.zustand("shopify")?.ok, false);
+  });
+
+  it("THROTTLED bei einer Mutation wird nicht wiederholt", async () => {
+    antworten = [gedrosselt(), json({ data: { productVariantsBulkUpdate: { productVariants: [], userErrors: [] } } })];
+    await assert.rejects(shopify.updatePrice("gid://shopify/Product/1", "gid://shopify/ProductVariant/1", "9.90"), (e: unknown) => e instanceof HttpFehler && e.status === 429);
+    assert.equal(aufrufe.length, 1);
+    assert.deepEqual(gewartet, []);
+  });
+
+  it("drosselWartezeit: Grenzfälle", () => {
+    assert.equal(shopify.drosselWartezeit(), 1000);
+    assert.equal(shopify.drosselWartezeit({ requestedQueryCost: 10, throttleStatus: { currentlyAvailable: 50, restoreRate: 50 } }), 1000);
+    assert.equal(shopify.drosselWartezeit({ requestedQueryCost: 101, throttleStatus: { currentlyAvailable: 0, restoreRate: 0 } }), 1000);
+    assert.equal(shopify.drosselWartezeit({ requestedQueryCost: 101, throttleStatus: { currentlyAvailable: 0, restoreRate: 100 } }), 1010);
   });
 });
 

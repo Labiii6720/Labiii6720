@@ -5,8 +5,9 @@ Kurz und nur das Wichtigste. Details stehen im README.
 ## 0.16
 - Robustheit: Fehler werden eingeordnet (Netz, Zeitlimit, Rate-Limit, Server, Zugang) und vorübergehende mit Backoff wiederholt – Claude (3 langsame Anläufe über dem SDK), Telegram-Senden (4×), Home Assistant lesen (3×), Frigate, Wetter, Kalender, WHOOP, Shopify-Abfragen, Stimme (2×). Schaltbefehle nur, wenn die Anfrage HA nie erreicht hat; `toggle`, Schritte, `press`, `trigger`, Mails, Shopify-Änderungen und Drucker-Uploads nie.
 - Internetausfall: Telegram-Polling mit Backoff bis 60 s (409/401 einmal klar geloggt), Zeitpläne, Rückblick, Rechnungen und Zielcheck gelten erst nach Erfolg als gelaufen und werden im Nachholfenster `ZEITPLAN_NACHHOLEN_MIN` (Standard 60) nachgeholt. Der letzte Lauf steht persistent in `data/routinen.json` – kein Doppellauf nach Neustart im Nachholfenster.
-- Postausgang `data/postausgang.json`: nicht zustellbare Meldungen werden nachgereicht («(nachgereicht, 14:32)»).
-- Watchdog: Gesundheit je Anbindung, Meldung nach `WATCHDOG_MINUTEN` (Standard 10) genau einmal, Erholung wird gemeldet, bei Internetausfall eine Sammelmeldung; `/check` und `/status.json` zeigen den Stand. Klare Nutzertexte statt roher Fehler, Geheimnisse werden aus Logs geschwärzt.
+- Postausgang `data/postausgang.json`: nicht zustellbare Meldungen werden nachgereicht («(nachgereicht, 14:32)»). Der Notfall-Alarm und Antworten auf Freigaben gehen mit Vorrang (sofort, bei Störung vorn eingereiht); während eines Notfalls bleibt älterer Inhalt liegen bis zur Entwarnung.
+- Notaus greift sofort: `/pause` und `/notfall` warten nicht hinter einer laufenden Anfrage, und Werkzeuge einer Antwort, die erst nach dem Notaus eintrifft, laufen nicht mehr. Erster Start ohne `data/routinen.json`: was heute schon dran war, gilt als erledigt.
+- Watchdog: Gesundheit je Anbindung (Telegram-Empfang getrennt vom Senden), Meldung nach `WATCHDOG_MINUTEN` (Standard 10) genau einmal, Erholung wird gemeldet, bei Internetausfall eine Sammelmeldung; `/check` und `/status.json` zeigen den Stand. Klare Nutzertexte statt roher Fehler, Geheimnisse werden aus Logs geschwärzt.
 
 ## 0.15
 - Einrichtungs-Assistent `npm run setup`: führt Abschnitt für Abschnitt durch die `.env`, erzeugt Tokens (wie `openssl rand -hex 24`), sichert die alte Datei als `.env.bak` und prüft jede Anbindung sofort.

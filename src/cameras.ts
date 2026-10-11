@@ -78,18 +78,21 @@ function frigate(): string {
 /** Nur für Tests: Warten und Zufall des Backoffs injizieren (im Betrieb leer). */
 export const _testOptionen: Pick<WiederholOptionen, "warten" | "zufall"> = {};
 
-/** Frigate-GET ist nebenwirkungsfrei: zwei Versuche bei Netz-, Zeitlimit- und Serverfehlern. */
-async function frigateGet(path: string, timeoutMs: number, label = path.split("?")[0]): Promise<Response> {
+/**
+ * Frigate-GET ist nebenwirkungsfrei: zwei Versuche bei Netz-, Zeitlimit- und Serverfehlern.
+ * Der Body wird innerhalb des Versuchs gelesen: Das Zeitlimit gilt auch für den Download, und ein Abbruch
+ * mittendrin (z. B. clip.mp4 bei schwachem WLAN) soll wiederholt und an die Gesundheit gemeldet werden.
+ */
+async function frigateGet<T>(path: string, timeoutMs: number, lesen: (res: Response) => Promise<T>, label = path.split("?")[0]): Promise<T> {
   return mitWiederholung("frigate.get", async () => {
     const res = await fetch(`${frigate()}${path}`, { signal: AbortSignal.timeout(timeoutMs) });
     if (!res.ok) throw new HttpFehler(`Frigate HTTP ${res.status} (${label})`, res.status, retryAfterAusHeader(res.headers));
-    return res;
+    return lesen(res);
   }, { versuche: 2, komponente: "frigate", ..._testOptionen });
 }
 
 async function bytes(path: string, timeoutMs = 15_000): Promise<Buffer> {
-  const res = await frigateGet(path, timeoutMs);
-  return Buffer.from(await res.arrayBuffer());
+  return frigateGet(path, timeoutMs, async (res) => Buffer.from(await res.arrayBuffer()));
 }
 
 export const snapshot = (cam: string, height = 720) => bytes(`/api/${cameras[cam]?.frigate ?? cam}/latest.jpg?h=${height}`);
@@ -110,8 +113,7 @@ export interface FrigateEvent {
 export async function recentEvents(opts: { kamera?: string; stunden?: number; limit?: number } = {}): Promise<FrigateEvent[]> {
   const q = new URLSearchParams({ limit: String(opts.limit ?? 20), after: String(Math.floor(Date.now() / 1000 - (opts.stunden ?? 24) * 3600)) });
   if (opts.kamera) q.set("cameras", cameras[opts.kamera]?.frigate ?? opts.kamera);
-  const res = await frigateGet(`/api/events?${q}`, 15_000, "events");
-  return (await res.json()) as FrigateEvent[];
+  return frigateGet(`/api/events?${q}`, 15_000, async (res) => (await res.json()) as FrigateEvent[], "events");
 }
 
 export function formatEvents(list: FrigateEvent[]): string {

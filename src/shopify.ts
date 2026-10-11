@@ -4,6 +4,26 @@ import { HttpFehler, mitWiederholung, retryAfterAusHeader, type WiederholOptione
 /** Nur für Tests: Warten und Zufall des Backoffs injizieren (im Betrieb leer). */
 export const _testOptionen: Pick<WiederholOptionen, "warten" | "zufall"> = {};
 
+interface GqlKosten {
+  requestedQueryCost?: number;
+  throttleStatus?: { currentlyAvailable?: number; restoreRate?: number };
+}
+interface GqlAntwort<T> {
+  data?: T;
+  errors?: { message: string; extensions?: { code?: string } }[];
+  extensions?: { cost?: GqlKosten };
+}
+
+/** Wartezeit bis genug Kostenpunkte nachgefüllt sind; ohne verwertbare Angaben 1 s. */
+export function drosselWartezeit(kosten?: GqlKosten): number {
+  const benoetigt = kosten?.requestedQueryCost;
+  const verfuegbar = kosten?.throttleStatus?.currentlyAvailable;
+  const rate = kosten?.throttleStatus?.restoreRate;
+  if (typeof benoetigt !== "number" || typeof verfuegbar !== "number" || typeof rate !== "number" || !(rate > 0)) return 1000;
+  const ms = Math.ceil(((benoetigt - verfuegbar) / rate) * 1000);
+  return Number.isFinite(ms) && ms > 0 ? ms : 1000;
+}
+
 /**
  * Lese-Queries werden bei Netz-, Zeitlimit-, Rate- und Serverfehlern einmal wiederholt. Mutationen nie:
  * bei Zeitlimit oder 5xx kann Shopify die Änderung schon ausgeführt haben, ein zweiter Versuch würde sie verdoppeln.
@@ -20,7 +40,11 @@ async function gql<T>(query: string, variables: Record<string, unknown> = {}): P
       signal: AbortSignal.timeout(15_000),
     });
     if (!res.ok) throw new HttpFehler(`Shopify HTTP ${res.status}`, res.status, retryAfterAusHeader(res.headers));
-    const json = (await res.json()) as { data?: T; errors?: { message: string }[] };
+    const json = (await res.json()) as GqlAntwort<T>;
+    // Kostenbasierte Drosselung kommt als HTTP 200 mit THROTTLED; als 429 werfen, damit Lese-Queries wiederholt werden
+    if (json.errors?.some((e) => e.extensions?.code === "THROTTLED")) {
+      throw new HttpFehler("Shopify gedrosselt", 429, drosselWartezeit(json.extensions?.cost));
+    }
     if (json.errors?.length) throw new Error(`Shopify: ${json.errors.map((e) => e.message).join("; ")}`);
     if (!json.data) throw new Error("Shopify: leere Antwort");
     return json.data;

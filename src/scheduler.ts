@@ -4,7 +4,7 @@ import { config } from "./config.js";
 import { audit } from "./audit.js";
 import { hooks, sendeSpaeter } from "./telegram.js";
 import { state } from "./state.js";
-import { imFenster, todayKey } from "./time.js";
+import { hhmm, imFenster, minutesOfDay, todayKey } from "./time.js";
 import { faelligIm, saveZeitplaene, zeitplaene } from "./zeitplaene.js";
 import { formatRechnung, offeneRechnungen } from "./finanzen.js";
 import { profil } from "./profil.js";
@@ -26,8 +26,31 @@ const laufend = new Set<string>();
 let offlineGemeldet = false;
 
 /** Rückblick, Rechnungs-Erinnerung und Zielcheck: Tag des letzten Laufs. Persistent, sonst liefe ein Lauf nach einem Neustart im Nachholfenster ein zweites Mal. */
-type Routinen = { rueckblick?: string; rechnungen?: string; zielcheck?: string };
+export type Routinen = { rueckblick?: string; rechnungen?: string; zielcheck?: string };
 const ROUTINEN_DATEI = "data/routinen.json";
+const WOCHENTAGE = ["so", "mo", "di", "mi", "do", "fr", "sa"];
+
+/** ZIELCHECK «so 18:00» → Wochentag und Uhrzeit */
+function zielcheckZeit(): { tag: string; zeit: string } {
+  const [tag = "", zeit = ""] = config.zielcheck.toLowerCase().split(/\s+/);
+  return { tag, zeit };
+}
+
+/**
+ * Erster Start ohne data/routinen.json (Update auf 0.16): Was heute schon hätte laufen sollen, gilt als erledigt.
+ * Die alte Version hat es wahrscheinlich schon geschickt – lieber einmal nichts als doppelt.
+ */
+export function routinenBeimErststart(now: Date): Routinen {
+  const heute = todayKey(now);
+  const vorbei = (hm: string) => /^\d{1,2}:\d{2}$/.test(hm.trim()) && hhmm(hm.trim()) <= minutesOfDay(now);
+  const r: Routinen = {};
+  if (config.rueckblick !== "off" && vorbei(config.rueckblick)) r.rueckblick = heute;
+  if (config.rechnungErinnerung !== "off" && vorbei(config.rechnungErinnerung)) r.rechnungen = heute;
+  const zc = zielcheckZeit();
+  if (config.zielcheck !== "off" && WOCHENTAGE[now.getDay()] === zc.tag && vorbei(zc.zeit)) r.zielcheck = heute;
+  return r;
+}
+
 const routinen: Routinen = (() => {
   try {
     const roh = JSON.parse(readFileSync(ROUTINEN_DATEI, "utf8")) as unknown;
@@ -35,7 +58,9 @@ const routinen: Routinen = (() => {
     const r = roh as Record<string, unknown>;
     const tag = (k: string) => (typeof r[k] === "string" ? (r[k] as string) : undefined);
     return { rueckblick: tag("rueckblick"), rechnungen: tag("rechnungen"), zielcheck: tag("zielcheck") };
-  } catch {
+  } catch (e) {
+    // Datei fehlt = erster Start; kaputtes JSON = wie bisher alles offen
+    if ((e as NodeJS.ErrnoException)?.code === "ENOENT") return routinenBeimErststart(new Date());
     return {};
   }
 })();
@@ -80,15 +105,18 @@ function wartetWeilOffline(was: string): boolean {
 /**
  * Führt einen Lauf aus. Rückgabe true = als gelaufen markieren (Erfolg oder dauerhafter Fehler, der einmal gemeldet wird);
  * false = vorübergehender Fehler, der Lauf bleibt offen und wird im Fenster frühestens nach 5 Minuten erneut versucht.
+ * Gibt `fn` false zurück, kam der Notaus dazwischen: nichts gemeldet, Lauf bleibt offen und darf nach /weiter sofort (im Fenster) starten.
  */
-async function ausfuehren(schluessel: string, titel: string, now: Date, fn: () => Promise<void>): Promise<boolean> {
+async function ausfuehren(schluessel: string, titel: string, now: Date, fn: () => Promise<boolean | void>): Promise<boolean> {
   laufend.add(schluessel);
   try {
-    await fn();
+    const ergebnis = await fn();
     letzterFehlversuch.delete(schluessel);
-    return true;
+    return ergebnis !== false;
   } catch (e) {
     log(e);
+    // Notaus während des Laufs: kein «fehlgeschlagen» melden und nicht abhaken – der Lauf bleibt für nach /weiter offen.
+    if (state.paused) return false;
     if (voruebergehend(e)) {
       letzterFehlversuch.set(schluessel, now.getTime());
       return false;
@@ -108,12 +136,16 @@ export async function zeitplanTick(now = new Date()): Promise<void> {
   if (state.paused) return;
   const today = todayKey(now);
   for (const z of zeitplaene) {
+    // Jeder Lauf dauert; kommt währenddessen /pause oder der Notfall, startet kein weiterer Zeitplan mehr.
+    if (state.paused) return;
     if (!faelligIm(z, now, config.zeitplanNachholenMin)) continue;
     const schluessel = `zeitplan:${z.id}`;
     if (!bereit(schluessel, now)) continue;
     if (wartetWeilOffline(`Zeitplan «${z.name}»`)) return;
     const fertig = await ausfuehren(schluessel, `Zeitplan «${z.name}»`, now, async () => {
       const reply = await abhaengigkeiten.handleMessage(`[Zeitplan «${z.name}», läuft automatisch] ${z.auftrag}`, hooks);
+      // Notaus während des Laufs: die Antwort wäre nur «Ich bin pausiert …» – nicht senden, nicht abhaken.
+      if (state.paused) return false;
       await abhaengigkeiten.sendeSpaeter(`🕒 ${z.name}\n\n${reply}`);
     });
     if (fertig) {
@@ -144,6 +176,7 @@ export async function rueckblickTick(now = new Date()): Promise<void> {
     "4) Antworte mir in höchstens vier Sätzen: Was war heute wichtig, was steht morgen an, und ein ehrlicher Hinweis, falls du einen hast.";
   const fertig = await ausfuehren("rueckblick", "Der Rückblick", now, async () => {
     const reply = await abhaengigkeiten.handleMessage(prompt, hooks);
+    if (state.paused) return false;
     await abhaengigkeiten.sendeSpaeter(`🌙 Rückblick\n\n${reply}`);
   });
   if (fertig) merkeRoutine("rueckblick", today);
@@ -178,10 +211,9 @@ export async function rechnungsTick(now = new Date()): Promise<void> {
 export async function zielcheckTick(now = new Date()): Promise<void> {
   offlineNachfuehren();
   if (config.zielcheck === "off" || state.paused) return;
-  const [tag, zeit = ""] = config.zielcheck.toLowerCase().split(/\s+/);
-  const TAGE = ["so", "mo", "di", "mi", "do", "fr", "sa"];
+  const { tag, zeit } = zielcheckZeit();
   const today = todayKey(now);
-  if (TAGE[now.getDay()] !== tag || routinen.zielcheck === today || !imFenster(zeit, now, config.zeitplanNachholenMin)) return;
+  if (WOCHENTAGE[now.getDay()] !== tag || routinen.zielcheck === today || !imFenster(zeit, now, config.zeitplanNachholenMin)) return;
   if (!bereit("zielcheck", now)) return;
   const ziele = profil.ziele.filter((z) => z.status === "offen");
   if (ziele.length === 0) {
@@ -196,6 +228,7 @@ export async function zielcheckTick(now = new Date()): Promise<void> {
     "Sei ehrlich, wenn ein Ziel stillsteht. Höchstens zehn Sätze.";
   const fertig = await ausfuehren("zielcheck", "Der Zielcheck", now, async () => {
     const reply = await abhaengigkeiten.handleMessage(prompt, hooks);
+    if (state.paused) return false;
     await abhaengigkeiten.sendeSpaeter(`🎯 Zielcheck\n\n${reply}`);
   });
   if (fertig) merkeRoutine("zielcheck", today);

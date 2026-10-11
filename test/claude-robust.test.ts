@@ -142,6 +142,31 @@ describe("claudeAufruf", () => {
     assert.doesNotMatch(gesundheit.bericht(), /Pausiert/);
   });
 
+  it("Notaus kommt erst in der Backoff-Wartezeit: kein weiterer Versuch, echter Fehler fliegt", async () => {
+    let n = 0;
+    const wartenMitNotaus = async (ms: number) => { gewartet.push(ms); state.paused = true; };
+    try {
+      await assert.rejects(claudeAufruf("chat", async () => { n++; throw serverFehler(); }, { warten: wartenMitNotaus, zufall }),
+        (e: unknown) => e instanceof Anthropic.InternalServerError);
+    } finally {
+      state.paused = false;
+    }
+    assert.equal(n, 1); // nach dem Warten kein zweiter messages.create
+    assert.deepEqual(gewartet, [5000]);
+    const z = gesundheit.zustand("claude");
+    assert.equal(z?.fehler, 1); // der Abbruch zählt nicht als Störung
+    assert.match(z?.letzterFehler ?? "", /HTTP 503/);
+    assert.doesNotMatch(gesundheit.bericht(), /Pausiert/);
+  });
+
+  it("ohne Notaus läuft der zweite Anlauf nach der Wartezeit normal", async () => {
+    let n = 0;
+    const ergebnis = await claudeAufruf("chat", async () => { n++; if (n === 1) throw serverFehler(); return "ok"; }, { warten, zufall });
+    assert.equal(ergebnis, "ok");
+    assert.equal(n, 2);
+    assert.equal(state.paused, false);
+  });
+
   it("Versuchsnummer wird an fn durchgereicht", async () => {
     const gesehen: number[] = [];
     await claudeAufruf("chat", async (v) => { gesehen.push(v); if (v < 3) throw serverFehler(); return "ok"; }, { warten, zufall });

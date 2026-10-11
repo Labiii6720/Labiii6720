@@ -130,8 +130,10 @@ export function runTask(text: string, hooks: AgentHooks, opts: RunOptions = {}):
   return runLoop(text, hooks, { stark: true, ...opts, history: opts.history ?? [] });
 }
 
+const PAUSIERT = "Ich bin pausiert (Notaus). In Telegram hebt /weiter das wieder auf.";
+
 async function runLoop(text: string, hooks: AgentHooks, opts: RunOptions & { history: Msg[] }): Promise<string> {
-  if (state.paused) return "Ich bin pausiert (Notaus). In Telegram hebt /weiter das wieder auf.";
+  if (state.paused) return PAUSIERT;
   const anthropic = claude();
   const tools = activeTools();
   const toolParams: Anthropic.Messages.ToolUnion[] = tools.map((t) => ({ name: t.name, description: t.description, input_schema: t.input_schema }));
@@ -160,12 +162,22 @@ async function runLoop(text: string, hooks: AgentHooks, opts: RunOptions & { his
     const uses = msg.content.filter((b): b is Anthropic.ToolUseBlock => b.type === "tool_use");
     if (msg.stop_reason !== "tool_use" || uses.length === 0) break;
 
+    // Notaus während eines laufenden Aufrufs oder Werkzeugs: übrige Werkzeuge nicht mehr ausführen. Jedes tool_use
+    // bekommt trotzdem ein tool_result, damit die Historie für die API gültig bleibt.
     const results: Anthropic.ToolResultBlockParam[] = [];
     for (const use of uses) {
+      if (state.paused) {
+        results.push({ type: "tool_result", tool_use_id: use.id, content: "Nicht ausgeführt: Notaus.", is_error: true });
+        continue;
+      }
       results.push({ type: "tool_result", tool_use_id: use.id, ...(await execute(use, hooks)) });
       opts.onStep?.(++step, use.name);
     }
     h.push({ role: "user", content: results });
+    if (state.paused) {
+      if (isChat) saveHistory();
+      return PAUSIERT;
+    }
     if (loop === maxLoops - 1) reply = `${reply}\n\n(Limit von ${maxLoops} Werkzeugrunden erreicht, Zwischenstand.)`.trim();
   }
   if (isChat) saveHistory();

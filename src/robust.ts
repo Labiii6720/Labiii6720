@@ -206,13 +206,15 @@ export async function mitWiederholung<T>(name: string, fn: (versuch: number) => 
 
 // ---------- Nutzertexte ----------
 
-export type Komponente = "internet" | "claude" | "telegram" | "homeassistant" | "frigate" | "mqtt" | "whoop" | "wetter" | "kalender" | "gmail" | "shopify" | "stt" | "tts" | "octoprint";
+export type Komponente = "internet" | "claude" | "telegram" | "telegram-empfang" | "homeassistant" | "frigate" | "mqtt" | "whoop" | "wetter" | "kalender" | "gmail" | "shopify" | "stt" | "tts" | "octoprint";
 
 /** Deutsche Namen: Nominativ (Satzanfang), Dativ nach «zu», und der .env-Schlüssel für den Fall «Zugang abgelehnt». */
 const NAMEN: Record<Komponente, { nom: string; zu: string; schluessel?: string }> = {
   internet: { nom: "die Internetverbindung", zu: "zum Internet" },
   claude: { nom: "die Claude-API", zu: "zur Claude-API", schluessel: "ANTHROPIC_API_KEY" },
   telegram: { nom: "Telegram", zu: "zu Telegram", schluessel: "TELEGRAM_BOT_TOKEN" },
+  // getUpdates getrennt vom Senden: sonst setzt jede gesendete Nachricht eine Empfangsstörung wieder auf ok
+  "telegram-empfang": { nom: "der Telegram-Empfang", zu: "zum Telegram-Empfang", schluessel: "TELEGRAM_BOT_TOKEN" },
   homeassistant: { nom: "Home Assistant", zu: "zu Home Assistant", schluessel: "HA_TOKEN" },
   frigate: { nom: "Frigate", zu: "zu Frigate" },
   mqtt: { nom: "der MQTT-Broker", zu: "zum MQTT-Broker", schluessel: "MQTT_USER/MQTT_PASSWORD" },
@@ -233,7 +235,7 @@ const gross = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
 function dienstNamen(dienst: string): { nom: string; zu: string; schluessel?: string } {
   const k = dienst.trim().toLowerCase().replace(/[\s_-]/g, "");
   if (istKomponente(k)) return NAMEN[k];
-  const alias: Record<string, Komponente> = { claudeapi: "claude", anthropic: "claude", ha: "homeassistant", frigatenvr: "frigate" };
+  const alias: Record<string, Komponente> = { telegramempfang: "telegram-empfang", claudeapi: "claude", anthropic: "claude", ha: "homeassistant", frigatenvr: "frigate" };
   if (alias[k]) return NAMEN[alias[k]];
   return { nom: dienst, zu: `zu ${dienst}` };
 }
@@ -269,13 +271,38 @@ export interface Zustand {
   /** Fehler in Folge */
   fehler: number;
   letzterFehler?: string;
+  /** Zeitpunkt des letzten Fehlers dieser Störung (ms) */
+  letzterFehlerAm?: number;
+  /** Kurzform für Nutzermeldungen, z. B. «HTTP 502», «Netzfehler», «Rate-Limit» (ohne interne Aufrufnamen und Roh-JSON) */
+  kurz?: string;
   /** Watchdog hat diese Störung gemeldet */
   gemeldet: boolean;
   letzterOk?: number;
 }
 
 const LOG_ABSTAND_MS = 10 * 60_000;
+/**
+ * Ein Fehler gilt so lange als frisch. Komponenten wie Claude oder Home Assistant werden nur auf Anfrage angesprochen:
+ * Nach einem einzelnen Fehlschlag fragt oft niemand mehr, der Zustand bliebe ohne diese Grenze ewig «gestört».
+ */
+const FRISCH_MS = 15 * 60_000;
+/** Ohne Internet-Zustand (kein Polling) gilt die Paarregel Telegram+Claude nur so lange; danach starten Läufe wieder und prüfen selbst. */
+const OFFLINE_FRISCH_MS = 5 * 60_000;
 const minuten = (ms: number) => Math.max(0, Math.round(ms / 60_000));
+const minText = (n: number) => (n === 1 ? "1 Minute" : `${n} Minuten`);
+const fehlerAm = (z: Zustand) => z.letzterFehlerAm ?? z.seit;
+const frisch = (z: Zustand, jetzt: number) => jetzt - fehlerAm(z) <= FRISCH_MS;
+
+/** Kurzform eines Fehlerdetails für den Nutzer: Status oder Fehlerart statt «ha.get: Home Assistant HTTP 502 (states)». */
+function kurzForm(text: string): string | undefined {
+  const http = /\bHTTP (\d{3})\b/.exec(text);
+  if (http) return http[1] === "429" ? "Rate-Limit" : `HTTP ${http[1]}`;
+  if (/(^|: )Netz: /.test(text)) return "Netzfehler";
+  if (/(^|: )Zeitlimit\b/.test(text)) return "Zeitlimit";
+  // Freie, eigene Texte («API-Schlüssel abgelehnt», «Verbindung verloren») ohne internen Aufrufnamen; alles Technische bleibt im Log
+  const rest = text.replace(/^[a-z]\w*(\.[\w-]+)+: /i, "");
+  return rest.length <= 60 && !/[{}\/:<>]/.test(rest) ? rest : undefined;
+}
 
 let zustaende = new Map<Komponente, Zustand>();
 let letztesLog = new Map<Komponente, number>();
@@ -295,20 +322,26 @@ export const gesundheit = {
     if (ok) {
       if (!z.ok) {
         const dauer = minuten(jetzt - z.seit);
-        console.log(`[gesundheit] ${gross(name)} wieder da (nach ${dauer} Minuten).`);
+        console.log(`[gesundheit] ${gross(name)} wieder da (nach ${minText(dauer)}).`);
         if (z.gemeldet) erholungen.push({ k, dauerMin: dauer });
         z.ok = true;
         z.seit = jetzt;
         z.gemeldet = false;
         delete z.letzterFehler;
+        delete z.letzterFehlerAm;
+        delete z.kurz;
       }
       z.fehler = 0;
       z.letzterOk = jetzt;
       return;
     }
     const text = detail ? schwaerze(detail).replace(/\s+/g, " ").trim().slice(0, 140) : undefined;
-    if (text) z.letzterFehler = text;
-    if (z.ok) {
+    // Alte, nie gemeldete Störung ohne Versuche seither: neuer Fehler beginnt eine neue Störung (sonst sofort «seit 240 Minuten»)
+    const neu = z.ok || (!z.gemeldet && !frisch(z, jetzt));
+    if (text) { z.letzterFehler = text; z.kurz = kurzForm(text); }
+    else if (neu) { delete z.letzterFehler; delete z.kurz; }
+    z.letzterFehlerAm = jetzt;
+    if (neu) {
       z.ok = false;
       z.seit = jetzt;
       z.fehler = 1;
@@ -320,7 +353,7 @@ export const gesundheit = {
     z.fehler++;
     if (jetzt - (letztesLog.get(k) ?? 0) >= LOG_ABSTAND_MS) {
       letztesLog.set(k, jetzt);
-      console.error(`[gesundheit] ${gross(name)} weiterhin gestört seit ${minuten(jetzt - z.seit)} Minuten, ${z.fehler} Fehler${text ? ` (${text})` : ""}.`);
+      console.error(`[gesundheit] ${gross(name)} weiterhin gestört seit ${minText(minuten(jetzt - z.seit))}, ${z.fehler} Fehler${text ? ` (${text})` : ""}.`);
     }
   },
 
@@ -335,24 +368,33 @@ export const gesundheit = {
     return out;
   },
 
-  /** Eine Zeile pro Komponente: «✅ claude» oder «❌ homeassistant seit 12 Min: HTTP 502». */
+  /**
+   * Eine Zeile pro Komponente: «✅ claude» oder «❌ homeassistant seit 12 Min: HTTP 502»; liegt der letzte Fehler
+   * länger zurück (seither kein Versuch), steht das dabei: «… (letzter Versuch vor 240 Min)».
+   */
   bericht(jetzt = Date.now()): string {
     return [...zustaende.keys()].sort().map((k) => {
       const z = zustaende.get(k)!;
       if (z.ok) return `✅ ${k}`;
-      return `❌ ${k} seit ${minuten(jetzt - z.seit)} Min${z.letzterFehler ? `: ${z.letzterFehler}` : ""}`;
+      const alt = frisch(z, jetzt) ? "" : ` (letzter Versuch vor ${minuten(jetzt - fehlerAm(z))} Min)`;
+      return `❌ ${k} seit ${minuten(jetzt - z.seit)} Min${z.letzterFehler ? `: ${z.letzterFehler}` : ""}${alt}`;
     }).join("\n");
   },
 
-  /** Internet gestört, oder Telegram und Claude beide mit Netz-/Zeitlimit-Fehlern. */
-  istOffline(): boolean {
+  /**
+   * Internet gestört, oder Telegram (Senden oder Empfang) und Claude beide mit frischen Netz-/Zeitlimit-Fehlern.
+   * Den Internet-Zustand führt das Telegram-Polling laufend nach; liegt er vor, entscheidet er allein. «telegram» (Senden)
+   * und «claude» heilen nur durch einen erfolgreichen Aufruf – genau die Läufe, die istOffline() zurückhält. Ohne
+   * diese Regeln bliebe Jarvis nach einem einzelnen Fehlschlag verklemmt.
+   */
+  istOffline(jetzt = Date.now()): boolean {
     const internet = zustaende.get("internet");
-    if (internet && !internet.ok) return true;
+    if (internet) return !internet.ok;
     const netzartig = (k: Komponente) => {
       const z = zustaende.get(k);
-      return !!z && !z.ok && /\b(Netz|Zeitlimit)\b/.test(z.letzterFehler ?? "");
+      return !!z && !z.ok && jetzt - fehlerAm(z) <= OFFLINE_FRISCH_MS && /\b(Netz|Zeitlimit)\b/.test(z.letzterFehler ?? "");
     };
-    return netzartig("telegram") && netzartig("claude");
+    return (netzartig("telegram") || netzartig("telegram-empfang")) && netzartig("claude");
   },
 
   /** Sendefunktion für Watchdog-Meldungen (telegram.ts: sendeSpaeter, der Postausgang). */
@@ -374,17 +416,19 @@ export const gesundheit = {
     erholungen = [];
     for (const e of offen) {
       const text = e.k === "internet"
-        ? `Die Internetverbindung ist wieder da (Ausfall ${e.dauerMin} Minuten).`
-        : `${gross(NAMEN[e.k].nom)} ist wieder erreichbar (Ausfall ${e.dauerMin} Minuten).`;
+        ? `Die Internetverbindung ist wieder da (Ausfall ${minText(e.dauerMin)}).`
+        : `${gross(NAMEN[e.k].nom)} ist wieder erreichbar (Ausfall ${minText(e.dauerMin)}).`;
       try { await senden(text); } catch { erholungen.push(e); }
     }
 
-    const reif = (z: Zustand) => !z.ok && !z.gemeldet && jetzt - z.seit >= schwelle * 60_000;
+    // Reif nur, wenn Fehler wirklich über die ganze Schwelle auftraten und der letzte frisch ist – ein einzelner
+    // Fehlschlag ohne weitere Versuche ist keine Dauerstörung.
+    const reif = (z: Zustand) => !z.ok && !z.gemeldet && frisch(z, jetzt) && fehlerAm(z) - z.seit >= schwelle * 60_000;
     const internet = zustaende.get("internet");
-    if (internet && !internet.ok) {
+    if (internet && !internet.ok && frisch(internet, jetzt)) {
       if (reif(internet)) {
         internet.gemeldet = true;
-        try { await senden(`Sir, die Internetverbindung ist seit ${minuten(jetzt - internet.seit)} Minuten gestört.`); } catch { internet.gemeldet = false; }
+        try { await senden(`Sir, die Internetverbindung ist seit ${minText(minuten(jetzt - internet.seit))} gestört.`); } catch { internet.gemeldet = false; }
       }
       return; // Einzelmeldungen unterdrücken, solange das Internet weg ist
     }
@@ -393,7 +437,8 @@ export const gesundheit = {
       const z = zustaende.get(k)!;
       if (!reif(z)) continue;
       z.gemeldet = true;
-      const text = `Sir, ${NAMEN[k].nom} antwortet seit ${minuten(jetzt - z.seit)} Minuten nicht${z.letzterFehler ? ` (${z.letzterFehler})` : ""}. Ich versuche es weiter.`;
+      // Nur die Kurzform («HTTP 502»); Aufrufnamen und Roh-JSON aus letzterFehler gehören in Log und /check
+      const text = `Sir, ${NAMEN[k].nom} antwortet seit ${minText(minuten(jetzt - z.seit))} nicht${z.kurz ? ` (${z.kurz})` : ""}. Ich versuche es weiter.`;
       try { await senden(text); } catch { z.gemeldet = false; }
     }
   },

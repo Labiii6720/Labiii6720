@@ -2,12 +2,13 @@ import mqtt from "mqtt";
 import { allWachen, cameraByFrigateName, cameras, eventSnapshot, look, snapshot, type Bedingung } from "./cameras.js";
 import { config } from "./config.js";
 import { isHome } from "./homeassistant.js";
-import { fehlerDetail, gesundheit, voruebergehend } from "./robust.js";
+import { fehlerDetail, gesundheit, schwaerze, voruebergehend } from "./robust.js";
 import { state } from "./state.js";
 import { sendPhoto, sendText, sendeSpaeter } from "./telegram.js";
 import { minutesOfDay } from "./time.js";
 
-const log = (e: unknown) => console.error(e instanceof Error ? e.message : e);
+// Fehlertexte können Zugangsdaten enthalten (z. B. fetch mit FRIGATE_URL http://user:pw@…) – vor dem Loggen schwärzen
+const log = (e: unknown) => console.error(schwaerze(e instanceof Error ? e.message : String(e)));
 
 /** Gilt die Bedingung gerade? */
 export async function bedingung(b: Bedingung = "immer"): Promise<boolean> {
@@ -64,7 +65,9 @@ export async function onCameraEvent(ev: CameraEvent): Promise<boolean> {
     if (seen) caption += `\n${seen.text}`;
   }
   const buttons = ev.id ? { reply_markup: { inline_keyboard: [[{ text: "🎬 Clip", callback_data: `clip:${ev.id}` }]] } } : {};
-  if (image) await sendPhoto(image, caption, buttons);
+  // Scheitert das Bild trotz Wiederholung (Telegram/Internet weg), geht wenigstens der Text in den Postausgang –
+  // eine Erkennung darf nicht spurlos verloren gehen.
+  if (image) await sendPhoto(image, caption, buttons).catch(() => sendeSpaeter(caption));
   // Text ohne Bild: mit Clip-Knopf direkt (der Postausgang kennt keine Knöpfe); scheitert das trotz Wiederholung,
   // wird der Text ohne Knopf nachgereicht – ein Clip-Knopf Stunden später hilft ohnehin nicht mehr.
   else if (ev.id) await sendText(caption, buttons).catch(() => sendeSpaeter(caption));
@@ -149,7 +152,9 @@ export async function wachenTick(now = Date.now()): Promise<void> {
       const ruhe = (w.ruhe_minuten ?? 30) * 60_000;
       if (now - (lastHit.get(key) ?? 0) < ruhe) continue;
       lastHit.set(key, now);
-      await sendPhoto(r.image, `👁 ${w.kamera}: ${w.frage}\n${r.text.replace(/^\s*ja\b[.:,\s-]*/i, "").trim()}`);
+      const text = `👁 ${w.kamera}: ${w.frage}\n${r.text.replace(/^\s*ja\b[.:,\s-]*/i, "").trim()}`;
+      // lastHit ist schon gesetzt (Ruhezeit) – scheitert das Bild, muss der Text deshalb über den Postausgang nachkommen
+      await sendPhoto(r.image, text).catch(() => sendeSpaeter(text));
     } catch (e) {
       // Vorübergehende Störungen (Frigate, Claude, Telegram) loggt bereits die Gesundheit – sonst eine Zeile pro Wache und Minute
       if (!voruebergehend(e)) log(e);

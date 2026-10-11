@@ -44,9 +44,12 @@ async function api<T = unknown>(method: string, body: Record<string, unknown> | 
     body: isForm ? body : JSON.stringify(body),
     signal: AbortSignal.timeout(method === "getUpdates" ? 45_000 : 20_000),
   });
+  // Erst lesen, dann parsen: ein Abbruch beim Lesen (Netz, Zeitlimit) bleibt ein Netzfehler und wird wiederholt,
+  // nur ein Parsefehler wird zum HttpFehler mit Status.
+  const roh = await res.text();
   let json: TelegramAntwort<T> | undefined;
   try {
-    json = (await res.json()) as TelegramAntwort<T>;
+    json = JSON.parse(roh) as TelegramAntwort<T>;
   } catch {
     json = undefined; // kein JSON (z. B. Proxy-Seite) → Status entscheidet
   }
@@ -83,13 +86,29 @@ function apiRobust<T = unknown>(method: string, body: Record<string, unknown> | 
   });
 }
 
-export async function sendText(text: string, extra: Record<string, unknown> = {}): Promise<number | undefined> {
+type Teilversand = { ok: true; messageId?: number } | { ok: false; fehler: unknown; rest: string };
+
+/**
+ * Sendet in 4000er-Teilen und merkt sich, wie weit es kam: scheitert ein Teil, liefert es den Fehler und den Text
+ * ab diesem Teil, damit der Postausgang schon zugestellte Teile nicht ein zweites Mal schickt.
+ */
+async function sendeTeile(text: string, extra: Record<string, unknown> = {}): Promise<Teilversand> {
   let messageId: number | undefined;
   for (let i = 0; i < text.length; i += 4000) {
-    const r = await apiRobust<{ message_id: number }>("sendMessage", { chat_id: owner(), text: text.slice(i, i + 4000), ...extra });
-    messageId = r.message_id;
+    try {
+      const r = await apiRobust<{ message_id: number }>("sendMessage", { chat_id: owner(), text: text.slice(i, i + 4000), ...extra });
+      messageId = r.message_id;
+    } catch (fehler) {
+      return { ok: false, fehler, rest: text.slice(i) };
+    }
   }
-  return messageId;
+  return { ok: true, messageId };
+}
+
+export async function sendText(text: string, extra: Record<string, unknown> = {}): Promise<number | undefined> {
+  const r = await sendeTeile(text, extra);
+  if (!r.ok) throw r.fehler;
+  return r.messageId;
 }
 
 // ---------- Postausgang ----------
@@ -127,19 +146,31 @@ function ablegen(text: string): void {
   speicherePostausgang();
 }
 
+/** Vorn einreihen (Vorrang); bei vollem Postausgang fliegen die ältesten übrigen Einträge raus, nicht dieser. */
+function voranstellen(text: string): void {
+  postausgang.unshift({ ts: new Date().toISOString(), text });
+  if (postausgang.length > POSTAUSGANG_MAX) postausgang.splice(1, postausgang.length - POSTAUSGANG_MAX);
+  speicherePostausgang();
+}
+
+export interface SpaeterOptionen {
+  /** Sofort senden, auch wenn etwas im Postausgang wartet; scheitert es, vorn statt hinten einreihen (Notfall, Antworten auf Freigaben). */
+  vorrang?: boolean;
+}
+
 /**
  * Sendet den Text; geht es trotz Wiederholung nicht, bleibt er im Postausgang liegen und wird nachgereicht.
- * Wartet bereits etwas im Postausgang, wird der Text hinten angereiht (Reihenfolge bleibt). Nur ein client-Fehler
- * (die Nachricht selbst ist unbrauchbar) wird weitergeworfen – Wiederholen hilft da nicht.
+ * Wartet bereits etwas im Postausgang, wird der Text hinten angereiht (Reihenfolge bleibt) – ausser mit Vorrang.
+ * Nur ein client-Fehler (die Nachricht selbst ist unbrauchbar) wird weitergeworfen – Wiederholen hilft da nicht.
  */
-export async function sendeSpaeter(text: string): Promise<void> {
-  if (postausgang.length > 0) return void ablegen(text);
-  try {
-    await sendText(text);
-  } catch (e) {
-    if (fehlerArt(e) === "client") throw e;
-    ablegen(text);
-  }
+export async function sendeSpaeter(text: string, optionen: SpaeterOptionen = {}): Promise<void> {
+  if (postausgang.length > 0 && !optionen.vorrang) return void ablegen(text);
+  const r = await sendeTeile(text);
+  if (r.ok) return;
+  if (fehlerArt(r.fehler) === "client") throw r.fehler;
+  // nur der nicht zugestellte Rest
+  if (optionen.vorrang) voranstellen(r.rest);
+  else ablegen(r.rest);
 }
 
 let nachreichenLaeuft = false;
@@ -150,12 +181,22 @@ export async function postausgangTick(): Promise<void> {
   nachreichenLaeuft = true;
   try {
     while (postausgang.length > 0) {
-      const e = postausgang[0]!;
-      try {
-        await sendText(`(nachgereicht, ${clock(new Date(e.ts))}) ${e.text}`);
-      } catch (fehler) {
-        if (fehlerArt(fehler) !== "client") break; // weiterhin gestört → nächster Tick
-        console.error(`Postausgang: Eintrag verworfen (${fehlerDetail(fehler)}).`);
+      // Im Notfall nichts Altes herausgeben: nur, was seit der Auslösung abgelegt wurde (der Alarm). Der Rest wartet auf /entwarnung.
+      const seit = notfallAktiv() ? (state.notfall?.seit ?? "") : undefined;
+      const e = seit === undefined ? postausgang[0] : postausgang.find((x) => x.ts >= seit);
+      if (!e) break;
+      const volltext = `(nachgereicht, ${clock(new Date(e.ts))}) ${e.text}`;
+      const r = await sendeTeile(volltext);
+      if (!r.ok) {
+        if (fehlerArt(r.fehler) !== "client") {
+          // weiterhin gestört → nächster Tick; schon zugestellte Teile fallen weg (Präfix liegt immer im ersten Teil)
+          if (r.rest.length < volltext.length) {
+            e.text = r.rest;
+            speicherePostausgang();
+          }
+          break;
+        }
+        console.error(`Postausgang: Eintrag verworfen (${fehlerDetail(r.fehler)}).`);
       }
       // Den konkreten Eintrag entfernen, nicht blind das erste Element: während des Sendens kann ein
       // nebenläufiges sendeSpaeter bei vollem Postausgang die ältesten Einträge (auch e) gekürzt haben.
@@ -237,18 +278,25 @@ async function sendAuftrag(a: Auftrag): Promise<void> {
 
 export const hooks = { sendFile, sendPhoto, sendVideo, onAuftrag: sendAuftrag };
 
+/**
+ * Ausführung und Meldung getrennt: Ist das Werkzeug gelaufen, bleibt der Auftrag «erledigt», auch wenn Telegram
+ * danach streikt – sonst hielte man ihn für gescheitert und gäbe ihn ein zweites Mal frei (doppelte Nebenwirkung).
+ * Die Meldung geht mit Vorrang raus und landet bei Störung im Postausgang; execute wirft dadurch nicht.
+ */
 async function execute(a: Auftrag): Promise<void> {
+  let result: string;
   try {
-    const result = await runAuftrag(a, hooks);
-    setStatus(a, "erledigt", result);
-    addSystemNote(`Auftrag #${a.id} (${a.tool}) wurde freigegeben und ausgeführt: ${result}`);
-    await sendText(`✅ #${a.id} erledigt: ${result}`);
+    result = await runAuftrag(a, hooks);
   } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
+    const msg = schwaerze(e instanceof Error ? e.message : String(e));
     setStatus(a, "fehler", msg);
     addSystemNote(`Auftrag #${a.id} (${a.tool}) wurde freigegeben, schlug aber fehl: ${msg}`);
-    await sendText(`⚠️ #${a.id} fehlgeschlagen: ${msg}`);
+    await sendeSpaeter(`⚠️ #${a.id} fehlgeschlagen: ${msg}`, { vorrang: true }).catch(log);
+    return;
   }
+  setStatus(a, "erledigt", result);
+  addSystemNote(`Auftrag #${a.id} (${a.tool}) wurde freigegeben und ausgeführt: ${result}`);
+  await sendeSpaeter(`✅ #${a.id} erledigt: ${result}`, { vorrang: true }).catch(log);
 }
 
 /** Wartet auf die PIN für einen sensiblen Auftrag */
@@ -288,7 +336,7 @@ async function onCallback(cb: { id: string; data?: string; message?: { message_i
     try {
       await sendVideo(await eventClip(idStr ?? ""), `🎬 Clip ${idStr}`);
     } catch (e) {
-      await sendText(`Clip noch nicht da oder nicht gefunden (${e instanceof Error ? e.message : String(e)}).`);
+      await sendText(`Clip noch nicht da oder nicht gefunden (${schwaerze(e instanceof Error ? e.message : String(e))}).`);
     }
     return;
   }
@@ -385,7 +433,7 @@ async function onCommand(cmd: string, arg: string): Promise<void> {
 
 // ---------- Eingehende Updates ----------
 
-interface Update {
+export interface Update {
   update_id: number;
   message?: { message_id: number; chat: { id: number }; text?: string; voice?: { file_id: string; duration: number } };
   callback_query?: { id: string; data?: string; from: { id: number }; message?: { message_id: number } };
@@ -415,20 +463,24 @@ export async function handleUpdate(u: Update): Promise<void> {
     try {
       text = await transcribe(await downloadVoice(m.voice.file_id));
     } catch (e) {
-      return void sendText(`Konnte die Sprachnachricht nicht verstehen: ${e instanceof Error ? e.message : String(e)}`);
+      return void sendText(`Konnte die Sprachnachricht nicht verstehen: ${schwaerze(e instanceof Error ? e.message : String(e))}`);
     }
     if (!text) return void sendText("Da habe ich nichts verstanden.");
     spoken = true;
     await sendText(`🎙 ${text}`);
   }
 
-  if (pendingPin) {
+  // Abgelaufen: nur die PIN selbst wird noch abgefangen (gelöscht statt an Claude), alles andere läuft normal.
+  if (pendingPin && Date.now() > pendingPin.until && text !== config.pin) pendingPin = undefined;
+  // /pause und /notfall sind nie die PIN und greifen sofort; eine danach getippte PIN fängt der Notaus-Check unten ab.
+  if (pendingPin && !istDringend(u)) {
     const p = pendingPin;
     pendingPin = undefined;
     await apiRobust("deleteMessage", { chat_id: owner(), message_id: m.message_id }).catch(() => undefined);
     const a = getAuftrag(p.id);
     if (!a || a.status !== "offen") return void sendText("Dieser Auftrag ist nicht mehr offen.");
     if (Date.now() > p.until) return void sendText(`Zeit abgelaufen. /auftraege zeigt #${a.id} nochmal.`);
+    if (state.paused) return void sendText("⛔ Notaus aktiv. Erst /weiter, dann nochmal freigeben.");
     if (text !== config.pin) {
       audit("pin_falsch", { id: a.id, tool: a.tool });
       setStatus(a, "abgelehnt", "falsche PIN");
@@ -456,11 +508,11 @@ export async function handleUpdate(u: Update): Promise<void> {
       return;
     }
     // Die Antwort ist bezahlt und in der Historie: scheitert nur Telegram, bleibt sie im Postausgang statt verloren zu gehen.
-    try {
-      await sendText(reply);
-    } catch (e) {
-      log(e);
-      if (fehlerArt(e) !== "client") ablegen(reply); // client: Nachricht selbst unbrauchbar, Wiederholen hilft nicht
+    const r = await sendeTeile(reply);
+    if (!r.ok) {
+      log(r.fehler);
+      // client: Nachricht selbst unbrauchbar, Wiederholen hilft nicht; sonst nur den nicht zugestellten Rest ablegen
+      if (fehlerArt(r.fehler) !== "client") ablegen(r.rest);
       return;
     }
     if (spoken) await sendVoiceReply(reply);
@@ -471,13 +523,25 @@ export async function handleUpdate(u: Update): Promise<void> {
 
 // ---------- Hintergrund ----------
 
+let erinnerungenLaufen = false;
+
+/**
+ * Alle 30 s. Laufsperre: ein Senden mit Wiederholung kann länger als 30 s dauern; ohne Sperre würde der nächste
+ * Tick dieselbe (noch nicht entfernte) Erinnerung ein zweites Mal schicken.
+ */
 export async function remindersTick(): Promise<void> {
-  const now = Date.now();
-  const due = reminders.filter((r) => Date.parse(r.at) <= now);
-  if (due.length === 0) return;
-  for (const r of due) await sendeSpaeter(`⏰ ${r.text}`).catch(log);
-  reminders.splice(0, reminders.length, ...reminders.filter((r) => Date.parse(r.at) > now));
-  saveReminders();
+  if (erinnerungenLaufen) return;
+  erinnerungenLaufen = true;
+  try {
+    const now = Date.now();
+    const due = reminders.filter((r) => Date.parse(r.at) <= now);
+    if (due.length === 0) return;
+    for (const r of due) await sendeSpaeter(`⏰ ${r.text}`).catch(log);
+    reminders.splice(0, reminders.length, ...reminders.filter((r) => Date.parse(r.at) > now));
+    saveReminders();
+  } finally {
+    erinnerungenLaufen = false;
+  }
 }
 
 const POLL_BACKOFF = { basisMs: 1000, maxMs: 60_000, faktor: 2, jitter: 0.2 };
@@ -493,7 +557,44 @@ export function pollWartezeit(e: unknown, fehlversuch: number, zufall: () => num
   return wartezeit(Math.max(1, fehlversuch), POLL_BACKOFF, zufall, e instanceof HttpFehler ? e.retryAfterMs : undefined);
 }
 
+/**
+ * Fehlgeschlagenes getUpdates an die Gesundheit melden (exportiert für Tests). Kein Log pro Fehlversuch –
+ * gesundheit.melde loggt den ersten Fehler und danach höchstens alle 10 Minuten.
+ * Gemeldet wird unter «telegram-empfang», getrennt vom Senden («telegram»): sonst setzte jede gesendete Nachricht
+ * (auch die Watchdog-Meldung selbst) eine Empfangsstörung wieder auf ok → Störung/Erholung im 11-Minuten-Takt.
+ * HTTP 409 (zweiter Poller) zählt gar nicht als Störung; die einmalige Logzeile in poll() genügt dafür.
+ */
+export function pollFehlerMelden(e: unknown): void {
+  if (e instanceof HttpFehler && e.status === 409) return;
+  const detail = fehlerDetail(e);
+  gesundheit.melde("telegram-empfang", false, `telegram.getUpdates: ${detail}`);
+  const art = fehlerArt(e);
+  if (art === "netz" || art === "zeitlimit") gesundheit.melde("internet", false, detail);
+}
+
 const schlafen = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+/** Notaus-Befehle, die nicht hinter einer laufenden Anfrage warten dürfen (z. B. während Claude-Wiederholungen). */
+const DRINGEND = new Set(["/pause", "/notfall"]);
+
+export function istDringend(u: Update): boolean {
+  const cmd = (u.message?.text ?? "").trim().split(/\s+/)[0]?.toLowerCase() ?? "";
+  return DRINGEND.has(cmd);
+}
+
+let updateKette: Promise<void> = Promise.resolve();
+
+/**
+ * Updates laufen der Reihe nach (PIN nach Freigabe-Button, Antworten in Reihenfolge). /pause und /notfall laufen
+ * sofort daneben, damit der Notaus auch greift, während eine Anfrage noch wartet. poll() wartet nicht auf die
+ * Verarbeitung, sonst käme ein /pause erst nach der laufenden Anfrage überhaupt an. Absender prüft handleUpdate.
+ */
+export function verteileUpdate(u: Update): Promise<void> {
+  if (istDringend(u)) return handleUpdate(u).catch(log);
+  const lauf = updateKette.then(() => handleUpdate(u)).catch(log);
+  updateKette = lauf;
+  return lauf;
+}
 
 async function poll(): Promise<void> {
   let offset = 0;
@@ -504,11 +605,11 @@ async function poll(): Promise<void> {
       const updates = await api<Update[]>("getUpdates", { offset, timeout: 30, allowed_updates: ["message", "callback_query"] });
       fehlversuche = 0;
       sonderfallGeloggt = false;
-      gesundheit.melde("telegram", true);
+      gesundheit.melde("telegram-empfang", true);
       gesundheit.melde("internet", true);
       for (const u of updates) {
         offset = u.update_id + 1;
-        await handleUpdate(u).catch(log);
+        void verteileUpdate(u);
       }
     } catch (e) {
       fehlversuche++;
@@ -521,11 +622,7 @@ async function poll(): Promise<void> {
             : "Telegram lehnt den Token ab (HTTP 401). Bitte TELEGRAM_BOT_TOKEN prüfen; nächster Versuch in 5 Minuten.",
         );
       }
-      // kein Log pro Fehlversuch – gesundheit.melde loggt den ersten Fehler und danach höchstens alle 10 Minuten
-      const detail = fehlerDetail(e);
-      gesundheit.melde("telegram", false, `telegram.getUpdates: ${detail}`);
-      const art = fehlerArt(e);
-      if (art === "netz" || art === "zeitlimit") gesundheit.melde("internet", false, detail);
+      pollFehlerMelden(e);
       await (wartenFn ?? schlafen)(pollWartezeit(e, fehlversuche, zufallFn));
     }
   }

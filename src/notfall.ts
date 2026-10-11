@@ -3,7 +3,8 @@ import { timingSafeEqual } from "node:crypto";
 import { audit } from "./audit.js";
 import { config } from "./config.js";
 import { save, state } from "./state.js";
-import { sendText } from "./telegram.js";
+import { fehlerDetail } from "./robust.js";
+import { sendeSpaeter } from "./telegram.js";
 
 /**
  * Notfall-Protokoll (defensiv, legal): isolieren, sperren, alarmieren.
@@ -40,7 +41,9 @@ export async function ausloesen(grund: string): Promise<void> {
   state.paused = true; // kein Werkzeug läuft mehr, keine Freigabe geht mehr durch
   save();
   audit("NOTFALL", { grund });
-  await sendText(`🚨 NOTFALL ausgelöst: ${grund}\n\nIch habe mich stillgelegt: keine Werkzeuge, keine Zeitpläne, keine Wachen, keine Freigaben. Deine Daten gebe ich nicht mehr heraus.\n\n${CHECKLISTE.join("\n")}`).catch((e) => console.error("Notfall-Alarm:", e));
+  const alarm = `🚨 NOTFALL ausgelöst: ${grund}\n\nIch habe mich stillgelegt: keine Werkzeuge, keine Zeitpläne, keine Wachen, keine Freigaben. Deine Daten gebe ich nicht mehr heraus.\n\n${CHECKLISTE.join("\n")}`;
+  // Mit Vorrang: sofort senden, auch wenn der Postausgang voll ist; bei Telegram-Störung vorn einreihen, nicht hinter den Rückstand.
+  await sendeSpaeter(alarm, { vorrang: true }).catch((f) => console.error("Notfall-Alarm:", fehlerDetail(f)));
 }
 
 /** Hebt den Notfall auf (nur per Telegram, bewusst). */

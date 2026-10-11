@@ -192,14 +192,19 @@ export async function briefingText(): Promise<string> {
     text = await withTimeout(buildBriefing(), 6000).catch(() => undefined);
     if (!text) return `Das Briefing ist gleich fertig, ${config.anrede}. Eine Minute.`;
   }
-  if (!d.briefingDelivered) {
-    // Flag erst nach erfolgreichem Senden: ein endgültig gescheiterter Versand wird beim nächsten Aufruf nachgeholt
-    sendTelegram(text)
+  if (!d.briefingDelivered && !briefingVersand) {
+    // Flag erst nach erfolgreichem Senden: ein endgültig gescheiterter Versand wird beim nächsten Aufruf nachgeholt.
+    // Der Merker verhindert einen zweiten Versand, solange der erste noch wiederholt (bis rund eine Minute).
+    briefingVersand = sendTelegram(text)
       .then(() => { d.briefingDelivered = true; save(); })
-      .catch(log);
+      .catch(log)
+      .finally(() => { briefingVersand = undefined; });
   }
   return text;
 }
+
+/** Laufender Telegram-Versand des Briefings (nur einer gleichzeitig). */
+let briefingVersand: Promise<void> | undefined;
 
 /** Morgenteil erledigt? Dann führt «Alexa, öffne Jarvis» direkt zum Tagesbriefing. */
 export function morningDone(d: DayState = day()): boolean {

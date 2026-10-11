@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { after, afterEach, beforeEach, describe, it } from "node:test";
@@ -24,7 +24,11 @@ globalThis.fetch = (async (eingabe: string | URL | Request) => {
   throw new Error(`unerwarteter Netzaufruf: ${String(eingabe instanceof Request ? eingabe.url : eingabe)}`);
 }) as typeof fetch;
 
-const { abhaengigkeiten, rechnungsTick, rueckblickTick, zeitplanTick, zielcheckTick } = await import("../src/scheduler.js");
+// Bestehende (leere) routinen.json: kein Erststart, die Tests hängen so nicht vom echten Datum ab
+mkdirSync(join(temp, "data"), { recursive: true });
+writeFileSync(join(temp, "data", "routinen.json"), "{}");
+
+const { abhaengigkeiten, rechnungsTick, routinenBeimErststart, rueckblickTick, zeitplanTick, zielcheckTick } = await import("../src/scheduler.js");
 const { zeitplaene } = await import("../src/zeitplaene.js");
 const { HttpFehler, gesundheit } = await import("../src/robust.js");
 const { imFenster, todayKey } = await import("../src/time.js");
@@ -247,6 +251,47 @@ describe("zeitplanTick", () => {
     await zeitplanTick(am(10, 8, 30));
     assert.equal(prompts.length, 0);
   });
+
+  it("Notaus während des ersten Laufs: kein weiterer Zeitplan, nichts gesendet, beide bleiben offen", async () => {
+    zeitplaene.length = 0;
+    zeitplaene.push(
+      { id: 20, name: "A", zeit: "08:00", tage: "taeglich", auftrag: "a" },
+      { id: 21, name: "B", zeit: "08:05", tage: "taeglich", auftrag: "b" },
+    );
+    const [a, b] = [zeitplaene[0]!, zeitplaene[1]!];
+    const vorher = abhaengigkeiten.handleMessage;
+    // wie runLoop bei Notaus: kein Fehler, nur der Pausentext
+    abhaengigkeiten.handleMessage = async (text: string) => { prompts.push(text); state.paused = true; return "Ich bin pausiert (Notaus). In Telegram hebt /weiter das wieder auf."; };
+    try {
+      await zeitplanTick(am(10, 8, 30));
+    } finally {
+      abhaengigkeiten.handleMessage = vorher;
+    }
+    assert.equal(prompts.length, 1);
+    assert.equal(a.lastRun, undefined);
+    assert.equal(b.lastRun, undefined);
+    assert.deepEqual(gesendet, []);
+    // nach /weiter im Fenster: beide laufen sofort (keine 5-Minuten-Sperre)
+    state.paused = false;
+    await zeitplanTick(am(10, 8, 31));
+    assert.equal(prompts.length, 3);
+    assert.equal(a.lastRun, "2026-10-10");
+    assert.equal(b.lastRun, "2026-10-10");
+    assert.deepEqual(gesendet, ["🕒 A\n\nErledigt, Sir.", "🕒 B\n\nErledigt, Sir."]);
+  });
+
+  it("Notaus mit Fehler während des Laufs: keine Fehlermeldung, Lauf bleibt offen", async () => {
+    const z = plan(22, "08:30");
+    const vorher = abhaengigkeiten.handleMessage;
+    abhaengigkeiten.handleMessage = async (text: string) => { prompts.push(text); state.paused = true; throw new Error("abgebrochen"); };
+    try {
+      await zeitplanTick(am(10, 8, 30));
+    } finally {
+      abhaengigkeiten.handleMessage = vorher;
+    }
+    assert.equal(z.lastRun, undefined);
+    assert.deepEqual(gesendet, []);
+  });
 });
 
 describe("rueckblickTick", () => {
@@ -288,6 +333,21 @@ describe("rueckblickTick", () => {
     gesundheit.melde("internet", true);
     await rueckblickTick(am(13, 22, 40));
     assert.equal(prompts.length, 1);
+  });
+
+  it("Notaus während des Laufs: Pausentext wird nicht gesendet, Rückblick bleibt offen", async () => {
+    const vorher = abhaengigkeiten.handleMessage;
+    abhaengigkeiten.handleMessage = async (text: string) => { prompts.push(text); state.paused = true; return "Ich bin pausiert (Notaus)."; };
+    try {
+      await rueckblickTick(am(20, 22, 30));
+    } finally {
+      abhaengigkeiten.handleMessage = vorher;
+    }
+    assert.deepEqual(gesendet, []);
+    state.paused = false;
+    await rueckblickTick(am(20, 22, 31));
+    assert.equal(prompts.length, 2);
+    assert.deepEqual(gesendet, ["🌙 Rückblick\n\nErledigt, Sir."]);
   });
 });
 
@@ -406,5 +466,18 @@ describe("Neustart im Nachholfenster", () => {
     await neu.rueckblickTick(am(16, 22, 32));
     assert.equal(prompts.length, 2);
     assert.deepEqual(gesendet, ["🌙 Rückblick\n\nErledigt, Sir."]);
+  });
+});
+
+describe("Erster Start ohne routinen.json (Update auf 0.16)", () => {
+  it("heute schon vorbei → als erledigt, noch nicht dran → offen", () => {
+    // Montag 12.10. 09:00: Rechnung (08:30) vorbei, Rückblick (22:30) noch nicht, Zielcheck nicht heute
+    assert.deepEqual(routinenBeimErststart(am(12, 9, 0)), { rechnungen: "2026-10-12" });
+    // Montag 08:29: noch nichts vorbei
+    assert.deepEqual(routinenBeimErststart(am(12, 8, 29)), {});
+    // Sonntag 11.10. 23:00: alles vorbei, auch der Zielcheck (so 18:00)
+    assert.deepEqual(routinenBeimErststart(am(11, 23, 0)), { rueckblick: "2026-10-11", rechnungen: "2026-10-11", zielcheck: "2026-10-11" });
+    // Sonntag 17:59: Zielcheck noch offen
+    assert.deepEqual(routinenBeimErststart(am(11, 17, 59)), { rechnungen: "2026-10-11" });
   });
 });

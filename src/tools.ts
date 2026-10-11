@@ -378,7 +378,7 @@ const plaene: Tool[] = [
     run: async (i) => {
       if (!/^\d{2}:\d{2}$/.test(String(i.zeit))) throw new Error("Zeit als HH:MM angeben.");
       const id = (zeitplaene.at(-1)?.id ?? 0) + 1;
-      zeitplaene.push({ id, name: String(i.name), zeit: String(i.zeit), tage: String(i.tage), auftrag: String(i.auftrag) });
+      zeitplaene.push({ id, name: String(i.name), zeit: String(i.zeit), tage: String(i.tage), auftrag: String(i.auftrag), angelegt: new Date().toISOString() });
       saveZeitplaene();
       return `Zeitplan #${id} «${i.name}» eingerichtet: ${i.tage} um ${i.zeit}.`;
     },
