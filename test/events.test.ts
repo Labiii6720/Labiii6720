@@ -239,7 +239,8 @@ describe("Ereignis briefing_text (Satellit im Bad)", () => {
     };
     const a = await sende({ event: "briefing_text" });
     assert.equal((a.body as { bereit: boolean }).bereit, false);
-    assert.ok(briefingSatellit.laufend, "Nachlieferung läuft");
+    // Mit pauseMs 1 kann die Nachlieferung unter Last schon innerhalb von sende() durch sein: Wirkung prüfen, nicht den Zwischenstand
+    assert.ok(briefingSatellit.laufend || n >= 2, "Nachlieferung läuft oder ist schon durch");
     await briefingSatellit.laufend;
     await durchlaufen();
     assert.equal(sendungen().length, 1);

@@ -9,7 +9,7 @@ const temp = mkdtempSync(join(tmpdir(), "jarvis-zeitplaene-"));
 process.chdir(temp);
 after(() => { process.chdir(projekt); rmSync(temp, { recursive: true, force: true }); });
 
-const { faelligIm, faelltAn, saveZeitplaene, zeitplaene } = await import("../src/zeitplaene.js");
+const { faelligIm, faelltAn, naechsterLauf, saveZeitplaene, zeitplaene } = await import("../src/zeitplaene.js");
 const { todayKey } = await import("../src/time.js");
 
 /** 10.10.2026 ist ein Samstag, 12.10.2026 ein Montag (lokale Zeit Europe/Zurich) */
@@ -107,5 +107,91 @@ describe("neu angelegter Zeitplan", () => {
     const neu = anlegen(1, "08:00", sa(9, 10));
     assert.equal(neu.angelegt, sa(9, 10).toISOString());
     assert.equal(faelligIm(neu, sa(9, 11), 120), false);
+  });
+});
+
+describe("naechsterLauf an der Sommerzeit-Umstellung", () => {
+  // 28.03.2027 (Sonntag): in Europe/Zurich springt die Uhr von 01:59 auf 03:00, 02:00–02:59 gibt es nicht
+  const umst = (h: number, m: number) => new Date(2027, 2, 28, h, m, 0, 0);
+  const z = plan("02:30", "so");
+
+  it("Uhrzeit in der Lücke: angezeigt wird 03:00, wann der Scheduler (Fenster 60) wirklich startet", () => {
+    const lauf = naechsterLauf(z, umst(1, 0), 60)!;
+    assert.equal(lauf.getTime(), umst(3, 0).getTime());
+    assert.equal(lauf.getHours(), 3);
+    assert.equal(lauf.getMinutes(), 0);
+    assert.equal(faelligIm(z, lauf, 60), true);
+    assert.equal(faelligIm(z, new Date(lauf.getTime() - 60_000), 60), false);
+  });
+
+  it("Fenster zu kurz für die Lücke: an diesem Tag kein Lauf, erst am nächsten Sonntag", () => {
+    for (const fenster of [0, 1, 30]) {
+      const lauf = naechsterLauf(z, umst(1, 0), fenster)!;
+      assert.equal(lauf.getTime(), new Date(2027, 3, 4, 2, 30, 0, 0).getTime(), `Fenster ${fenster}`);
+      assert.equal(faelligIm(z, umst(3, 0), fenster), false);
+    }
+  });
+
+  it("ausserhalb der Lücke unverändert", () => {
+    assert.equal(naechsterLauf(plan("03:30", "so"), umst(1, 0), 60)!.getTime(), umst(3, 30).getTime());
+    assert.equal(naechsterLauf(plan("01:30", "so"), umst(1, 0), 0)!.getTime(), umst(1, 30).getTime());
+  });
+});
+
+describe("naechsterLauf an der Rückstellung auf Winterzeit", () => {
+  // 25.10.2026 (Sonntag): in Europe/Zurich läuft 02:00–02:59 zweimal, erst MESZ (00:00Z–00:59Z), dann MEZ (01:00Z–01:59Z)
+  const utc = (h: number, m: number) => new Date(Date.UTC(2026, 9, 25, h, m, 0, 0));
+  const neu = (zeit: string, angelegt?: Date) => ({ ...plan(zeit, "taeglich"), ...(angelegt ? { angelegt: angelegt.toISOString() } : {}) });
+
+  /** Erster Minuten-Takt ab `now`, in dem der Scheduler (faelligIm) läuft, bis `bis`; sonst undefined. */
+  const simuliere = (z: Zeitplan, now: Date, fenster: number, bis: Date): Date | undefined => {
+    for (let t = now.getTime(); t < bis.getTime(); t += 60_000) if (faelligIm(z, new Date(t), fenster)) return new Date(t);
+    return undefined;
+  };
+  type Zeitplan = Parameters<typeof faelligIm>[0];
+
+  it("02:30, im zweiten 02:20 angelegt: Lauf im zweiten Durchgang, nicht eine Stunde zurück", () => {
+    const now = utc(1, 20);
+    for (const fenster of [0, 60]) {
+      const z = neu("02:30", now);
+      const lauf = naechsterLauf(z, now, fenster)!;
+      assert.equal(lauf.toISOString(), utc(1, 30).toISOString(), `Fenster ${fenster}`);
+      assert.equal(lauf.getHours(), 2);
+      assert.equal(lauf.getMinutes(), 30);
+      assert.equal(simuliere(z, now, fenster, utc(3, 0))?.toISOString(), lauf.toISOString(), `Fenster ${fenster}`);
+    }
+  });
+
+  it("02:00 im ersten 02:20 noch offen: Fenster 0 läuft beim zweiten 02:00, Fenster 60 sofort", () => {
+    const now = utc(0, 20);
+    const z = neu("02:00");
+    assert.equal(naechsterLauf(z, now, 0)!.toISOString(), utc(1, 0).toISOString());
+    assert.equal(simuliere(z, now, 0, utc(3, 0))?.toISOString(), utc(1, 0).toISOString());
+    assert.equal(naechsterLauf(z, now, 60)!.getTime(), now.getTime());
+    assert.equal(simuliere(z, now, 60, utc(3, 0))?.toISOString(), now.toISOString());
+  });
+
+  it("heute schon im ersten Durchgang gelaufen: kein zweiter Lauf, nächster am Montag", () => {
+    const z = { ...neu("02:30"), lastRun: todayKey(utc(0, 30)) };
+    assert.equal(naechsterLauf(z, utc(1, 20), 0)!.getTime(), new Date(2026, 9, 26, 2, 30, 0, 0).getTime());
+  });
+
+  it("stimmt rund um die Umstellung mit der Minuten-Simulation des Schedulers überein", () => {
+    const bis = utc(3, 0); // 04:00 MEZ: danach läuft keiner dieser Zeitpläne mehr am selben Tag
+    for (let t = utc(23, 30).getTime() - 86_400_000; t <= utc(2, 30).getTime(); t += 30 * 60_000) {
+      const now = new Date(t);
+      for (const zeit of ["01:30", "02:00", "02:30", "02:59", "03:00"]) {
+        for (const fenster of [0, 60]) {
+          for (const angelegt of [undefined, now]) {
+            const z = neu(zeit, angelegt);
+            const erwartet = simuliere(z, now, fenster, bis);
+            const lauf = naechsterLauf(z, now, fenster)!;
+            const [h, m] = zeit.split(":").map(Number);
+            const text = `${now.toISOString()} ${zeit} Fenster ${fenster}${angelegt ? " angelegt" : ""}`;
+            assert.equal(lauf.toISOString(), (erwartet ?? new Date(2026, 9, 26, h, m, 0, 0)).toISOString(), text);
+          }
+        }
+      }
+    }
   });
 });

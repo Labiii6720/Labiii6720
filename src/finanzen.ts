@@ -210,6 +210,8 @@ export interface MonatsZeile {
   offen: Summe;
   anzahlBezahlt: number;
   anzahlOffen: number;
+  /** Anzahl je Währung (Rechnungen ohne Betrag zählen unter ihrer Währung, sonst CHF), z. B. { offen: { CHF: 4, EUR: 1 } } */
+  anzahlJe: { bezahlt: Summe; offen: Summe };
 }
 
 export interface FinanzUebersicht {
@@ -283,7 +285,14 @@ export function finanzUebersicht(now: Date = new Date(), liste: Rechnung[] = rec
   for (const r of offene) offenSumme.add(r);
 
   const monate = Array.from({ length: 6 }, (_, i) => plusMonate(heute, i - 5));
-  const proMonat = monate.map(() => ({ bezahlt: new Summierer(), offen: new Summierer(), anzahlBezahlt: 0, anzahlOffen: 0 }));
+  const proMonat = monate.map(() => ({
+    bezahlt: new Summierer(),
+    offen: new Summierer(),
+    anzahlBezahlt: 0,
+    anzahlOffen: 0,
+    jeBezahlt: {} as Summe,
+    jeOffen: {} as Summe,
+  }));
   for (const r of liste) {
     let tag: string | undefined;
     if (r.status === "bezahlt") tag = tagVon(r.bezahltAm) ?? tagVon(r.faellig) ?? tagVon(r.erkanntAm);
@@ -291,12 +300,15 @@ export function finanzUebersicht(now: Date = new Date(), liste: Rechnung[] = rec
     const i = tag ? monate.indexOf(tag.slice(0, 7)) : -1;
     if (i < 0) continue;
     const zeile = proMonat[i]!;
+    const w = waehrungVon(r);
     if (r.status === "bezahlt") {
       zeile.bezahlt.add(r);
       zeile.anzahlBezahlt++;
+      zeile.jeBezahlt[w] = (zeile.jeBezahlt[w] ?? 0) + 1;
     } else {
       zeile.offen.add(r);
       zeile.anzahlOffen++;
+      zeile.jeOffen[w] = (zeile.jeOffen[w] ?? 0) + 1;
     }
   }
 
@@ -312,7 +324,14 @@ export function finanzUebersicht(now: Date = new Date(), liste: Rechnung[] = rec
       .filter((r) => { const b = tagVon(r.bezahltAm); return r.status === "bezahlt" && b !== undefined && b >= vorSechsTagen && b <= heute; })
       .sort((a, b) => (tagVon(b.bezahltAm) ?? "").localeCompare(tagVon(a.bezahltAm) ?? "") || a.id - b.id)
       .map(kopie),
-    proMonat: proMonat.map((z, i) => ({ monat: monate[i]!, bezahlt: z.bezahlt.summe(), offen: z.offen.summe(), anzahlBezahlt: z.anzahlBezahlt, anzahlOffen: z.anzahlOffen })),
+    proMonat: proMonat.map((z, i) => ({
+      monat: monate[i]!,
+      bezahlt: z.bezahlt.summe(),
+      offen: z.offen.summe(),
+      anzahlBezahlt: z.anzahlBezahlt,
+      anzahlOffen: z.anzahlOffen,
+      anzahlJe: { bezahlt: z.jeBezahlt, offen: z.jeOffen },
+    })),
   };
 }
 

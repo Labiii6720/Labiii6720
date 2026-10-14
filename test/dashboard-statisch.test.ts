@@ -36,6 +36,21 @@ describe("Kommandozentrale: statische Schutzzusagen", () => {
     assert.doesNotMatch(js, /[?&]token=/);
   });
 
+  it("Token-Schlüssel kollidiert nicht mit der Gesten-Konsole (gleicher Ursprung, «jarvis.» + Feld-ID)", () => {
+    const gesture = readFileSync(resolve(web, "gesture.html"), "utf8");
+    const key = js.match(/const TOKEN_KEY = "([^"]+)"/)?.[1];
+    assert.ok(key, "TOKEN_KEY gefunden");
+    const liste = gesture.match(/for \(const id of \[([^\]]+)\]\)[^\n]*\n[^\n]*localStorage\.getItem\("jarvis\." \+ id\)/)?.[1];
+    assert.ok(liste, "Feldliste der Gesten-Konsole gefunden");
+    const ids = [...liste!.matchAll(/"([^"]+)"/g)].map((m) => m[1]!);
+    assert.ok(ids.includes("token"));
+    for (const id of ids) assert.notEqual(key, "jarvis." + id, id);
+    assert.notEqual(key, "jarvis.thema");
+    // Den Token der Konsole weder lesen noch löschen
+    assert.doesNotMatch(js, /(getItem|removeItem|lies|entferne)\(\s*(["']localStorage["'],\s*)?["']jarvis\.token["']/);
+    assert.doesNotMatch(js, /localStorage["'],\s*ALT_SITZUNG/);
+  });
+
   it("dashboard.html: kein Inline-Skript, kein style=, keine on…=-Attribute, nichts von aussen", () => {
     assert.doesNotMatch(html, /<script(?![^>]*\ssrc=)[^>]*>/i, "kein Inline-Skript");
     assert.deepEqual([...html.matchAll(/<script\b[^>]*\ssrc="([^"]+)"/gi)].map((m) => m[1]), ["/dashboard/app.js"]);

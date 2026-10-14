@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { after, afterEach, describe, it } from "node:test";
@@ -196,5 +196,147 @@ describe("Löschen von Zeitplänen und Wachen braucht Freigabe", () => {
     assert.equal(t.summary!({ id: 3 }), "Wache #3 löschen: balkon – Steht die Balkontür offen?");
     assert.equal(t.summary!({ id: 4 }), "Wache #4 löschen (nicht gefunden)");
     dynamicWachen.length = 0;
+  });
+
+  it("zeitplan_loeschen löscht nur, was die Freigabe nannte", async () => {
+    zeitplaene.push({ id: 7, name: "News", zeit: "07:00", tage: "werktags", auftrag: "News zusammenfassen" });
+    const t = werkzeug("zeitplan_loeschen");
+    const gespeichert = t.festhalten!({ id: 7 });
+    assert.deepEqual(gespeichert, { id: 7, erwartet_name: "News", erwartet_zeit: "07:00", erwartet_tage: "werktags", erwartet_auftrag: "News zusammenfassen" });
+    // Ohne festgehaltenen Stand (oder bei unbekannter ID) nichts löschen
+    await assert.rejects(t.run({ id: 7 }, ctx), /Ich lösche nichts/);
+    assert.equal(t.festhalten!({ id: 99 }).erwartet_name, null);
+    zeitplaene[0]!.name = "Anderes";
+    await assert.rejects(t.run(gespeichert, ctx), /heisst inzwischen anders, Sir\. Ich lösche nichts\./);
+    assert.equal(zeitplaene.length, 1);
+    zeitplaene[0]!.name = "News";
+    assert.equal(await t.run(gespeichert, ctx), "Gelöscht.");
+    assert.equal(zeitplaene.length, 0);
+  });
+
+  it("zeitplan_loeschen löscht nichts, wenn Uhrzeit, Tage oder Auftrag inzwischen anders sind (Name gleich)", async () => {
+    zeitplaene.push({ id: 8, name: "Morgen", zeit: "07:00", tage: "Mo, Mi", auftrag: "Briefing" });
+    const t = werkzeug("zeitplan_loeschen");
+    const gespeichert = t.festhalten!({ id: 8 });
+    // Wie PUT /api/zeitplaene/8 in der Kommandozentrale: Objekt bleibt, Felder ändern sich, Name bleibt
+    zeitplaene[0]!.zeit = "08:15";
+    await assert.rejects(t.run(gespeichert, ctx), /Zeitplan #8 wurde inzwischen geändert, Sir\. Ich lösche nichts\./);
+    zeitplaene[0]!.zeit = "07:00";
+    zeitplaene[0]!.tage = "taeglich";
+    await assert.rejects(t.run(gespeichert, ctx), /inzwischen geändert.*Ich lösche nichts/);
+    zeitplaene[0]!.tage = "mo,mi"; // nur anders geschrieben: derselbe Plan
+    zeitplaene[0]!.auftrag = "Etwas ganz anderes";
+    await assert.rejects(t.run(gespeichert, ctx), /inzwischen geändert.*Ich lösche nichts/);
+    assert.equal(zeitplaene.length, 1);
+    // Alte Freigabe (nur der Name festgehalten): nichts löschen
+    await assert.rejects(t.run({ id: 8, erwartet_name: "Morgen" }, ctx), /älteren Version.*Ich lösche nichts/);
+    zeitplaene[0]!.auftrag = "Briefing";
+    assert.equal(await t.run(gespeichert, ctx), "Gelöscht.");
+    assert.equal(zeitplaene.length, 0);
+  });
+
+  it("wache_loeschen löscht nur, was die Freigabe nannte", async () => {
+    dynamicWachen.push({ id: 3, kamera: "balkon", frage: "Steht die Balkontür offen?", alle_minuten: 60 });
+    const t = werkzeug("wache_loeschen");
+    const gespeichert = t.festhalten!({ id: 3 });
+    assert.deepEqual(gespeichert, { id: 3, erwartet_kamera: "balkon", erwartet_frage: "Steht die Balkontür offen?" });
+    await assert.rejects(t.run({ id: 3 }, ctx), /Ich lösche nichts/);
+    dynamicWachen[0]!.frage = "Brennt Licht?";
+    await assert.rejects(t.run(gespeichert, ctx), /prüft inzwischen etwas anderes, Sir\. Ich lösche nichts\./);
+    assert.equal(dynamicWachen.length, 1);
+    dynamicWachen[0]!.frage = "Steht die Balkontür offen?";
+    assert.equal(await t.run(gespeichert, ctx), "Gelöscht.");
+    assert.equal(dynamicWachen.length, 0);
+  });
+
+  it("Werkzeuge vergeben gelöschte IDs nie neu", async () => {
+    const { state } = await import("../src/state.js");
+    // zeitplan_erstellen gibt es nur mit Telegram (Meldungen); kein Versand in diesem Test
+    const vorher = config.telegramToken;
+    (config as { telegramToken?: string }).telegramToken = "attrappe";
+    const neu = werkzeug("zeitplan_erstellen");
+    (config as { telegramToken?: string }).telegramToken = vorher;
+    const a = await neu.run({ name: "A", zeit: "07:00", tage: "taeglich", auftrag: "x" }, ctx);
+    const idA = Number(/#(\d+)/.exec(String(a))![1]);
+    zeitplaene.length = 0; // höchsten Eintrag entfernen
+    const b = await neu.run({ name: "B", zeit: "07:00", tage: "taeglich", auftrag: "y" }, ctx);
+    assert.equal(Number(/#(\d+)/.exec(String(b))![1]), idA + 1);
+    assert.equal(state.naechsteZeitplanId, idA + 2);
+    zeitplaene.length = 0;
+    const wache = werkzeug("wache_erstellen");
+    const w1 = await wache.run({ kamera: "balkon", frage: "Tür offen?", alle_minuten: 30 }, ctx);
+    const idW = Number(/#(\d+)/.exec(String(w1))![1]);
+    dynamicWachen.length = 0;
+    const w2 = await wache.run({ kamera: "balkon", frage: "Licht an?", alle_minuten: 30 }, ctx);
+    assert.equal(Number(/#(\d+)/.exec(String(w2))![1]), idW + 1);
+    dynamicWachen.length = 0;
+  });
+});
+
+describe("Freigabe-Text zeigt genau, was angelegt wird", () => {
+  const mitTelegram = <T,>(f: () => T): T => {
+    const vorher = config.telegramToken;
+    (config as { telegramToken?: string }).telegramToken = "attrappe";
+    try { return f(); } finally { (config as { telegramToken?: string }).telegramToken = vorher; }
+  };
+
+  it("zeitplan_erstellen: der ganze Auftrag steht in der Freigabe, nicht nur der Anfang", () => {
+    const t = mitTelegram(() => werkzeug("zeitplan_erstellen"));
+    const auftrag = "Fasse meine neuen Mails zusammen. " + "x".repeat(1450) + " VERSTECKT-ENDE";
+    assert.equal(auftrag.length > 1400 && auftrag.length <= 2000, true);
+    const text = t.summary!({ name: " Morgenmails ", zeit: "07:00", tage: "Mo, Fr", auftrag });
+    assert.equal(text, `Zeitplan «Morgenmails» mo,fr um 07:00: ${auftrag}`);
+    assert.ok(text.endsWith("VERSTECKT-ENDE"));
+    assert.ok(text.length < 4096); // passt in eine Telegram-Nachricht
+    assert.match(t.summary!({ name: "", zeit: "25:00", tage: "x", auftrag: "" }), /^Zeitplan \(ungültig\): Name: 1 bis 60 Zeichen/);
+  });
+
+  it("wache_erstellen: die ganze Frage samt Bedingung steht in der Freigabe", () => {
+    const t = werkzeug("wache_erstellen");
+    const frage = "Steht die Balkontür offen? " + "y".repeat(260) + " ENDE";
+    assert.equal(frage.length <= 300, true);
+    assert.equal(t.summary!({ kamera: "balkon", frage, alle_minuten: 30 }), `Wache auf «balkon» alle 30 min: ${frage}`);
+    assert.equal(t.summary!({ kamera: "balkon", frage: "Licht an?", alle_minuten: 30, nur_wenn: "nacht", ruhe_minuten: 60 }), "Wache auf «balkon» alle 30 min (nur nacht, Ruhe 60 min): Licht an?");
+    assert.match(t.summary!({ kamera: "garage", frage: "x", alle_minuten: 30 }), /^Wache \(ungültig\): Diese Kamera kenne ich nicht/);
+  });
+});
+
+describe("Speicherfehler: die Werkzeuge nehmen die Änderung im Speicher zurück", () => {
+  // Ein Verzeichnis an der Stelle der .tmp-Datei lässt das atomare Schreiben scheitern (wie ENOSPC/EACCES)
+  const sperren = (datei: string) => mkdirSync(`data/${datei}.tmp`, { recursive: true });
+  const entsperren = (datei: string) => rmSync(`data/${datei}.tmp`, { recursive: true, force: true });
+  afterEach(() => { entsperren("zeitplaene.json"); entsperren("wachen.json"); zeitplaene.length = 0; dynamicWachen.length = 0; });
+
+  it("zeitplan_erstellen: nichts bleibt im Speicher, ein zweiter Versuch legt genau einen an", async () => {
+    const vorher = config.telegramToken;
+    (config as { telegramToken?: string }).telegramToken = "attrappe";
+    const t = werkzeug("zeitplan_erstellen");
+    (config as { telegramToken?: string }).telegramToken = vorher;
+    sperren("zeitplaene.json");
+    await assert.rejects(t.run({ name: "Morgen", zeit: "07:00", tage: "taeglich", auftrag: "Briefing" }, ctx));
+    assert.equal(zeitplaene.length, 0);
+    entsperren("zeitplaene.json");
+    await t.run({ name: "Morgen", zeit: "07:00", tage: "taeglich", auftrag: "Briefing" }, ctx);
+    assert.equal(zeitplaene.length, 1);
+    assert.equal(JSON.parse(readFileSync("data/zeitplaene.json", "utf8")).length, 1);
+  });
+
+  it("zeitplan_loeschen: der Zeitplan bleibt im Speicher, wenn nicht gespeichert werden konnte", async () => {
+    zeitplaene.push({ id: 20, name: "A", zeit: "06:00", tage: "taeglich", auftrag: "a" }, { id: 21, name: "B", zeit: "07:00", tage: "werktags", auftrag: "b" });
+    const t = werkzeug("zeitplan_loeschen");
+    const gespeichert = t.festhalten!({ id: 20 });
+    sperren("zeitplaene.json");
+    await assert.rejects(t.run(gespeichert, ctx));
+    assert.deepEqual(zeitplaene.map((z) => z.id), [20, 21]);
+  });
+
+  it("wache_erstellen und wache_loeschen: Stand im Speicher wie vorher", async () => {
+    sperren("wachen.json");
+    await assert.rejects(werkzeug("wache_erstellen").run({ kamera: "balkon", frage: "Tür offen?", alle_minuten: 30 }, ctx));
+    assert.equal(dynamicWachen.length, 0);
+    dynamicWachen.push({ id: 30, kamera: "balkon", frage: "Licht an?", alle_minuten: 60 }, { id: 31, kamera: "balkon", frage: "Tür zu?", alle_minuten: 60 });
+    const t = werkzeug("wache_loeschen");
+    await assert.rejects(t.run(t.festhalten!({ id: 30 }), ctx));
+    assert.deepEqual(dynamicWachen.map((w) => w.id), [30, 31]);
   });
 });

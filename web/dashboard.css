@@ -39,6 +39,8 @@
   --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
   --fs-xs: 12px; --fs-s: 13px; --fs-m: 15px; --fs-l: 18px; --fs-xl: 24px; --fs-h1: 28px; --fs-kpi: 34px; --fs-hero: 72px;
   --dauer: .16s;
+  /* Höhe der Sticky-Leiste (Leiste + Reiter, ggf. Notfall-Band) – Grundlage für scroll-padding */
+  --kopf-h: 116px;
 }
 @media (prefers-color-scheme: light) {
   :root:not([data-theme="dark"]) {
@@ -66,7 +68,9 @@
 }
 
 * { box-sizing: border-box; }
-html { -webkit-text-size-adjust: 100%; }
+html { -webkit-text-size-adjust: 100%; scroll-padding-top: calc(var(--kopf-h) + 12px); }
+/* Fokus beim Zurück-Tabben nicht unter der Leiste: mit Notfall-Band ist sie höher (ein inline gesetztes --kopf-h geht vor) */
+:root:has(#bandNotfall:not([hidden])) { --kopf-h: 164px; }
 body { margin: 0; background: var(--bg); color: var(--t1); font: 400 var(--fs-m)/1.5 var(--font); -webkit-font-smoothing: antialiased; overflow-x: hidden; }
 button, input, select, textarea { font: inherit; color: inherit; }
 a { color: var(--accent-text); }
@@ -88,11 +92,13 @@ svg.i.s { width: 15px; height: 15px; }
 .brand { font-weight: 600; letter-spacing: .34em; font-size: 13px; color: var(--t1); display: flex; align-items: center; gap: 10px; margin-right: 4px; }
 .brand svg { width: 20px; height: 20px; }
 .plakette { display: inline-flex; align-items: center; gap: 7px; height: 30px; padding: 0 12px 0 10px; border-radius: var(--r-pill); background: var(--s2); font-size: var(--fs-s); color: var(--t1); white-space: nowrap; }
-.plakette .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--gut); box-shadow: 0 0 0 3px color-mix(in srgb, var(--gut) 22%, transparent); }
+.plakette { min-width: 0; } /* letzter Ausweg bei Platznot: Text kürzen statt Notaus verdrängen */
+#zustandText { overflow: hidden; text-overflow: ellipsis; }
+.plakette .dot { flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--gut); box-shadow: 0 0 0 3px color-mix(in srgb, var(--gut) 22%, transparent); }
 .plakette.pausiert .dot { background: var(--warn); box-shadow: 0 0 0 3px color-mix(in srgb, var(--warn) 22%, transparent); }
 .plakette.notfall { background: var(--krit-wash); }
 .plakette.notfall .dot { background: var(--krit); box-shadow: 0 0 0 3px color-mix(in srgb, var(--krit) 25%, transparent); }
-.stoerung { display: inline-flex; align-items: center; gap: 6px; font-size: var(--fs-s); color: var(--t2); white-space: nowrap; }
+.stoerung { display: inline-flex; align-items: center; gap: 6px; font-size: var(--fs-s); color: var(--t2); white-space: nowrap; min-width: 0; overflow: hidden; flex-shrink: .01; } /* kürzt zuletzt; vorher die Plakette */
 .stoerung svg { color: var(--warn); }
 .stoerung[hidden] { display: none; }
 .spacer { flex: 1; }
@@ -108,6 +114,8 @@ svg.i.s { width: 15px; height: 15px; }
 .uhr b { color: var(--t1); font-weight: 500; font-size: var(--fs-m); margin-left: 6px; }
 .ikon { width: 40px; height: 40px; border: 0; border-radius: 50%; background: transparent; color: var(--t2); display: inline-grid; place-items: center; cursor: pointer; flex: none; }
 .ikon:hover { background: var(--s2); color: var(--t1); }
+/* Notaus und Thema werden nie verdrängt (DESIGN §5: Notaus stets sichtbar) */
+#thema, #notausKnopf { flex: none; }
 
 .tabs { display: flex; gap: 2px; overflow-x: auto; scrollbar-width: none; height: 48px; align-items: stretch; box-shadow: inset 0 -1px 0 var(--line); }
 .tabs::-webkit-scrollbar { display: none; }
@@ -457,6 +465,8 @@ dialog form { display: flex; flex-direction: column; max-height: calc(100dvh - 3
 .feldgr.ungueltig input.feld, .feldgr.ungueltig textarea.feld { box-shadow: inset 0 0 0 1.5px var(--krit-text); }
 .feldgr.ungueltig .feld:focus { outline: none; box-shadow: inset 0 0 0 2px var(--krit-text); }
 .feldgr.ungueltig .hilfe .h-text { display: none; }
+/* PIN: der Sperr-Hinweis bleibt auch neben der Fehlermeldung stehen */
+#pinGr.ungueltig .hilfe .h-text { display: inline; }
 .feldgr .hilfe { font-size: 12px; color: var(--t3); margin-top: 6px; display: flex; justify-content: space-between; gap: 8px; }
 .feldgr .hilfe .zaehler { margin-left: auto; }
 .zwei { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; align-items: start; }
@@ -479,7 +489,8 @@ input.pin { font-size: 28px; letter-spacing: .5em; text-align: center; height: 6
 .gross-bild .bt { font-weight: 500; }
 
 /* ---------- Rückmeldung ---------- */
-.toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%) translateY(20px); background: var(--s1); box-shadow: var(--shadow-2); padding: 12px 18px; border-radius: 12px; font-size: var(--fs-s); opacity: 0; transition: opacity .2s, transform .2s; z-index: 40; max-width: calc(100vw - 32px); pointer-events: none; }
+.toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%) translateY(20px); background: var(--s1); box-shadow: var(--shadow-2); padding: 12px 18px; border-radius: 12px; font-size: var(--fs-s); opacity: 0; transition: opacity .2s, transform .2s; z-index: 40; width: max-content; max-width: calc(100vw - 32px); pointer-events: none; }
+/* width: max-content – sonst begrenzt left: 50% die Shrink-to-fit-Breite auf die halbe Fensterbreite */
 .toast.an { opacity: 1; transform: translateX(-50%); }
 
 /* ---------- Ergänzungen für echte Daten ---------- */
@@ -500,7 +511,7 @@ body.abgemeldet .seg-oben, body.abgemeldet .uhr, body.abgemeldet #notausKnopf, b
 .naechst .ruhig + .liste { margin-top: var(--sp-3); }
 /* Teil 2: Laden eines anderen Zeitraums – alte Darstellung bleibt gedimmt stehen */
 .laedt { opacity: .5; transition: opacity .2s; }
-.karte > .leer { padding: 40px 16px; }
+.karte > .leer { padding: 48px 16px; }
 .diag-fuellt > .leer { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; }
 /* Kameras: Platzhalter ohne Bild, Hinweis bei gestörtem Nachladen */
 .kam-platz { display: flex; flex-direction: column; gap: 8px; align-items: center; justify-content: center; aspect-ratio: 16/9; background: var(--s2); color: var(--t2); font-size: var(--fs-s); padding: 16px; text-align: center; overflow-wrap: anywhere; }
@@ -534,6 +545,8 @@ body.abgemeldet .seg-oben, body.abgemeldet .uhr, body.abgemeldet #notausKnopf, b
   .kpis { grid-template-columns: repeat(2, minmax(0,1fr)); }
   .protos { grid-template-columns: repeat(2, minmax(0,1fr)); }
   .uhr .datum { display: none; }
+  /* Bei Störung weicht das Markenwort (Symbol bleibt), damit Hinweis, Thema und Notaus Platz haben */
+  .top-in:has(#stoerung:not([hidden])) .brand .wort { display: none; }
 }
 @media (max-width: 920px) {
   :root { --gutter: 24px; }
@@ -543,8 +556,12 @@ body.abgemeldet .seg-oben, body.abgemeldet .uhr, body.abgemeldet #notausKnopf, b
 }
 /* ---------- Handy ---------- */
 @media (max-width: 700px) {
-  :root { --fs-kpi: 28px; --fs-hero: 52px; --fs-h1: 24px; --gutter: 16px; }
+  :root { --fs-kpi: 28px; --fs-hero: 52px; --fs-h1: 24px; --gutter: 16px; --kopf-h: 108px; }
+  /* Notfall-Band bricht auf dem Handy auf bis zu drei Zeilen um */
+  :root:has(#bandNotfall:not([hidden])) { --kopf-h: 176px; }
   .top-in { height: 60px; gap: 8px; }
+  /* Handy: «Verbindung gestört» nur als Netz-Symbol; das Wort bleibt für Screenreader (font-size 0, nicht versteckt) */
+  .stoerung { font-size: 0; gap: 0; flex: none; }
   .brand { letter-spacing: .26em; }
   .uhr, #abmelden { display: none; }
   .eyebrow .nur-handy { display: inline; }
@@ -591,6 +608,7 @@ body.abgemeldet .seg-oben, body.abgemeldet .uhr, body.abgemeldet #notausKnopf, b
   .plan .akt { grid-column: 2; grid-row: auto; margin-left: -12px; }
   .plan .akt:has(.vermerk) { margin-left: 0; margin-top: 6px; }
   .kams { grid-template-columns: minmax(0,1fr); gap: 16px; }
+  .karte.kam { padding: 0; } /* Bild bis an den Kartenrand, Live-Marke sitzt auf dem Bild */
   .audit li { flex-wrap: wrap; gap: 2px 12px; }
   .audit .zeitm, .audit .ev { width: auto; }
   .audit .info { flex-basis: 100%; }
@@ -602,6 +620,12 @@ body.abgemeldet .seg-oben, body.abgemeldet .uhr, body.abgemeldet #notausKnopf, b
   .msg { max-width: 92%; }
   .eingabe .knopf .wort { display: none; }
   .eingabe .knopf { width: 48px; padding: 0; }
+}
+/* Schmale Handys: Dialog breiter, damit die sieben Wochentag-Chips je ≥ 40 px breit bleiben */
+@media (max-width: 400px) {
+  dialog { width: calc(100vw - 16px); max-width: calc(100vw - 16px); } /* UA-max-width des Modals sonst enger */
+  .dlg-kopf, .dlg-rumpf, .dlg-fuss { padding-left: 16px; padding-right: 16px; }
+  .tage-kl { gap: 4px; }
 }
 @media (max-width: 380px) {
   .brand .wort { display: none; }

@@ -3,6 +3,7 @@ import { anthropic as claude, claudeAufruf, trackUsage } from "./claude.js";
 import { chmodSync, constants, copyFileSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { config } from "./config.js";
 import { HttpFehler, mitWiederholung, retryAfterAusHeader, type WiederholOptionen } from "./robust.js";
+import { save, state } from "./state.js";
 
 /**
  * Kameras laufen über Frigate (Erkennung, Aufnahme, Zonen – alles lokal).
@@ -242,6 +243,16 @@ export function saveWachen(): void {
   mkdirSync("data", { recursive: true, mode: 0o700 });
   writeFileSync(`${WACHEN_FILE}.tmp`, JSON.stringify(dynamicWachen, null, 2), { mode: 0o600 });
   renameSync(`${WACHEN_FILE}.tmp`, WACHEN_FILE);
+}
+
+/** Neue Wachen-ID, die nie zuvor vergeben war (wie neueZeitplanId in zeitplaene.ts). */
+export function neueWacheId(): number {
+  const gemerkt = state.naechsteWacheId;
+  const vorhanden = dynamicWachen.flatMap((w) => (w.id !== undefined && Number.isSafeInteger(w.id) ? [w.id + 1] : []));
+  const id = Math.max(1, Number.isSafeInteger(gemerkt) ? gemerkt! : 1, ...vorhanden);
+  state.naechsteWacheId = id + 1;
+  save();
+  return id;
 }
 
 /** Alle Wachen: aus cameras.json (ohne ID) und die per Werkzeug angelegten (mit ID). */

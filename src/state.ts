@@ -51,6 +51,10 @@ export interface State {
   paused?: boolean;
   notfall?: NotfallStatus;
   day?: DayState;
+  /** nächste freie ID, gelöschte werden nie neu vergeben */
+  naechsteZeitplanId?: number;
+  /** nächste freie ID, gelöschte werden nie neu vergeben */
+  naechsteWacheId?: number;
 }
 
 /** Vorhandene Sicherung mit genau diesem Inhalt (jeder Prozessstart – Dienst, check, setup, Auth-Skripte – lädt neu). */

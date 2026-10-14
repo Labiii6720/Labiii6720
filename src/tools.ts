@@ -11,8 +11,8 @@ import { state } from "./state.js";
 import { clock } from "./time.js";
 import { listFiles, readFile, ROOT, runCommand, safePath, writeFile } from "./workspace.js";
 import * as browser from "./browser.js";
-import { pruefeZeitplaeneSchreibbar, pruefeZeitplan, pruefungsText, saveZeitplaene, ZEITPLAENE_UNLESBAR, zeitplaene, zeitplaeneNichtGeladen } from "./zeitplaene.js";
-import { describeCameras, dynamicWachen, eventClip, formatEvents, hasCameras, look, pruefeWache, pruefeWachenSchreibbar, recentEvents, saveWachen, allWachen, WACHEN_UNLESBAR, wachenNichtGeladen } from "./cameras.js";
+import { neueZeitplanId, normaleTage, pruefeZeitplaeneSchreibbar, pruefeZeitplan, pruefungsText, saveZeitplaene, ZEITPLAENE_UNLESBAR, zeitplaene, zeitplaeneNichtGeladen } from "./zeitplaene.js";
+import { describeCameras, dynamicWachen, neueWacheId, eventClip, formatEvents, hasCameras, look, pruefeWache, pruefeWachenSchreibbar, recentEvents, saveWachen, allWachen, WACHEN_UNLESBAR, wachenNichtGeladen } from "./cameras.js";
 import { addRechnung, erkenneRechnung, formatRechnung, offeneRechnungen, RECHNUNGEN_UNLESBAR, rechnungen, rechnungenNichtGeladen, setzeStatus } from "./finanzen.js";
 import { readMail as gmailRead, searchMails as gmailSearch } from "./gmail.js";
 import { beraterTools } from "./berater.js";
@@ -44,6 +44,11 @@ export interface Tool {
   stufe: Stufe | ((input: Input) => Stufe);
   /** Ein Satz für die Freigabe-Nachricht */
   summary?: (input: Input) => string;
+  /**
+   * Ergänzt beim Anlegen des Auftrags das gespeicherte Input um den Stand, den die Zusammenfassung nennt. run gleicht
+   * damit nach der Freigabe ab und tut nichts, wenn sich das Ziel inzwischen geändert hat.
+   */
+  festhalten?: (input: Input) => Input;
   run: (input: Input, ctx: ToolContext) => Promise<string | ToolOutput>;
 }
 
@@ -437,6 +442,24 @@ const web: Tool[] = [
   },
 ];
 
+/**
+ * Ändert eine Liste im Speicher und speichert sie; scheitert das Speichern (Platte voll, keine Rechte), gilt wieder der
+ * vorige Stand. Sonst liefe ein nicht gespeicherter Zeitplan bis zum Neustart weiter (und ein zweiter Versuch legte ihn
+ * doppelt an), oder ein gelöschter käme nach dem Neustart wieder.
+ */
+function aendernUndSpeichern<T>(liste: T[], aendern: () => void, speichern: () => void): void {
+  const vorher = [...liste];
+  aendern();
+  try {
+    speichern();
+  } catch (e) {
+    liste.splice(0, liste.length, ...vorher);
+    throw e;
+  }
+}
+
+const gleicheTage = (a: string, b: string): boolean => (normaleTage(a) ?? a) === (normaleTage(b) ?? b);
+
 const plaene: Tool[] = [
   {
     name: "zeitplan_erstellen",
@@ -447,15 +470,19 @@ const plaene: Tool[] = [
       required: ["name", "zeit", "tage", "auftrag"],
     },
     stufe: "extern", // etwas Dauerhaftes anlegen braucht dein OK
-    summary: (i) => `Zeitplan «${i.name}» ${i.tage} um ${i.zeit}: ${String(i.auftrag).slice(0, 200)}`,
+    // Der ganze geprüfte Auftrag, genau wie run ihn speichert: Freigegeben ist nur, was gezeigt wurde (höchstens ~2100 Zeichen)
+    summary: (i) => {
+      const p = pruefeZeitplan(i);
+      return p.ok ? `Zeitplan «${p.wert.name}» ${p.wert.tage} um ${p.wert.zeit}: ${p.wert.auftrag}` : `Zeitplan (ungültig): ${pruefungsText(p.fehler)}`;
+    },
     run: async (i) => {
       pruefeZeitplaeneSchreibbar();
       // Dieselben Regeln wie in der Kommandozentrale (zeitplaene.ts)
       const p = pruefeZeitplan(i);
       if (!p.ok) throw new Error(pruefungsText(p.fehler));
-      const id = (zeitplaene.at(-1)?.id ?? 0) + 1;
-      zeitplaene.push({ id, ...p.wert, angelegt: new Date().toISOString() });
-      saveZeitplaene();
+      // Vor dem push: scheitert das Speichern des Zählers, ist nichts angelegt
+      const id = neueZeitplanId();
+      aendernUndSpeichern(zeitplaene, () => zeitplaene.push({ id, ...p.wert, angelegt: new Date().toISOString() }), () => saveZeitplaene());
       return `Zeitplan #${id} «${p.wert.name}» eingerichtet: ${p.wert.tage} um ${p.wert.zeit}.`;
     },
   },
@@ -476,12 +503,26 @@ const plaene: Tool[] = [
       const z = zeitplaene.find((x) => x.id === Number(i.id));
       return z ? `Zeitplan #${z.id} «${z.name}» löschen (${z.tage} um ${z.zeit})` : `Zeitplan #${i.id} löschen (nicht gefunden)`;
     },
+    festhalten: (i) => {
+      const z = zeitplaene.find((x) => x.id === Number(i.id));
+      return { id: i.id, erwartet_name: z?.name ?? null, erwartet_zeit: z?.zeit ?? null, erwartet_tage: z?.tage ?? null, erwartet_auftrag: z?.auftrag ?? null };
+    },
     run: async (i) => {
       pruefeZeitplaeneSchreibbar();
       const idx = zeitplaene.findIndex((z) => z.id === Number(i.id));
       if (idx < 0) throw new Error("Zeitplan nicht gefunden.");
-      zeitplaene.splice(idx, 1);
-      saveZeitplaene();
+      // Freigegeben wurde, was die Zusammenfassung nannte: ohne festgehaltenen oder bei geändertem Namen nichts löschen
+      if (typeof i.erwartet_name !== "string") throw new Error(`Die Freigabe nennt keinen Zeitplan #${i.id}, Sir. Ich lösche nichts.`);
+      if (typeof i.erwartet_zeit !== "string" || typeof i.erwartet_tage !== "string" || typeof i.erwartet_auftrag !== "string") {
+        throw new Error(`Die Freigabe für Zeitplan #${i.id} stammt aus einer älteren Version und nennt Zeit und Tage nicht, Sir. Ich lösche nichts – bitte neu beantragen.`);
+      }
+      const z = zeitplaene[idx]!;
+      if (z.name !== i.erwartet_name) throw new Error(`Zeitplan #${i.id} heisst inzwischen anders, Sir. Ich lösche nichts.`);
+      // Auch Uhrzeit, Tage und Auftrag: die Kommandozentrale kann sie ändern und den Namen behalten
+      if (z.zeit !== i.erwartet_zeit || !gleicheTage(z.tage, i.erwartet_tage) || z.auftrag !== i.erwartet_auftrag) {
+        throw new Error(`Zeitplan #${i.id} wurde inzwischen geändert, Sir. Ich lösche nichts.`);
+      }
+      aendernUndSpeichern(zeitplaene, () => zeitplaene.splice(idx, 1), () => saveZeitplaene());
       return "Gelöscht.";
     },
   },
@@ -538,15 +579,22 @@ const kameras: Tool[] = [
       required: ["kamera", "frage", "alle_minuten"],
     },
     stufe: "extern", // dauerhafte Wache braucht dein OK
-    summary: (i) => `Wache auf «${i.kamera}» alle ${i.alle_minuten} min: ${String(i.frage).slice(0, 200)}`,
+    // Die ganze geprüfte Frage (höchstens 300 Zeichen) samt Bedingung, genau wie run sie speichert
+    summary: (i) => {
+      const p = pruefeWache(i);
+      if (!p.ok) return `Wache (ungültig): ${pruefungsText(p.fehler)}`;
+      const w = p.wert;
+      const extra = [w.nur_wenn && w.nur_wenn !== "immer" ? `nur ${w.nur_wenn}` : "", w.ruhe_minuten !== undefined ? `Ruhe ${w.ruhe_minuten} min` : ""].filter(Boolean).join(", ");
+      return `Wache auf «${w.kamera}» alle ${w.alle_minuten} min${extra ? ` (${extra})` : ""}: ${w.frage}`;
+    },
     run: async (i) => {
       pruefeWachenSchreibbar();
       // Dieselben Regeln wie in der Kommandozentrale (cameras.ts)
       const p = pruefeWache(i);
       if (!p.ok) throw new Error(pruefungsText(p.fehler));
-      const id = (dynamicWachen.at(-1)?.id ?? 0) + 1;
-      dynamicWachen.push({ id, ...p.wert, quelle: "chat" });
-      saveWachen();
+      // Vor dem push: scheitert das Speichern des Zählers, ist nichts angelegt
+      const id = neueWacheId();
+      aendernUndSpeichern(dynamicWachen, () => dynamicWachen.push({ id, ...p.wert, quelle: "chat" }), () => saveWachen());
       return `Wache #${id} auf «${p.wert.kamera}» alle ${p.wert.alle_minuten} Minuten eingerichtet.`;
     },
   },
@@ -570,12 +618,18 @@ const kameras: Tool[] = [
       const w = dynamicWachen.find((x) => x.id === Number(i.id));
       return w ? `Wache #${w.id} löschen: ${w.kamera} – ${String(w.frage).slice(0, 200)}` : `Wache #${i.id} löschen (nicht gefunden)`;
     },
+    festhalten: (i) => {
+      const w = dynamicWachen.find((x) => x.id === Number(i.id));
+      return { id: i.id, erwartet_kamera: w?.kamera ?? null, erwartet_frage: w?.frage ?? null };
+    },
     run: async (i) => {
       pruefeWachenSchreibbar();
       const idx = dynamicWachen.findIndex((w) => w.id === Number(i.id));
       if (idx < 0) throw new Error("Wache nicht gefunden (Wachen aus cameras.json löschst du in der Datei).");
-      dynamicWachen.splice(idx, 1);
-      saveWachen();
+      const w = dynamicWachen[idx]!;
+      if (typeof i.erwartet_kamera !== "string" || typeof i.erwartet_frage !== "string") throw new Error(`Die Freigabe nennt keine Wache #${i.id}, Sir. Ich lösche nichts.`);
+      if (w.kamera !== i.erwartet_kamera || w.frage !== i.erwartet_frage) throw new Error(`Wache #${i.id} prüft inzwischen etwas anderes, Sir. Ich lösche nichts.`);
+      aendernUndSpeichern(dynamicWachen, () => dynamicWachen.splice(idx, 1), () => saveWachen());
       return "Gelöscht.";
     },
   },

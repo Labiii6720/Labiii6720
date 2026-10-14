@@ -175,6 +175,7 @@ describe("Kommandozentrale im Browser", { skip: chrome ? false : "kein Chromium 
     assert.equal(await page.locator("#v-uebersicht .auftrag").count(), 0);
     assert.equal(await page.isVisible("#bandNotfall"), true);
     assert.match((await page.textContent("#zahlFreigaben")) ?? "", /^3/);
+    assert.equal(await page.isDisabled("#notausKnopf"), true, "Weiter ist im Notfall gesperrt");
 
     await page.unroute("**/status.json");
     await sofort(page);
@@ -182,6 +183,7 @@ describe("Kommandozentrale im Browser", { skip: chrome ? false : "kein Chromium 
     await page.waitForSelector("#v-uebersicht .auftrag", { timeout: 3000 });
     assert.equal(await page.locator("#v-uebersicht .auftrag").count(), 3);
     assert.equal(await page.isVisible("#bandNotfall"), false);
+    assert.equal(await page.isDisabled("#notausKnopf"), false);
     await page.waitForSelector("#v-uebersicht .kpis .funke", { timeout: 3000 });
   });
 
@@ -218,6 +220,46 @@ describe("Kommandozentrale im Browser", { skip: chrome ? false : "kein Chromium 
     await page.waitForSelector("#v-finanzen table");
     assert.match((await page.textContent("#v-finanzen")) ?? "", /Weitere Währungen.*EUR/s);
     await page.click('#v-finanzen button[data-aktion="ansicht"]');
+  });
+
+  it("Finanzen: die Anzahl neben dem CHF-Betrag behauptet nichts über andere Währungen", async () => {
+    // Feste Monatszeilen: Oktober 4 offene CHF + 1 offene EUR (Zählung des Servers über alle Währungen),
+    // September nur CHF, August mit Anzahl je Währung (anzahlJe)
+    const monate = ["2026-05", "2026-06", "2026-07", "2026-08", "2026-09", "2026-10"];
+    await page.route("**/api/finanzen", async (r) => {
+      const echt = await r.fetch();
+      const d = (await echt.json()) as Record<string, unknown>;
+      const proMonat = monate.map((monat) => ({ monat, bezahlt: {}, offen: {}, anzahlBezahlt: 0, anzahlOffen: 0 } as Record<string, unknown>));
+      proMonat[5] = { monat: "2026-10", bezahlt: { CHF: 120 }, offen: { CHF: 2927, EUR: 289.4 }, anzahlBezahlt: 2, anzahlOffen: 5 };
+      proMonat[4] = { monat: "2026-09", bezahlt: { CHF: 80 }, offen: { CHF: 40 }, anzahlBezahlt: 1, anzahlOffen: 1 };
+      proMonat[3] = { monat: "2026-08", bezahlt: { CHF: 300, EUR: 118 }, offen: {}, anzahlBezahlt: 3, anzahlOffen: 0, anzahlJe: { bezahlt: { CHF: 2, EUR: 1 }, offen: {} } };
+      await r.fulfill({ response: echt, json: { ...d, proMonat } }).catch(() => undefined);
+    });
+    try {
+      await page.evaluate(() => { location.hash = "uebersicht"; });
+      await page.waitForSelector("#v-uebersicht:not([hidden])");
+      await page.evaluate(() => { location.hash = "finanzen"; });
+      // Nur die Attrappe liefert «5 offen (alle Währungen)»; die Demo-Daten zeigen ebenfalls 2’927.00 CHF offen,
+      // bis die umgeleitete Antwort da ist, steht also noch das alte Diagramm.
+      await page.waitForFunction(() => document.querySelector("#v-finanzen g.gruppe[data-merk='fd:5']")?.getAttribute("aria-label")?.includes("5 offen (alle Währungen)") ?? false, null, { timeout: 3000 });
+      assert.match((await page.getAttribute("#v-finanzen g.gruppe[data-merk='fd:5']", "aria-label")) ?? "", /offen 2’927\.00 CHF/);
+      const label = (i: number) => page.getAttribute(`#v-finanzen g.gruppe[data-merk='fd:${i}']`, "aria-label");
+      assert.match((await label(5)) ?? "", /2 bezahlt · 5 offen \(alle Währungen\)/);
+      assert.match((await label(4)) ?? "", /1 bezahlt · 1 offen$/);
+      assert.match((await label(3)) ?? "", /2 bezahlt · 0 offen$/, "anzahlJe: nur CHF gezählt");
+      await page.focus("#v-finanzen g.gruppe[tabindex='0']");
+      await page.waitForSelector("#v-finanzen .tip.an");
+      assert.match((await page.textContent("#v-finanzen .tip")) ?? "", /5 offen \(alle Währungen\)/);
+      await page.click('#v-finanzen button[data-aktion="ansicht"]');
+      await page.waitForSelector("#v-finanzen table");
+      const zeile = async (monat: string) => ((await page.locator("#v-finanzen table").first().locator("tr", { hasText: monat }).textContent()) ?? "");
+      assert.match(await zeile("Oktober 2026"), /2 \/ 5 \(alle Währungen\)/);
+      assert.match(await zeile("September 2026"), /1 \/ 1$/);
+      assert.match(await zeile("August 2026"), /2 \/ 0$/);
+      await page.click('#v-finanzen button[data-aktion="ansicht"]');
+    } finally {
+      await page.unroute("**/api/finanzen");
+    }
   });
 
   it("Zeitplan: Prüfung im Browser, Feldfehler vom Server, anlegen, ändern, löschen mit Bestätigung", async () => {
@@ -398,18 +440,59 @@ describe("Kommandozentrale im Browser", { skip: chrome ? false : "kein Chromium 
     await sofort(page);
     await page.waitForTimeout(300);
     assert.equal(abrufe, bisher, "keine weiteren Abfragen ohne Token");
-    assert.equal(await page.evaluate(() => sessionStorage.getItem("jarvis.token")), null);
+    assert.equal(await page.evaluate(() => sessionStorage.getItem("jarvis.kommandozentrale.token")), null);
     await page.unroute("**/status.json");
+    // Ein Wert der Gesten-Konsole unter «jarvis.token» (gleicher Ursprung) bleibt unberührt
+    await page.evaluate(() => localStorage.setItem("jarvis.token", "wert-der-gesten-konsole"));
     await page.fill("#anmToken", dienst!.token);
     await page.check("#anmMerken");
     await page.keyboard.press("Enter");
     await page.waitForSelector("#dlgAnmelden", { state: "hidden" });
-    assert.equal(await page.evaluate(() => localStorage.getItem("jarvis.token")), dienst!.token);
+    assert.equal(await page.evaluate(() => localStorage.getItem("jarvis.kommandozentrale.token")), dienst!.token);
     await page.evaluate(() => { location.hash = "sicherheit"; });
     await page.click('#v-sicherheit button[data-aktion="abmelden"]');
     await page.waitForSelector("#dlgAnmelden[open]");
-    assert.deepEqual(await page.evaluate(() => [sessionStorage.getItem("jarvis.token"), localStorage.getItem("jarvis.token")]), [null, null]);
+    assert.deepEqual(await page.evaluate(() => [sessionStorage.getItem("jarvis.kommandozentrale.token"), localStorage.getItem("jarvis.kommandozentrale.token")]), [null, null]);
+    assert.equal(await page.evaluate(() => localStorage.getItem("jarvis.token")), "wert-der-gesten-konsole", "Konsole behält ihren Wert");
     assert.equal(await page.locator("#v-uebersicht .auftrag").count(), 0, "Inhalte sind weg");
+    // Die Bestätigung liegt über dem Anmeldedialog und wird im Dialog angesagt
+    assert.equal(await page.evaluate(() => document.getElementById("toast")!.matches(":popover-open")), true);
+    assert.match((await page.textContent("#toast")) ?? "", /Abgemeldet, Sir/);
+    assert.match((await page.textContent("#dlgAnmelden .dlg-ansage")) ?? "", /Abgemeldet, Sir/);
+    // Dieselbe Kopie unter «jarvis.token» (Gesten-Konsole oder «merken» im Zwischenstand von 0.22) geht beim Abmelden mit
+    await page.evaluate((t) => localStorage.setItem("jarvis.token", t), dienst!.token);
+    await page.fill("#anmToken", dienst!.token);
+    await page.keyboard.press("Enter");
+    await page.waitForSelector("#dlgAnmelden", { state: "hidden" });
+    await page.waitForSelector('#v-sicherheit button[data-aktion="abmelden"]');
+    await page.click('#v-sicherheit button[data-aktion="abmelden"]');
+    await page.waitForSelector("#dlgAnmelden[open]");
+    assert.equal(await page.evaluate(() => localStorage.getItem("jarvis.token")), null, "Kopie des Tokens gelöscht");
+    assert.match((await page.textContent("#toast")) ?? "", /Der Token ist aus diesem Browser gelöscht/);
+    await page.evaluate(() => localStorage.removeItem("jarvis.token"));
+  });
+
+  it("Token der Gesten-Konsole («jarvis.token») meldet die Kommandozentrale nicht an", async () => {
+    const c2 = await browser!.newContext({ viewport: { width: 1280, height: 860 } });
+    try {
+      const p = await c2.newPage();
+      p.setDefaultTimeout(4000);
+      await p.goto(dienst!.url + "/dashboard");
+      await p.waitForSelector("#dlgAnmelden[open]");
+      await p.evaluate((t) => localStorage.setItem("jarvis.token", t), dienst!.token);
+      await p.reload();
+      await p.waitForSelector("#dlgAnmelden[open]");
+      await p.waitForTimeout(150);
+      assert.equal(await p.evaluate(() => (document.getElementById("dlgAnmelden") as HTMLDialogElement).open), true, "kein stilles Anmelden");
+      assert.equal(await p.isChecked("#anmMerken"), false, "«merken» nicht vorab angekreuzt");
+      await p.fill("#anmToken", dienst!.token);
+      await p.keyboard.press("Enter");
+      await p.waitForSelector("#v-uebersicht .auftraege");
+      assert.deepEqual(await p.evaluate(() => [localStorage.getItem("jarvis.token"), localStorage.getItem("jarvis.kommandozentrale.token"), sessionStorage.getItem("jarvis.kommandozentrale.token") !== null]),
+        [dienst!.token, null, true], "ohne «merken» nur sessionStorage; der Wert der Konsole bleibt");
+    } finally {
+      await c2.close();
+    }
   });
 
   /** API-Aufruf aus der Seite heraus (gleicher Ursprung, Bearer-Header wie das UI) */
@@ -445,6 +528,9 @@ describe("Kommandozentrale im Browser", { skip: chrome ? false : "kein Chromium 
     assert.ok(Date.now() - start < 4500, "Antwort innert der Meldefrist");
     await page.waitForSelector("#toast.an");
     assert.match((await page.textContent("#toast")) ?? "", /#201/);
+    // Ohne offenen Dialog sagt die immer vorhandene Region #ansage an; der Toast (geschlossen display:none) ist keine Live-Region
+    assert.match((await page.textContent("#ansage")) ?? "", /#201/);
+    assert.deepEqual(await page.evaluate(() => [document.getElementById("toast")!.getAttribute("aria-live"), document.getElementById("toast")!.getAttribute("role")]), [null, null]);
     const { daten } = await holeApi("/api/auftraege?status=alle&limit=200");
     const a = (daten.auftraege as { id: number; status: string }[]).find((x) => x.id === 201);
     assert.ok(a && a.status !== "offen", `Status ${a?.status}`);
@@ -536,6 +622,226 @@ describe("Kommandozentrale im Browser", { skip: chrome ? false : "kein Chromium 
     await page.click("#thema");
     assert.equal((await zustand()).thema, "dark");
     assert.equal(await page.evaluate(() => localStorage.getItem("jarvis.thema")), "dark");
+  });
+
+  it("Zeitpläne vor 0.22 («täglich», «So, sa»): Tage im Formular gewählt, normalisiert gesendet", async () => {
+    await page.route("**/api/zeitplaene", async (r) => {
+      if (r.request().method() !== "GET") return r.fallback();
+      const echt = await r.fetch();
+      const d = (await echt.json()) as { zeitplaene: { id: number; tage: string }[] };
+      for (const z of d.zeitplaene) { if (z.id === 2) z.tage = "So, sa"; if (z.id === 3) z.tage = "täglich"; }
+      // Nach unroute kann Playwright die Anfrage schon weitergereicht haben: dann gilt die echte Antwort
+      await r.fulfill({ response: echt, json: d }).catch(() => undefined);
+    });
+    let gesendet: Record<string, unknown> | undefined;
+    await page.route("**/api/zeitplaene/2", async (r) => {
+      if (r.request().method() !== "PUT") return r.fallback();
+      gesendet = r.request().postDataJSON() as Record<string, unknown>;
+      await r.fulfill({ json: { ok: true, text: "Gespeichert, Sir." } });
+    });
+    await page.evaluate(() => { location.hash = "zeitplaene"; });
+    const zeitText = (name: string) => page.evaluate((n) => [...document.querySelectorAll("#v-zeitplaene .plan")].find((e) => e.textContent?.includes(n))?.querySelector(".zeit small")?.textContent, name);
+    await page.waitForFunction(() => /Täglich/.test([...document.querySelectorAll("#v-zeitplaene .plan")].find((e) => e.textContent?.includes("NVR-Sicherung"))?.textContent ?? ""), null, { timeout: 3000 });
+    assert.equal(await zeitText("NVR-Sicherung"), "Täglich");
+    assert.equal(await zeitText("Wochenende"), "Sa, So");
+    const formular = () => page.evaluate(() => ({
+      art: (document.querySelector('input[name="tageArt"]:checked') as HTMLInputElement | null)?.value,
+      tage: [...document.querySelectorAll<HTMLInputElement>("#pTage input:checked")].map((i) => i.value),
+    }));
+    await page.locator("#v-zeitplaene .plan", { hasText: "NVR-Sicherung" }).locator('button[data-aktion="plan-edit"]').click();
+    await page.waitForSelector("#dlgPlan[open]");
+    assert.deepEqual(await formular(), { art: "taeglich", tage: ["mo", "di", "mi", "do", "fr", "sa", "so"] });
+    await page.click("#dlgPlan [data-schliessen]");
+    await page.waitForSelector("#dlgPlan", { state: "hidden" });
+    await page.locator("#v-zeitplaene .plan", { hasText: "Wochenende" }).locator('button[data-aktion="plan-edit"]').click();
+    await page.waitForSelector("#dlgPlan[open]");
+    assert.deepEqual(await formular(), { art: "liste", tage: ["sa", "so"] });
+    // Nur den Namen ändern: speichert ohne Tagesfehler, mit den Tagen in der Schreibweise des Servers
+    await page.fill("#pName", "Wochenende ruhig");
+    // Nach dem Speichern holt die Seite die Liste neu: abwarten, sonst trifft unroute einen laufenden Handler
+    const neuGeholt = page.waitForResponse((x) => new URL(x.url()).pathname === "/api/zeitplaene" && x.request().method() === "GET");
+    await page.click("#planOk");
+    await page.waitForSelector("#dlgPlan", { state: "hidden" });
+    await neuGeholt;
+    assert.equal(await page.isVisible("#pTageF"), false);
+    assert.equal(gesendet?.tage, "sa,so");
+    await page.unroute("**/api/zeitplaene/2");
+    await page.unroute("**/api/zeitplaene");
+  });
+
+  it("Speicherfehler bei offenem Formular: Rückmeldung über dem Dialog sichtbar und im Dialog angesagt", async () => {
+    await page.route("**/api/zeitplaene", (r) => (r.request().method() === "POST" ? r.abort("connectionfailed") : r.fallback()));
+    try {
+      await page.evaluate(() => { location.hash = "zeitplaene"; });
+      await page.waitForSelector('#v-zeitplaene button[data-aktion="plan-neu"]:not([disabled])');
+      await page.click('#v-zeitplaene button[data-aktion="plan-neu"]');
+      await page.waitForSelector("#dlgPlan[open]");
+      await page.fill("#pName", "Nie gespeichert");
+      await page.fill("#pAuftrag", "Kommt nicht an.");
+      await page.click("#planOk");
+      await page.waitForSelector("#toast.an");
+      await page.waitForTimeout(300); // Einblenden (0.2 s) abwarten
+      const lage = await page.evaluate(() => {
+        const t = document.getElementById("toast")!;
+        const r = t.getBoundingClientRect();
+        return { offen: t.matches(":popover-open"), dialog: (document.getElementById("dlgPlan") as HTMLDialogElement).open,
+          unten: Math.round(innerHeight - r.bottom), mitte: Math.round(r.left + r.width / 2 - innerWidth / 2), ansage: document.querySelector("#dlgPlan .dlg-ansage")?.textContent };
+      });
+      assert.equal(lage.offen, true, "Toast in der obersten Ebene (über Dialog und Hintergrund)");
+      assert.equal(lage.dialog, true, "Formular bleibt offen");
+      assert.ok(Math.abs(lage.unten - 24) <= 2 && Math.abs(lage.mitte) <= 2, `Lage unten Mitte: ${JSON.stringify(lage)}`);
+      assert.match((await page.textContent("#toast")) ?? "", /Ich erreiche den Dienst nicht, Sir\./);
+      assert.match(lage.ansage ?? "", /Ich erreiche den Dienst nicht, Sir\./);
+      // Im Barrierefreiheitsbaum erreichbar (der Rest der Seite ist hinter dem Modal inert)
+      const cdp = await ctx.newCDPSession(page);
+      try {
+        const { nodes } = (await cdp.send("Accessibility.getFullAXTree")) as { nodes: { ignored: boolean; name?: { value: string } }[] };
+        assert.ok(nodes.some((n) => !n.ignored && /Ich erreiche den Dienst nicht/.test(n.name?.value ?? "")), "Meldung im Barrierefreiheitsbaum");
+      } finally {
+        await cdp.detach();
+      }
+      await page.click("#dlgPlan [data-schliessen]");
+      await page.waitForSelector("#dlgPlan", { state: "hidden" });
+      // dialog.close() feuert «close» erst in einer späteren Task; darauf warten statt sofort zu lesen
+      await page.waitForFunction(() => document.querySelector("#dlgPlan .dlg-ansage")?.textContent === "", undefined, { timeout: 1000 });
+      assert.equal(await page.textContent("#dlgPlan .dlg-ansage"), "", "Ansage beim Schliessen geleert");
+    } finally {
+      await page.unroute("**/api/zeitplaene");
+    }
+  });
+
+  it("Fokus auf Links der Übersicht übersteht den Neuaufbau (Lage, «Historie ›», «Zeitpläne ›»)", async () => {
+    await page.evaluate(() => { location.hash = "uebersicht"; });
+    await page.waitForSelector("#v-uebersicht:not([hidden]) .auftraege");
+    const faelle: [string, string][] = [
+      ['#v-uebersicht .lage-liste a[data-merk="lage:freigaben"]', "fokus"],
+      ['#v-uebersicht a[data-merk="u-historie"]', "nacht"],
+      ['#v-uebersicht a[data-merk="u-zeitplaene"]', "normal"],
+    ];
+    for (const [sel, modus] of faelle) {
+      await page.focus(sel);
+      await page.evaluate((s) => { (document.querySelector(s) as HTMLElement & { __alt?: boolean }).__alt = true; }, sel);
+      assert.equal((await holeApi("/api/modus", { method: "POST", body: { modus } })).status, 200);
+      await sofort(page);
+      await page.waitForSelector(`#v-uebersicht [data-modus="${modus}"][aria-checked="true"]`, { state: "attached", timeout: 3000 });
+      const f = await page.evaluate(() => {
+        const a = document.activeElement as (HTMLElement & { __alt?: boolean }) | null;
+        return { merk: a?.dataset.merk ?? a?.tagName, neu: !a?.__alt };
+      });
+      assert.deepEqual(f, { merk: await page.getAttribute(sel, "data-merk"), neu: true }, sel);
+    }
+    // Sprung aus der Lage: das Ziel behält den Fokus auch nach dem nächsten Neuaufbau
+    await page.focus('#v-uebersicht .lage-liste a[data-merk="lage:freigaben"]');
+    await page.keyboard.press("Enter");
+    await page.waitForFunction(() => document.activeElement?.id === "auftrAnker", null, { timeout: 2000 });
+    await page.evaluate(() => { (document.activeElement as HTMLElement & { __alt?: boolean }).__alt = true; });
+    assert.equal((await holeApi("/api/modus", { method: "POST", body: { modus: "nacht" } })).status, 200);
+    await sofort(page);
+    await page.waitForSelector('#v-uebersicht [data-modus="nacht"][aria-checked="true"]', { state: "attached", timeout: 3000 });
+    assert.deepEqual(await page.evaluate(() => {
+      const a = document.activeElement as (HTMLElement & { __alt?: boolean }) | null;
+      return { id: a?.id, neu: !a?.__alt };
+    }), { id: "auftrAnker", neu: true });
+    assert.equal((await holeApi("/api/modus", { method: "POST", body: { modus: "normal" } })).status, 200);
+  });
+
+  it("Verbindungsstörung gilt nur für den sichtbaren Bereich: nach dem Wechsel kein Dauerhinweis", async () => {
+    await page.route("**/api/auftraege*", (r) => r.abort("connectionfailed"));
+    try {
+      await page.evaluate(() => { location.hash = "freigaben"; });
+      await page.waitForSelector("#stoerung:not([hidden])", { timeout: 3000 });
+      assert.equal(await page.evaluate(() => document.getElementById("main")!.classList.contains("halten")), true);
+    } finally {
+      await page.unroute("**/api/auftraege*");
+    }
+    await page.evaluate(() => { location.hash = "sicherheit"; });
+    await page.waitForSelector("#v-sicherheit:not([hidden]) #h-sicherheit");
+    await sofort(page);
+    await page.waitForSelector("#stoerung", { state: "hidden", timeout: 3000 });
+    assert.equal(await page.evaluate(() => document.getElementById("main")!.classList.contains("halten")), false);
+    // Zurück in Freigaben: die Quelle wird neu geholt, der Hinweis bleibt weg
+    await page.evaluate(() => { location.hash = "freigaben"; });
+    await page.waitForSelector("#v-freigaben .verlauf");
+    assert.equal(await page.isVisible("#stoerung"), false);
+  });
+
+  it("Notfall und 401 schliessen offene Dialoge und leeren ihre Felder", async () => {
+    const offeneDialoge = () => page.evaluate(() => [...document.querySelectorAll("dialog[open]")].map((d) => d.id));
+    const felder = () => page.evaluate(() => ({
+      name: (document.getElementById("pName") as HTMLInputElement).value,
+      auftrag: (document.getElementById("pAuftrag") as HTMLTextAreaElement).value,
+      frage: (document.getElementById("wFrage") as HTMLTextAreaElement).value,
+      pin: document.getElementById("pinText")!.textContent,
+      bestaetigung: document.getElementById("frageText")!.textContent,
+    }));
+    const leer = { name: "", auftrag: "", frage: "", pin: "", bestaetigung: "" };
+    const planOeffnen = async () => {
+      await page.evaluate(() => { location.hash = "zeitplaene"; });
+      await page.waitForSelector('#v-zeitplaene button[data-aktion="plan-edit"]');
+      await page.locator('#v-zeitplaene button[data-aktion="plan-edit"]').first().click();
+      await page.waitForSelector("#dlgPlan[open]");
+      assert.notEqual(await page.inputValue("#pAuftrag"), "", "Auftragstext steht im Formular");
+    };
+
+    // Notfall bei offenem Zeitplan-Formular
+    await planOeffnen();
+    await page.route("**/status.json", async (route) => {
+      const echt = await route.fetch();
+      const d = await echt.json();
+      await route.fulfill({ response: echt, json: { ...d, notfall: true, pausiert: true, offeneAuftraege: 3, auftraege: [], zeitplaene: [], wachen: [], kameras: [] } });
+    });
+    try {
+      await sofort(page);
+      await page.waitForFunction(() => document.getElementById("zustandText")?.textContent === "Notfall", null, { timeout: 3000 });
+      await page.waitForFunction(() => !document.querySelector("dialog[open]"), null, { timeout: 2000 });
+      assert.deepEqual(await felder(), leer);
+    } finally {
+      await page.unroute("**/status.json");
+    }
+    await sofort(page);
+    await page.waitForFunction(() => document.getElementById("zustandText")?.textContent === "Bereit", null, { timeout: 3000 });
+
+    // 401 bei offenem Formular: nur die Anmeldung bleibt, die Felder sind leer
+    await planOeffnen();
+    await page.route("**/status.json", (route) => route.fulfill({ status: 401, json: { ok: false, error: "unauthorized" } }));
+    try {
+      await sofort(page);
+      await page.waitForSelector("#dlgAnmelden[open]");
+      assert.deepEqual(await offeneDialoge(), ["dlgAnmelden"]);
+      assert.deepEqual(await felder(), leer);
+    } finally {
+      await page.unroute("**/status.json");
+    }
+    await page.fill("#anmToken", dienst!.token);
+    await page.keyboard.press("Enter");
+    await page.waitForSelector("#dlgAnmelden", { state: "hidden" });
+    await page.evaluate(() => { location.hash = "uebersicht"; });
+    await page.waitForSelector("#v-uebersicht .auftraege");
+  });
+
+  it("Anmeldedialog bleibt auch nach mehrfachem Esc offen", async () => {
+    const c2 = await browser!.newContext({ viewport: { width: 1280, height: 860 } });
+    try {
+      const p = await c2.newPage();
+      p.setDefaultTimeout(4000);
+      await p.goto(dienst!.url + "/dashboard");
+      await p.waitForSelector("#dlgAnmelden[open]");
+      await p.click("#anmToken");
+      await p.keyboard.type("x");
+      for (let i = 1; i <= 3; i++) {
+        await p.keyboard.press("Escape");
+        await p.waitForFunction(() => (document.getElementById("dlgAnmelden") as HTMLDialogElement).open && document.activeElement?.id === "anmToken", null, { timeout: 2000 });
+        await p.waitForTimeout(50);
+        assert.equal(await p.evaluate(() => (document.getElementById("dlgAnmelden") as HTMLDialogElement).open), true, `nach Esc ${i}`);
+      }
+      // Der Weg hinein bleibt: Token eingeben genügt
+      await p.fill("#anmToken", dienst!.token);
+      await p.keyboard.press("Enter");
+      await p.waitForSelector("#v-uebersicht .auftraege");
+      await p.waitForSelector("#dlgAnmelden", { state: "hidden" });
+    } finally {
+      await c2.close();
+    }
   });
 
   it("über alle Abläufe: keine Skriptfehler und keine CSP-Verletzung", async () => {

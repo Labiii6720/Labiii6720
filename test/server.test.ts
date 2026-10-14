@@ -45,6 +45,8 @@ const anfrage = (port: number, methode: string, pfad: string, kopf: Record<strin
 let kind: ChildProcess | undefined;
 let port = 0;
 let ausgabe = "";
+const startfristWunsch = Number(process.env.JARVIS_TEST_STARTFRIST_MS);
+const startfrist = Number.isFinite(startfristWunsch) && startfristWunsch > 0 ? startfristWunsch : 30_000;
 
 before(async () => {
   port = await freierPort();
@@ -63,7 +65,13 @@ before(async () => {
       clearTimeout(frist);
       ok();
     }, 20);
-    const frist = setTimeout(() => { clearInterval(warte); fehler(new Error(`Server nicht gestartet:\n${ausgabe}`)); }, 4500);
+    // Nur Obergrenze: kalter tsx-Cache, parallele Testdateien oder der Pi brauchen deutlich mehr als 4,5 s
+    const frist = setTimeout(() => {
+      clearInterval(warte);
+      kind?.removeAllListeners("exit");
+      kind?.kill("SIGKILL");
+      fehler(new Error(`Server nicht gestartet:\n${ausgabe}`));
+    }, startfrist);
     kind!.once("exit", (code) => { clearInterval(warte); clearTimeout(frist); fehler(new Error(`Server beendet (${code}):\n${ausgabe}`)); });
   });
 });

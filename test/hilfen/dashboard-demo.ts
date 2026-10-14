@@ -221,6 +221,9 @@ export async function starteDemoDienst(o: { ordner: string; frigateUrl?: string;
   let ausgabe = "";
   kind.stdout?.on("data", (d: Buffer) => (ausgabe += d.toString()));
   kind.stderr?.on("data", (d: Buffer) => (ausgabe += d.toString()));
+  // Nur Obergrenze: kalter tsx-Cache, parallele Testdateien oder der Pi brauchen deutlich mehr als einige Sekunden
+  const wunsch = Number(process.env.JARVIS_TEST_STARTFRIST_MS);
+  const startfrist = o.startFristMs ?? (Number.isFinite(wunsch) && wunsch > 0 ? wunsch : 30_000);
   await new Promise<void>((ok, fehler) => {
     const warte = setInterval(() => {
       if (!ausgabe.includes("Jarvis läuft")) return;
@@ -229,7 +232,12 @@ export async function starteDemoDienst(o: { ordner: string; frigateUrl?: string;
       kind.removeAllListeners("exit");
       ok();
     }, 20);
-    const frist = setTimeout(() => { clearInterval(warte); kind.kill("SIGKILL"); fehler(new Error(`Demo-Dienst nicht gestartet:\n${ausgabe}`)); }, o.startFristMs ?? 8000);
+    const frist = setTimeout(() => {
+      clearInterval(warte);
+      kind.removeAllListeners("exit");
+      kind.kill("SIGKILL");
+      fehler(new Error(`Demo-Dienst nicht gestartet:\n${ausgabe}`));
+    }, startfrist);
     kind.once("exit", (code) => { clearInterval(warte); clearTimeout(frist); fehler(new Error(`Demo-Dienst beendet (${code}):\n${ausgabe}`)); });
   });
   return {

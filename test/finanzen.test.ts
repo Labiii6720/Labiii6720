@@ -121,16 +121,28 @@ describe("finanzUebersicht", () => {
     const { liste } = fixture();
     const u = finanzUebersicht(JETZT, liste);
     assert.deepEqual(u.proMonat.map((m) => m.monat), ["2025-08", "2025-09", "2025-10", "2025-11", "2025-12", "2026-01"]);
-    assert.deepEqual(u.proMonat[0], { monat: "2025-08", bezahlt: {}, offen: { CHF: 5 }, anzahlBezahlt: 0, anzahlOffen: 1 });
-    assert.deepEqual(u.proMonat[1], { monat: "2025-09", bezahlt: {}, offen: {}, anzahlBezahlt: 0, anzahlOffen: 0 });
+    assert.deepEqual(u.proMonat[0], { monat: "2025-08", bezahlt: {}, offen: { CHF: 5 }, anzahlBezahlt: 0, anzahlOffen: 1, anzahlJe: { bezahlt: {}, offen: { CHF: 1 } } });
+    assert.deepEqual(u.proMonat[1], { monat: "2025-09", bezahlt: {}, offen: {}, anzahlBezahlt: 0, anzahlOffen: 0, anzahlJe: { bezahlt: {}, offen: {} } });
     // bezahlt ohne bezahltAm und ohne faellig → erkanntAm
-    assert.deepEqual(u.proMonat[3], { monat: "2025-11", bezahlt: { EUR: 99.99 }, offen: {}, anzahlBezahlt: 1, anzahlOffen: 0 });
+    assert.deepEqual(u.proMonat[3], { monat: "2025-11", bezahlt: { EUR: 99.99 }, offen: {}, anzahlBezahlt: 1, anzahlOffen: 0, anzahlJe: { bezahlt: { EUR: 1 }, offen: {} } });
     // bezahlt ohne bezahltAm → faellig
-    assert.deepEqual(u.proMonat[4], { monat: "2025-12", bezahlt: { CHF: 75.5 }, offen: {}, anzahlBezahlt: 1, anzahlOffen: 0 });
+    assert.deepEqual(u.proMonat[4], { monat: "2025-12", bezahlt: { CHF: 75.5 }, offen: {}, anzahlBezahlt: 1, anzahlOffen: 0, anzahlJe: { bezahlt: { CHF: 1 }, offen: {} } });
     // offen ohne Frist → erkanntAm in Schweizer Zeit (1. Januar); Rappen exakt (0.1 + 0.2); ignoriert (999) fehlt
-    assert.deepEqual(u.proMonat[5], { monat: "2026-01", bezahlt: { CHF: 700.3 }, offen: { CHF: 1394.75, EUR: 20 }, anzahlBezahlt: 4, anzahlOffen: 6 });
+    assert.deepEqual(u.proMonat[5], { monat: "2026-01", bezahlt: { CHF: 700.3 }, offen: { CHF: 1394.75, EUR: 20 }, anzahlBezahlt: 4, anzahlOffen: 6, anzahlJe: { bezahlt: { CHF: 4 }, offen: { CHF: 5, EUR: 1 } } });
     const alles = JSON.stringify(u.proMonat);
     assert.ok(!alles.includes("999") && !alles.includes("1000"), "ignoriert und zu Altes zählen nicht");
+  });
+
+  it("anzahlJe: Anzahl je Währung, auch ohne Betrag (Rückfall CHF); Gesamtzähler bleiben", () => {
+    let id = 900;
+    const offen = (betrag: number | undefined, waehrung: string): Rechnung => ({
+      id: ++id, erkanntAm: "2026-01-02T08:00:00.000Z", empfaenger: "Test", waehrung, status: "offen", faellig: "2026-01-20", ...(betrag === undefined ? {} : { betrag }),
+    });
+    const liste = [offen(10, "CHF"), offen(20, "chf"), offen(undefined, ""), offen(30, "CHF"), offen(5, "EUR")];
+    const m = finanzUebersicht(JETZT, liste).proMonat[5]!;
+    assert.deepEqual(m.anzahlJe, { bezahlt: {}, offen: { CHF: 4, EUR: 1 } });
+    assert.equal(m.anzahlOffen, 5);
+    assert.equal(m.anzahlBezahlt, 0);
   });
 
   it("Jahreswechsel im Januar und im Dezember: Monate korrekt fortgezählt", () => {

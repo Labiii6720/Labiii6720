@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import type { NextFunction, Request, Response } from "express";
 import { askWithBudget } from "./agent.js";
 import { audit } from "./audit.js";
-import { allWachen, cameras, camerasNichtGeladen, dynamicWachen, pruefeWache, saveWachen, snapshot, WACHEN_UNLESBAR, wachenNichtGeladen, type Wache } from "./cameras.js";
+import { allWachen, cameras, camerasNichtGeladen, dynamicWachen, neueWacheId, pruefeWache, saveWachen, snapshot, WACHEN_UNLESBAR, wachenNichtGeladen, type Wache } from "./cameras.js";
 import { verbrauchVerlauf } from "./claude.js";
 import { config } from "./config.js";
 import { finanzUebersicht, offeneRechnungen, RECHNUNGEN_UNLESBAR, rechnungenNichtGeladen, type Rechnung } from "./finanzen.js";
@@ -16,7 +16,7 @@ import { gesundheit, schwaerze } from "./robust.js";
 import { save, state, type Mode } from "./state.js";
 import { approveAuftrag, denyAuftrag, hooks, notausAn, notausAus, pinGesperrtText, pinPruefen, pinSperreRest, sendText } from "./telegram.js";
 import { vorgaenge, vorgaengeNichtGeladen } from "./vorgaenge.js";
-import { naechsterLauf, pruefeZeitplan, saveZeitplaene, ZEITPLAENE_UNLESBAR, zeitplaene, zeitplaeneNichtGeladen, type Zeitplan } from "./zeitplaene.js";
+import { naechsterLauf, neueZeitplanId, normaleTage, pruefeZeitplan, saveZeitplaene, ZEITPLAENE_UNLESBAR, zeitplaene, zeitplaeneNichtGeladen, type Zeitplan } from "./zeitplaene.js";
 
 /**
  * Kommandozentrale («der Kern»): Lesen und Handeln über das Dashboard. Nur Heimnetz/Tailscale (lanOnly im Server)
@@ -92,7 +92,7 @@ export function statusJson(_req: Request, res: Response): void {
     zeitplaeneUnlesbar: zeitplaeneNichtGeladen,
     vorgaengeUnlesbar: vorgaengeNichtGeladen,
     vorgaenge: vorgaenge.slice(-8).map((v) => ({ id: v.id, status: v.status, steps: v.steps, auftrag: v.auftrag.slice(0, 90) })),
-    zeitplaene: zeitplaene.map((z) => ({ id: z.id, name: z.name, zeit: z.zeit, tage: z.tage })),
+    zeitplaene: zeitplaene.map((z) => ({ id: z.id, name: z.name, zeit: z.zeit, tage: normaleTage(z.tage) ?? z.tage })),
     wachen: allWachen().map((w) => ({ kamera: w.kamera, frage: w.frage.slice(0, 80), alle_minuten: w.alle_minuten })),
     kameras: Object.entries(cameras).map(([k, c]) => ({ name: k, beschreibung: c.beschreibung })),
     protokolle: Object.entries(protokolle).map(([k, p]) => ({ name: k, beschreibung: p.beschreibung, stufe: p.stufe })),
@@ -285,12 +285,18 @@ export function kostenJson(req: Request, res: Response): void {
 
 const WACHEN_HINWEIS = "Wachen schicken regelmässig Standbilder an die Claude-API (Haiku), Sir. Nur einrichten, wo Sie das wollen.";
 
+/** Stellt ein Objekt auf eine flache Kopie zurück (auch Felder, die erst danach dazukamen, verschwinden). */
+function zuruecksetzen<T extends object>(ziel: T, alt: T): void {
+  for (const k of Object.keys(ziel)) if (!(k in alt)) delete (ziel as Record<string, unknown>)[k];
+  Object.assign(ziel, alt);
+}
+
 /** ID aus dem Pfad; nur Ziffern, sonst undefined. */
 const pfadId = (req: Request): number | undefined => (/^\d{1,9}$/.test(String(req.params.id ?? "")) ? Number(req.params.id) : undefined);
 
 const zeitplanJson = (z: Zeitplan, jetzt: Date) => {
   const n = naechsterLauf(z, jetzt, config.zeitplanNachholenMin);
-  return { id: z.id, name: z.name, zeit: z.zeit, tage: z.tage, auftrag: z.auftrag, ...(z.lastRun ? { lastRun: z.lastRun } : {}), ...(z.angelegt ? { angelegt: z.angelegt } : {}), ...(n ? { naechsterLauf: n.toISOString() } : {}) };
+  return { id: z.id, name: z.name, zeit: z.zeit, tage: normaleTage(z.tage) ?? z.tage, auftrag: z.auftrag, ...(z.lastRun ? { lastRun: z.lastRun } : {}), ...(z.angelegt ? { angelegt: z.angelegt } : {}), ...(n ? { naechsterLauf: n.toISOString() } : {}) };
 };
 
 const zeitplanAudit = (z: Zeitplan) => ({ id: z.id, name: kurz(z.name, 60), zeit: z.zeit, tage: z.tage, auftrag: kurz(z.auftrag), quelle: "dashboard" });
@@ -317,9 +323,15 @@ export function zeitplanAnlegen(req: Request, res: Response): void {
   const p = pruefeZeitplan(req.body);
   if (!p.ok) return void res.status(400).json({ ok: false, error: "pruefung", fehler: p.fehler });
   const jetzt = _dashboardUhr.jetzt();
-  const z: Zeitplan = { id: Math.max(0, ...zeitplaene.map((x) => x.id)) + 1, ...p.wert, angelegt: jetzt.toISOString() };
+  const z: Zeitplan = { id: neueZeitplanId(), ...p.wert, angelegt: jetzt.toISOString() };
   zeitplaene.push(z);
-  saveZeitplaene(jetzt);
+  try {
+    saveZeitplaene(jetzt);
+  } catch (e) {
+    // Nicht gespeichert heisst nicht angelegt: sonst liefe der Plan bis zum Neustart, und ein zweiter Versuch legte ihn doppelt an.
+    zeitplaene.splice(zeitplaene.indexOf(z), 1);
+    throw e;
+  }
   audit("zeitplan_angelegt", zeitplanAudit(z));
   res.status(201).json({ ok: true, text: `Zeitplan #${z.id} «${z.name}» eingerichtet, Sir.`, zeitplan: zeitplanJson(z, jetzt) });
 }
@@ -332,12 +344,19 @@ export function zeitplanAendern(req: Request, res: Response): void {
   const p = pruefeZeitplan(req.body);
   if (!p.ok) return void res.status(400).json({ ok: false, error: "pruefung", fehler: p.fehler });
   const jetzt = _dashboardUhr.jetzt();
-  const termin = p.wert.zeit !== z.zeit || p.wert.tage !== z.tage;
+  // Gespeicherte Tage normalisiert vergleichen: «So, sa» und «sa,so» sind derselbe Termin
+  const termin = p.wert.zeit !== z.zeit || p.wert.tage !== (normaleTage(z.tage) ?? z.tage);
+  const alt = { ...z };
   Object.assign(z, p.wert);
   // Wie beim Anlegen: eine heute schon vergangene neue Uhrzeit wird nicht sofort nachgeholt (faelligIm: heute zu spät
   // angelegt). lastRun bleibt, damit ein heute schon gelaufener Plan nicht ein zweites Mal läuft.
   if (termin) z.angelegt = jetzt.toISOString();
-  saveZeitplaene(jetzt);
+  try {
+    saveZeitplaene(jetzt);
+  } catch (e) {
+    zuruecksetzen(z, alt);
+    throw e;
+  }
   audit("zeitplan_geaendert", zeitplanAudit(z));
   res.json({ ok: true, text: `Zeitplan #${z.id} geändert, Sir.`, zeitplan: zeitplanJson(z, jetzt) });
 }
@@ -348,7 +367,13 @@ export function zeitplanLoeschen(req: Request, res: Response): void {
   const i = id === undefined ? -1 : zeitplaene.findIndex((x) => x.id === id);
   if (i < 0) return void res.status(404).json({ ok: false, error: "nicht_gefunden", text: "Diesen Zeitplan gibt es nicht, Sir." });
   const [z] = zeitplaene.splice(i, 1);
-  saveZeitplaene(_dashboardUhr.jetzt());
+  try {
+    saveZeitplaene(_dashboardUhr.jetzt());
+  } catch (e) {
+    // Sonst wäre er bis zum Neustart weg und danach wieder da
+    zeitplaene.splice(i, 0, z!);
+    throw e;
+  }
   audit("zeitplan_geloescht", zeitplanAudit(z!));
   res.json({ ok: true, text: `Zeitplan #${z!.id} gelöscht, Sir.` });
 }
@@ -385,9 +410,14 @@ export function wacheAnlegen(req: Request, res: Response): void {
   if (wacheGesperrt(res)) return;
   const p = pruefeWache(req.body);
   if (!p.ok) return void res.status(400).json({ ok: false, error: "pruefung", fehler: p.fehler });
-  const w: Wache = { id: Math.max(0, ...dynamicWachen.map((x) => x.id ?? 0)) + 1, ...p.wert, quelle: "dashboard" };
+  const w: Wache = { id: neueWacheId(), ...p.wert, quelle: "dashboard" };
   dynamicWachen.push(w);
-  saveWachen();
+  try {
+    saveWachen();
+  } catch (e) {
+    dynamicWachen.splice(dynamicWachen.indexOf(w), 1);
+    throw e;
+  }
   audit("wache_angelegt", wacheAudit(w));
   res.status(201).json({ ok: true, text: `Wache #${w.id} auf «${w.kamera}» eingerichtet, Sir.`, hinweis: WACHEN_HINWEIS, wache: wacheJson(w) });
 }
@@ -399,9 +429,15 @@ export function wacheAendern(req: Request, res: Response): void {
   if (!w) return void res.status(404).json(WACHE_NICHT_GEFUNDEN);
   const p = pruefeWache(req.body);
   if (!p.ok) return void res.status(400).json({ ok: false, error: "pruefung", fehler: p.fehler });
+  const alt = { ...w };
   delete w.ruhe_minuten; // nicht mitgegeben = Standard
   Object.assign(w, p.wert);
-  saveWachen();
+  try {
+    saveWachen();
+  } catch (e) {
+    zuruecksetzen(w, alt);
+    throw e;
+  }
   audit("wache_geaendert", wacheAudit(w));
   res.json({ ok: true, text: `Wache #${w.id} geändert, Sir.`, hinweis: WACHEN_HINWEIS, wache: wacheJson(w) });
 }
@@ -412,7 +448,12 @@ export function wacheLoeschen(req: Request, res: Response): void {
   const i = id === undefined ? -1 : dynamicWachen.findIndex((x) => x.id === id);
   if (i < 0) return void res.status(404).json(WACHE_NICHT_GEFUNDEN);
   const [w] = dynamicWachen.splice(i, 1);
-  saveWachen();
+  try {
+    saveWachen();
+  } catch (e) {
+    dynamicWachen.splice(i, 0, w!);
+    throw e;
+  }
   audit("wache_geloescht", wacheAudit(w!));
   res.json({ ok: true, text: `Wache #${w!.id} gelöscht, Sir.` });
 }

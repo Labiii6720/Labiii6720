@@ -11,7 +11,10 @@
   const $ = (id) => document.getElementById(id);
 
   /* ---------- Speicher: im privaten Modus kann jeder Zugriff werfen ---------- */
-  const TOKEN_KEY = "jarvis.token";
+  // Eigener Schlüssel: /gesture (gleicher Ursprung) legt seine Felder ungefragt unter «jarvis.<feld>» ab, also auch «jarvis.token»
+  const TOKEN_KEY = "jarvis.kommandozentrale.token";
+  const ALT_SITZUNG = "jarvis.token"; // Sitzungsspeicher der Kommandozentrale vor diesem Schlüssel; localStorage dort gehört /gesture
+  const KONSOLE_KEY = "jarvis.token"; // Feld «token» der Gesten-Konsole (localStorage)
   function lies(art, k) { try { return window[art].getItem(k); } catch { return null; } }
   function schreib(art, k, v) { try { window[art].setItem(k, v); return true; } catch { return false; } }
   function entferne(art, k) { try { window[art].removeItem(k); } catch { /* nichts zu tun */ } }
@@ -177,6 +180,8 @@
       leereQuellen();
       if (!d.notfall) void holeBereich();
     }
+    // Ein offenes Modal liegt über der gesperrten Seite: es darf keine Inhalte mehr zeigen
+    if (d.notfall && vorher !== true) dialogeLeeren();
   }
 
   async function holeStatus() {
@@ -188,10 +193,18 @@
     rendern();
   }
 
+  /** Quellen des sichtbaren Bereichs. Fehler anderer Quellen zählen nicht: sie werden hier nicht mehr geholt, also nie gelöscht. */
+  const sichtbareQuellen = () => new Set([...IMMER, ...BEREICHE[aktuell].quellen]);
+  function fremdeFehlerWeg() {
+    const namen = sichtbareQuellen();
+    for (const q of [...fehler.quellen]) if (!namen.has(q)) fehler.quellen.delete(q);
+    return namen;
+  }
+
   async function holeBereich() {
     if (!angemeldet) return;
     if (Q.status && Q.status.notfall) { rendern(); return; }
-    const namen = new Set([...IMMER, ...BEREICHE[aktuell].quellen]);
+    const namen = fremdeFehlerWeg();
     await Promise.all([...namen].map(holeQuelle));
     stoerungZeigen();
     rendern();
@@ -216,7 +229,8 @@
 
   let stoerungAn = false;
   function stoerungZeigen() {
-    const an = fehler.status || fehler.quellen.size > 0;
+    const namen = sichtbareQuellen();
+    const an = fehler.status || [...fehler.quellen].some((q) => namen.has(q));
     if (an === stoerungAn) return; // nur Wechsel anfassen: kein Flackern
     stoerungAn = an;
     $("stoerung").hidden = !an;
@@ -231,21 +245,49 @@
     gr.querySelectorAll(".feld, .wahl").forEach((x) => { if (text) x.setAttribute("aria-invalid", "true"); else x.removeAttribute("aria-invalid"); });
   }
 
+  /** Alle Dialoge ausser der Anmeldung zu und ihre Felder leer (Notfall, Abmelden): Auftragstexte, Fragen und Namen bleiben nicht im DOM */
+  function dialogeLeeren() {
+    document.querySelectorAll("dialog").forEach((d) => {
+      if (d.id === "dlgAnmelden") return;
+      if (d.open) d.close("abbruch");
+      const a = dlgAnsage.get(d);
+      if (a) a.textContent = "";
+    });
+    for (const f of ["planForm", "wacheForm", "pinForm"]) $(f).reset();
+    fehlerZeigen($("planForm"), {});
+    fehlerZeigen($("wacheForm"), {});
+    feldFehler($("pinGr"), "");
+    zaehler();
+    $("wKamera").replaceChildren();
+    for (const id of ["pinText", "pinHilfeText", "frageTitel", "frageText", "bildTitel", "bildStand"]) $(id).textContent = "";
+    planId = null; wacheId = null; pinSenden = null;
+  }
+
   function anmeldenZeigen(meldung) {
     angemeldet = false;
     stopp();
     document.body.classList.add("abgemeldet");
-    document.querySelectorAll("dialog[open]").forEach((d) => { if (d.id !== "dlgAnmelden") d.close("abbruch"); });
+    dialogeLeeren();
     $("anmTitel").textContent = gruss();
     $("anmToken").value = "";
     $("anmMerken").checked = lies("localStorage", TOKEN_KEY) !== null;
     feldFehler($("anmGr"), meldung || "");
     const d = $("dlgAnmelden");
-    if (!d.open) d.showModal();
+    if (!d.open) { d.showModal(); toastNachOben(); }
     $("anmToken").focus();
   }
   // Ohne Token gibt es nichts hinter dem Dialog: Esc schliesst ihn nicht
   $("dlgAnmelden").addEventListener("cancel", (e) => { if (!angemeldet) e.preventDefault(); });
+  // Chromium lässt preventDefault beim zweiten Esc ohne neue Nutzeraktivierung nicht mehr gelten: dann sofort wieder öffnen
+  $("dlgAnmelden").addEventListener("close", () => {
+    if (angemeldet) return;
+    requestAnimationFrame(() => {
+      const d = $("dlgAnmelden");
+      if (angemeldet || d.open) return;
+      d.showModal();
+      $("anmToken").focus();
+    });
+  });
 
   $("anmForm").addEventListener("submit", async (e) => {
     e.preventDefault();
@@ -274,6 +316,7 @@
     token = null;
     entferne("sessionStorage", TOKEN_KEY);
     entferne("localStorage", TOKEN_KEY);
+    entferne("sessionStorage", ALT_SITZUNG);
     entferne("localStorage", "jarvis.dash"); // Speicherort der Übergangsseite vor 0.22
   }
   function allesLeeren() {
@@ -291,10 +334,17 @@
     anmeldenZeigen("Der Token gilt nicht mehr, Sir. Bitte neu anmelden.");
   }
   function abmelden() {
+    const alt = token;
     tokenVergessen();
+    // /gesture legt denselben Token ungefragt unter «jarvis.token» ab (ebenso «merken» im Zwischenstand von 0.22).
+    // Abmelden heisst «aus diesem Browser»: diese Kopie geht mit; einen anderen Wert der Gesten-Konsole lasse ich stehen.
+    const kopie = (art, k) => Boolean(alt) && lies(art, k) === alt;
+    if (kopie("localStorage", KONSOLE_KEY)) entferne("localStorage", KONSOLE_KEY);
+    const bleibt = [["sessionStorage", TOKEN_KEY], ["localStorage", TOKEN_KEY], ["sessionStorage", ALT_SITZUNG], ["localStorage", KONSOLE_KEY]].some(([art, k]) => kopie(art, k));
     allesLeeren();
     anmeldenZeigen("");
-    toast("Abgemeldet, Sir. Der Token ist aus diesem Browser gelöscht.");
+    toast(bleibt ? "Abgemeldet, Sir. Den Token konnte ich in diesem Browser nicht löschen – bitte die Websitedaten löschen."
+      : "Abgemeldet, Sir. Der Token ist aus diesem Browser gelöscht.");
   }
 
   function starten(status) {
@@ -328,6 +378,7 @@
     d._vorherKey = schluessel(vorher);
     d.returnValue = "";
     d.showModal();
+    toastNachOben();
     if (fokus) fokus.focus();
   }
   document.querySelectorAll("dialog").forEach((d) => d.addEventListener("close", () => {
@@ -381,13 +432,53 @@
   $("dlgPin").addEventListener("close", () => { $("pinFeld").value = ""; pinSenden = null; });
 
   /* ---------- Rückmeldung ---------- */
-  let toastTimer = 0;
+  /*
+   * Ein offenes Modal legt seinen Hintergrund über die Seite und macht sie inert (auch für Live-Regionen). Darum:
+   * sichtbar als Popover in der obersten Ebene, hörbar über eine Live-Region im offenen Dialog (ohne Dialog: #ansage).
+   */
+  const toastEl = $("toast");
+  // Geschlossen ist das Popover display:none, also nicht im Barrierefreiheitsbaum: eine Live-Region, die mit ihrem Inhalt
+  // neu erscheint, sagt kaum ein Screenreader an. Der Toast ist nur sichtbar; hörbar wird er über #ansage bzw. dlg-ansage.
+  toastEl.removeAttribute("role");
+  toastEl.removeAttribute("aria-live");
+  const toastPopover = typeof toastEl.showPopover === "function";
+  if (toastPopover) {
+    toastEl.setAttribute("popover", "manual");
+    // UA-Regeln für [popover] (inset 0, margin auto, Rahmen, Canvas-Farben) zurücknehmen; Lage und Aussehen kommen aus .toast
+    Object.assign(toastEl.style, { top: "auto", right: "auto", margin: "0", border: "0", color: "inherit", overflow: "visible" });
+  }
+  const dlgAnsage = new Map();
+  document.querySelectorAll("dialog").forEach((d) => {
+    const a = h("div", { class: "sr dlg-ansage", role: "status", "aria-live": "polite" });
+    d.append(a);
+    dlgAnsage.set(d, a);
+    d.addEventListener("close", () => { a.textContent = ""; });
+  });
+  /** Holt einen sichtbaren Toast über das zuletzt geöffnete Modal */
+  function toastNachOben() {
+    if (!toastPopover || !toastEl.matches(":popover-open")) return;
+    toastEl.hidePopover();
+    toastEl.showPopover();
+  }
+  let toastTimer = 0, toastWeg = 0;
   function toast(text) {
-    const el = $("toast");
+    const el = toastEl;
     el.textContent = text;
+    clearTimeout(toastTimer); clearTimeout(toastWeg);
+    if (toastPopover) {
+      if (el.matches(":popover-open")) el.hidePopover();
+      el.showPopover();
+      if (!el.classList.contains("an")) void el.offsetWidth; // Ausgangszustand setzen, damit das Einblenden animiert
+    }
     el.classList.add("an");
-    clearTimeout(toastTimer);
-    toastTimer = setTimeout(() => el.classList.remove("an"), Math.min(8000, 3200 + text.length * 25));
+    const offen = [...document.querySelectorAll("dialog[open]")];
+    const dlg = offen.find((d) => d.contains(document.activeElement)) || offen[offen.length - 1];
+    const a = dlg && dlgAnsage.get(dlg);
+    if (a) { a.textContent = ""; a.textContent = text; } else ansage(text);
+    toastTimer = setTimeout(() => {
+      el.classList.remove("an");
+      if (toastPopover) toastWeg = setTimeout(() => { if (!el.classList.contains("an") && el.matches(":popover-open")) el.hidePopover(); }, 250);
+    }, Math.min(8000, 3200 + text.length * 25));
   }
 
   /* ---------- Bausteine ---------- */
@@ -415,7 +506,7 @@
     return h("div", { class: "leer" + (extraKlasse ? " " + extraKlasse : "") }, ikon(sym), h("b", { text: satz }), erklaerung || null);
   }
   function gesperrtKarte() {
-    return h("div", { class: "karte gesperrt-karte" }, leer("lock", "Im Notfall gesperrt, Sir.", "Inhalte erst nach /entwarnung in Telegram. Notaus und Sicherheit bleiben bedienbar.", "gesperrt"));
+    return h("div", { class: "karte gesperrt-karte" }, leer("lock", "Im Notfall gesperrt, Sir.", "Inhalte erst nach /entwarnung in Telegram. Der Notaus ist bereits aktiv.", "gesperrt"));
   }
   /** Mini-Säulen für die Kostenkachel – dekorativ, die Werte stehen in der Kachel */
   function funke(werte) {
@@ -625,21 +716,21 @@
   ];
   function lagePunkte() {
     const st = Q.status; const p = [];
-    if (st.notfall) p.push({ s: "krit", t: "Notfall aktiv", d: "Entwarnung nur per /entwarnung in Telegram", w: "Sicherheit", href: "#sicherheit" });
-    for (const [feld, datei, w, href] of DATEIEN) if (st[feld]) p.push({ s: "ernst", t: datei + " unlesbar", d: "Reparieren und Jarvis neu starten, Sir", w, href: href || "#uebersicht", ziel: href ? null : "vorgAnker" });
-    for (const a of anbindungen().filter((x) => !x.ok)) p.push({ s: a.schwere, t: a.name + " " + a.wort, d: (a.auth ? "Zugang abgelehnt" : a.kurz || "Störung") + " · " + seit(a.seit), w: "Anbindungen", ziel: "anbAnker" });
+    if (st.notfall) p.push({ k: "notfall", s: "krit", t: "Notfall aktiv", d: "Entwarnung nur per /entwarnung in Telegram", w: "Sicherheit", href: "#sicherheit" });
+    for (const [feld, datei, w, href] of DATEIEN) if (st[feld]) p.push({ k: "datei:" + feld, s: "ernst", t: datei + " unlesbar", d: "Reparieren und Jarvis neu starten, Sir", w, href: href || "#uebersicht", ziel: href ? null : "vorgAnker" });
+    for (const a of anbindungen().filter((x) => !x.ok)) p.push({ k: "anb:" + a.k, s: a.schwere, t: a.name + " " + a.wort, d: (a.auth ? "Zugang abgelehnt" : a.kurz || "Störung") + " · " + seit(a.seit), w: "Anbindungen", ziel: "anbAnker" });
     const fd = Q.finanzen && Q.finanzen.daten;
     if (fd && Array.isArray(fd.ueberfaellig) && fd.ueberfaellig.length) {
       const ue = fd.ueberfaellig; const summe = {};
       for (const r of ue) if (istZahl(r.betrag)) summe[r.waehrung] = (summe[r.waehrung] || 0) + r.betrag;
-      p.push({ s: "ernst", t: ue.length === 1 ? "Eine Rechnung überfällig" : ue.length + " Rechnungen überfällig", d: summeText(summe) + " · älteste seit " + datum(ue[0].faellig), w: "Finanzen", href: "#finanzen" });
+      p.push({ k: "ueberfaellig", s: "ernst", t: ue.length === 1 ? "Eine Rechnung überfällig" : ue.length + " Rechnungen überfällig", d: summeText(summe) + " · älteste seit " + datum(ue[0].faellig), w: "Finanzen", href: "#finanzen" });
     }
     const w = wartende();
     if (w.length) {
       const sens = w.filter((a) => a.stufe === "sensibel").length;
-      p.push({ s: "warn", t: w.length === 1 ? "Eine Freigabe wartet" : w.length + " Freigaben warten", d: sens ? (sens === 1 ? (w.length === 1 ? "sensibel, mit PIN" : "eine davon sensibel, mit PIN") : sens + " davon sensibel, mit PIN") : "Tippen genügt", w: "Prüfen", ziel: "auftrAnker" });
+      p.push({ k: "freigaben", s: "warn", t: w.length === 1 ? "Eine Freigabe wartet" : w.length + " Freigaben warten", d: sens ? (sens === 1 ? (w.length === 1 ? "sensibel, mit PIN" : "eine davon sensibel, mit PIN") : sens + " davon sensibel, mit PIN") : "Tippen genügt", w: "Prüfen", ziel: "auftrAnker" });
     }
-    if (st.pausiert && !st.notfall) p.push({ s: "warn", t: "Notaus aktiv", d: "Ich tue nichts, bis Sie mit PIN fortsetzen", w: "Sicherheit", href: "#sicherheit" });
+    if (st.pausiert && !st.notfall) p.push({ k: "notaus", s: "warn", t: "Notaus aktiv", d: "Ich tue nichts, bis Sie mit PIN fortsetzen", w: "Sicherheit", href: "#sicherheit" });
     const rang = { krit: 3, ernst: 2, warn: 1 };
     return p.sort((a, b) => rang[b.s] - rang[a.s]).slice(0, 5);
   }
@@ -671,8 +762,8 @@
   function anbKarte() {
     const alle = anbindungen(); const stoer = alle.filter((a) => !a.ok); const oks = alle.filter((a) => a.ok);
     const kopfzeile = h("h2", { class: "etikett" }, "Anbindungen", alle.length ? h("span", { class: "rest t3", text: `${oks.length} von ${alle.length} in Ordnung` }) : null);
-    if (!alle.length) return h("div", { class: "karte anb", id: "anbAnker" }, kopfzeile, h("p", { class: "ruhig", text: "Noch keine Meldungen. Ich trage Anbindungen ein, sobald ich sie benutze." }));
-    return h("div", { class: "karte anb", id: "anbAnker" }, kopfzeile,
+    if (!alle.length) return h("div", { class: "karte anb", id: "anbAnker", tabindex: "-1" }, kopfzeile, h("p", { class: "ruhig", text: "Noch keine Meldungen. Ich trage Anbindungen ein, sobald ich sie benutze." }));
+    return h("div", { class: "karte anb", id: "anbAnker", tabindex: "-1" }, kopfzeile,
       h("ul", { class: "liste" },
         stoer.map((a) => h("li", { class: "stoer" }, ikon(a.schwere === "ernst" ? "warn" : "kreis", false, "z-" + a.schwere),
           h("div", { class: "haupt" }, h("div", { class: "kopfz" }, h("b", { text: a.name }), h("span", { class: "zustand" }, a.wort, h("span", { class: "t3", text: "· " + seit(a.seit) }))),
@@ -696,7 +787,7 @@
       v.append(h("div", { class: "karte" }, h("h2", { class: "etikett" }, "Lage", h("span", { class: "rest t3", text: "nach Dringlichkeit" })),
         h("ul", { class: "lage-liste" }, punkte.map((p) => {
           const [ic, kl] = SCHWERE[p.s];
-          return h("li", null, h("a", { href: p.href || "#uebersicht", "data-ziel": p.ziel || null }, ikon(ic, false, "sym " + kl), h("b", { text: p.t }), h("span", { class: "detail", text: p.d }), h("span", { class: "weiter", text: p.w + " ›" })));
+          return h("li", null, h("a", { href: p.href || "#uebersicht", "data-ziel": p.ziel || null, "data-merk": "lage:" + p.k }, ikon(ic, false, "sym " + kl), h("b", { text: p.t }), h("span", { class: "detail", text: p.d }), h("span", { class: "weiter", text: p.w + " ›" })));
         }))));
     }
 
@@ -710,7 +801,7 @@
       const n = istZahl(st.offeneAuftraege) ? st.offeneAuftraege : 0;
       v.append(h("div", { class: "raster r-2 kacheln mt" },
         kpi("Offene Aufträge", String(n), null, "Inhalte erst nach /entwarnung"), anbKpi));
-      const auftr = h("div", { class: "karte auftr-karte", id: "auftrAnker" }, h("h2", { class: "etikett", text: "Offene Aufträge" }),
+      const auftr = h("div", { class: "karte auftr-karte", id: "auftrAnker", tabindex: "-1" }, h("h2", { class: "etikett", text: "Offene Aufträge" }),
         leer("lock", n === 0 ? "Keine offenen Aufträge." : n === 1 ? "Ein offener Auftrag." : n + " offene Aufträge.", "Inhalte erst nach /entwarnung.", "gesperrt"),
         h("p", { class: "kfuss" }, ikon("lock", true), "Im Notfall gebe ich nichts frei und zeige keine Inhalte. Die Aufträge bleiben offen."));
       v.append(h("div", { class: "raster r-2-1 mt" }, auftr, h("div", { class: "spalte" }, anbKarte())));
@@ -753,7 +844,7 @@
     v.append(h("div", { class: "kpis mt" }, auftrKpi, kostenKpi, rechnungKpi, anbKpi));
 
     /* Aufträge links – Anbindungen und «Als Nächstes» rechts */
-    const auftr = h("div", { class: "karte auftr-karte", id: "auftrAnker" }, h("h2", { class: "etikett" }, "Offene Aufträge", h("a", { class: "rest", href: "#freigaben", text: "Historie ›" })),
+    const auftr = h("div", { class: "karte auftr-karte", id: "auftrAnker", tabindex: "-1" }, h("h2", { class: "etikett" }, "Offene Aufträge", h("a", { class: "rest", href: "#freigaben", "data-merk": "u-historie", text: "Historie ›" })),
       offen.length ? h("div", { class: "auftraege" }, offen.map(auftragKarte)) : leer("leer", "Nichts zu tun, Sir.", "Neue Aufträge erscheinen hier."),
       h("p", { class: "kfuss" }, ikon("lock", true), "Sensibles gebe ich nur mit Ihrer PIN frei. Telegram und diese Seite zählen gleich."));
     v.append(h("div", { class: "raster r-2-1 mt" }, auftr, h("div", { class: "spalte" }, anbKarte(), naechstKarte())));
@@ -764,7 +855,7 @@
         h("span", { text: z.frist ? "bis " + (/^\d{4}-\d{2}-\d{2}$/.test(z.frist) ? datum(z.frist) : z.frist) : "ohne Frist" })))))
         : h("p", { class: "ruhig", text: "Noch keine Ziele. Nennen Sie mir eines im Gespräch, Sir." }));
     const vorgaenge = Array.isArray(st.vorgaenge) ? [...st.vorgaenge].reverse() : [];
-    const vorgK = h("div", { class: "karte", id: "vorgAnker" }, h("h2", { class: "etikett", text: "Vorgänge" }),
+    const vorgK = h("div", { class: "karte", id: "vorgAnker", tabindex: "-1" }, h("h2", { class: "etikett", text: "Vorgänge" }),
       st.vorgaengeUnlesbar ? h("p", { class: "ruhig", text: "data/vorgaenge.json ist unlesbar. Ich starte keine Vorgänge, bis sie repariert ist." })
         : vorgaenge.length ? h("ul", { class: "liste" }, vorgaenge.map((g) => h("li", null, h("div", { class: "haupt" }, h("b", { text: g.auftrag }),
           h("span", { text: `#${g.id} · ${g.status} · ${istZahl(g.steps) ? (g.steps === 1 ? "1 Schritt" : g.steps + " Schritte") : "–"}` })))))
@@ -781,7 +872,7 @@
   }
 
   function naechstKarte() {
-    const k = h("div", { class: "karte naechst" }, h("h2", { class: "etikett" }, "Als Nächstes", h("a", { class: "rest", href: "#zeitplaene", text: "Zeitpläne ›" })));
+    const k = h("div", { class: "karte naechst" }, h("h2", { class: "etikett" }, "Als Nächstes", h("a", { class: "rest", href: "#zeitplaene", "data-merk": "u-zeitplaene", text: "Zeitpläne ›" })));
     const zq = Q.zeitplaene, wq = Q.wachen;
     if (Q.status.pausiert) k.append(h("p", { class: "ruhig", text: "Während des Notaus läuft nichts davon." }));
     const zeilen = [];
@@ -1027,7 +1118,19 @@
     });
     const andere = [...new Set(pm.flatMap((m) => [...Object.keys(m.bezahlt || {}), ...Object.keys(m.offen || {})]))].filter((w) => w !== hw).sort();
     const leerDiag = zeilen.every((z) => !(z.werte.b > 0) && !(z.werte.o > 0));
-    const anzahl = (m) => `${m.anzahlBezahlt ?? 0} bezahlt · ${m.anzahlOffen ?? 0} offen`;
+    // Die Anzahl gehört zur Hauptwährung: je Währung, sobald der Server sie liefert (anzahlJe); sonst gilt sie für alle
+    // Währungen des Monats und steht dann auch so da, statt neben dem CHF-Betrag eine falsche Zahl zu behaupten.
+    const anzahlIn = (m) => {
+      const je = m.anzahlJe;
+      if (je && typeof je === "object") {
+        const n = (o) => (o && istZahl(o[hw]) ? o[hw] : 0);
+        return { b: n(je.bezahlt), o: n(je.offen), alle: false };
+      }
+      const fremdeW = [...Object.keys(m.bezahlt || {}), ...Object.keys(m.offen || {})].some((w) => w !== hw);
+      return { b: istZahl(m.anzahlBezahlt) ? m.anzahlBezahlt : 0, o: istZahl(m.anzahlOffen) ? m.anzahlOffen : 0, alle: fremdeW };
+    };
+    const anzahl = (m) => { const a = anzahlIn(m); return `${a.b} bezahlt · ${a.o} offen` + (a.alle ? " (alle Währungen)" : ""); };
+    const anzahlKurz = (m) => { const a = anzahlIn(m); return `${a.b} / ${a.o}` + (a.alle ? " (alle Währungen)" : ""); };
     let flaeche;
     if (ansicht.finanzen) {
       const betragIn = (o, w) => (o && istZahl(o[w]) ? geld(o[w], w) : "–");
@@ -1040,7 +1143,7 @@
       flaeche = h("div", null, h("div", { class: "tbl-wrap" }, h("table", { class: "tbl" }, h("caption", { class: "sr", text: "Bezahlt und offen pro Monat, " + hw }),
         h("thead", null, h("tr", null, h("th", { scope: "col", text: "Monat" }), h("th", { scope: "col", class: "r", text: "Bezahlt " + hw }), h("th", { scope: "col", class: "r", text: "Offen " + hw }), h("th", { scope: "col", class: "r", text: "Anzahl" }))),
         h("tbody", null, zeilen.map((z) => h("tr", null, h("td", { text: z.lang }), h("td", { class: "r", text: f2.format(z.werte.b) }), h("td", { class: "r", text: f2.format(z.werte.o) }),
-          h("td", { class: "r t3", text: `${z.m.anzahlBezahlt ?? 0} / ${z.m.anzahlOffen ?? 0}` })))))), weitere);
+          h("td", { class: "r t3", text: anzahlKurz(z.m) })))))), weitere);
     } else if (leerDiag) {
       flaeche = leer("diag", "Keine Rechnungen in den letzten sechs Monaten.", "Sobald ich eine erkenne, steht sie hier.");
     } else {
@@ -1068,11 +1171,25 @@
 
   /* ---------- Zeitpläne & Wachen ---------- */
   const TAGE = [["mo", "Mo", "Montag"], ["di", "Di", "Dienstag"], ["mi", "Mi", "Mittwoch"], ["do", "Do", "Donnerstag"], ["fr", "Fr", "Freitag"], ["sa", "Sa", "Samstag"], ["so", "So", "Sonntag"]];
-  function tageText(t) {
+  /**
+   * Wie normaleTage im Server: Zeitpläne vor 0.22 tragen «täglich», «Mo,Mi» oder «mo, mi» (der Scheduler nimmt sie an).
+   * Liefert taeglich, werktags oder die Liste in Wochenreihenfolge; null, wenn nichts davon passt.
+   */
+  function normTage(roh) {
+    const t = String(roh ?? "").toLowerCase().replace(/\s/g, "");
+    if (t === "taeglich" || t === "täglich") return "taeglich";
+    if (t === "werktags") return "werktags";
+    const teile = t.split(",");
+    if (teile.some((x) => !TAGE.some(([k]) => k === x)) || new Set(teile).size !== teile.length) return null;
+    return TAGE.map(([k]) => k).filter((k) => teile.includes(k)).join(",");
+  }
+  function tageText(roh) {
+    const t = normTage(roh);
+    if (t === null) return String(roh ?? "");
     if (t === "taeglich") return "Täglich";
     if (t === "werktags") return "Werktags";
     const m = Object.fromEntries(TAGE.map(([k, l]) => [k, l]));
-    return String(t ?? "").split(",").map((x) => m[x] || x).join(", ");
+    return t.split(",").map((x) => m[x]).join(", ");
   }
   const NUR_WENN = { immer: "immer", abwesend: "wenn Sie abwesend sind", nacht: "nachts" };
   const HERKUNFT = { chat: "angelegt im Chat", dashboard: "angelegt hier" };
@@ -1187,10 +1304,12 @@
     $("planTitel").textContent = z ? "Zeitplan ändern" : "Neuer Zeitplan";
     $("pName").value = z ? z.name : "";
     $("pZeit").value = z ? z.zeit : "07:00";
-    const art = !z ? "werktags" : z.tage === "taeglich" || z.tage === "werktags" ? z.tage : "liste";
+    // Unbekannte Schreibweisen: so viele Tage wie erkennbar ankreuzen, die Prüfung meldet den Rest
+    const tage = z ? normTage(z.tage) ?? String(z.tage ?? "").toLowerCase().replace(/\s/g, "") : "werktags";
+    const art = tage === "taeglich" || tage === "werktags" ? tage : "liste";
     document.querySelectorAll('input[name="tageArt"]').forEach((r) => { r.checked = r.value === art; });
     tageArtSync();
-    if (art === "liste") tageBox.querySelectorAll("input").forEach((i) => { i.checked = String(z.tage).split(",").includes(i.value); });
+    if (art === "liste") tageBox.querySelectorAll("input").forEach((i) => { i.checked = tage.split(",").includes(i.value); });
     $("pAuftrag").value = z ? z.auftrag : "";
     zaehler();
     fehlerZeigen($("planForm"), {});
@@ -1488,6 +1607,12 @@
 
   /* ---------- Obere Leiste ---------- */
   let notausZustand = null;
+  // Genaue Leistenhöhe für scroll-padding (die CSS-Werte sind nur grosszügige Schätzungen); per CSSOM, CSP-konform
+  function kopfHoehe() {
+    const kopf = document.querySelector("header.top");
+    if (kopf) document.documentElement.style.setProperty("--kopf-h", kopf.offsetHeight + "px");
+  }
+  window.addEventListener("resize", kopfHoehe);
   function leiste() {
     const st = Q.status;
     if (!st) return;
@@ -1497,15 +1622,19 @@
     const wort = st.notfall ? "Notfall" : st.pausiert ? "Pausiert" : "Bereit";
     if ($("zustandText").textContent !== wort) $("zustandText").textContent = wort;
     $("bandNotfall").hidden = !st.notfall;
+    kopfHoehe();
     document.querySelectorAll("[data-modus]").forEach((b) => b.setAttribute("aria-checked", String(b.dataset.modus === st.modus)));
     const angehalten = Boolean(st.pausiert || st.notfall);
-    if (notausZustand !== angehalten) {
-      notausZustand = angehalten;
+    // Im Notfall ist «Weiter» gesperrt (erst /entwarnung in Telegram): sichtbar, aber nicht bedienbar
+    const knopfZustand = st.notfall ? "notfall" : angehalten ? "pause" : "an";
+    if (notausZustand !== knopfZustand) {
+      notausZustand = knopfZustand;
       const nk = $("notausKnopf");
       nk.dataset.aktion = angehalten ? "weiter" : "notaus";
       nk.className = "knopf notaus" + (angehalten ? "" : " gefahr");
+      nk.disabled = Boolean(st.notfall);
       nk.replaceChildren(ikon(angehalten ? "lock" : "pause", true), h("span", { text: angehalten ? "Weiter" : "Notaus" }));
-      nk.setAttribute("aria-label", angehalten ? "Weiter mit PIN" : "Notaus: sofort alles anhalten");
+      nk.setAttribute("aria-label", st.notfall ? "Weiter erst nach /entwarnung in Telegram" : angehalten ? "Weiter mit PIN" : "Notaus: sofort alles anhalten");
     }
     const zahl = (el, n, wortZ) => {
       const t = String(n) + "|" + wortZ;
@@ -1545,6 +1674,8 @@
     });
     document.title = "JARVIS · " + BEREICHE[aktuell].titel;
     letzteSig[aktuell] = null;
+    fremdeFehlerWeg();
+    stoerungZeigen();
     rendern();
     zyklen();
   }
@@ -1751,6 +1882,7 @@
   /* ---------- Start ---------- */
   (async () => {
     entferne("localStorage", "jarvis.dash");
+    entferne("sessionStorage", ALT_SITZUNG);
     token = lies("sessionStorage", TOKEN_KEY) || lies("localStorage", TOKEN_KEY);
     if (!token) { anmeldenZeigen(""); return; }
     const r = await api("/status.json");

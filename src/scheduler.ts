@@ -330,7 +330,11 @@ export async function zeitplanTick(now = new Date()): Promise<void> {
   await nachNeustartPruefen(now);
   if (state.paused) return;
   const today = todayKey(now);
-  for (const z of zeitplaene) {
+  // Über eine Kopie: Löscht das Dashboard oder ein Werkzeug während eines Laufs einen Eintrag, rückt die Liste nach und
+  // ein Iterator über das Original überspränge den nächsten Zeitplan.
+  for (const z of [...zeitplaene]) {
+    // Inzwischen gelöscht: nicht mehr ausführen
+    if (!zeitplaene.includes(z)) continue;
     // Jeder Lauf dauert; kommt währenddessen /pause oder der Notfall, startet kein weiterer Zeitplan mehr.
     if (state.paused) return;
     if (!faelligIm(z, now, config.zeitplanNachholenMin)) continue;

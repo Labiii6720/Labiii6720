@@ -305,6 +305,59 @@ describe("zeitplanTick", () => {
     assert.equal(z.lastRun, undefined);
     assert.deepEqual(gesendet, []);
   });
+
+  it("Löschen während eines Laufs: der nachrückende Zeitplan läuft im selben Tick (Fenster 0)", async () => {
+    zeitplaene.length = 0;
+    zeitplaene.push(
+      { id: 30, name: "A", zeit: "07:00", tage: "taeglich", auftrag: "a" },
+      { id: 31, name: "B", zeit: "07:00", tage: "taeglich", auftrag: "b" },
+      { id: 32, name: "C", zeit: "07:00", tage: "taeglich", auftrag: "c" },
+    );
+    const [b, c] = [zeitplaene[1]!, zeitplaene[2]!];
+    const vorher = abhaengigkeiten.handleMessage;
+    const fensterVorher = config.zeitplanNachholenMin;
+    config.zeitplanNachholenMin = 0;
+    // Wie das Dashboard (findIndex + splice): A wird gelöscht, während sein Lauf noch dauert
+    abhaengigkeiten.handleMessage = async (text: string) => {
+      prompts.push(text);
+      if (text.endsWith("] a")) zeitplaene.splice(zeitplaene.findIndex((z) => z.id === 30), 1);
+      return "Erledigt, Sir.";
+    };
+    try {
+      await zeitplanTick(am(10, 7, 0));
+    } finally {
+      abhaengigkeiten.handleMessage = vorher;
+      config.zeitplanNachholenMin = fensterVorher;
+    }
+    assert.deepEqual(prompts, [
+      "[Zeitplan «A», läuft automatisch] a",
+      "[Zeitplan «B», läuft automatisch] b",
+      "[Zeitplan «C», läuft automatisch] c",
+    ]);
+    assert.equal(b.lastRun, "2026-10-10");
+    assert.equal(c.lastRun, "2026-10-10");
+    assert.deepEqual(zeitplaene.map((z) => z.id), [31, 32]);
+  });
+
+  it("Löschen während eines Laufs: ein schon gelöschter späterer Zeitplan läuft nicht mehr", async () => {
+    zeitplaene.length = 0;
+    zeitplaene.push(
+      { id: 33, name: "A", zeit: "07:00", tage: "taeglich", auftrag: "a" },
+      { id: 34, name: "B", zeit: "07:00", tage: "taeglich", auftrag: "b" },
+    );
+    const vorher = abhaengigkeiten.handleMessage;
+    abhaengigkeiten.handleMessage = async (text: string) => {
+      prompts.push(text);
+      if (text.endsWith("] a")) zeitplaene.splice(zeitplaene.findIndex((z) => z.id === 34), 1);
+      return "Erledigt, Sir.";
+    };
+    try {
+      await zeitplanTick(am(10, 7, 0));
+    } finally {
+      abhaengigkeiten.handleMessage = vorher;
+    }
+    assert.deepEqual(prompts, ["[Zeitplan «A», läuft automatisch] a"]);
+  });
 });
 
 describe("Abbruch nach Werkzeugschritten: nie den ganzen Lauf wiederholen", () => {

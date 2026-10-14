@@ -13,7 +13,7 @@ Du arbeitest am persönlichen Assistenten **JARVIS** von Labinot (Service Specia
 - `server.ts` Einstieg: Express (Alexa `/alexa`, Ereignisse `/events`, Panik `/notfall`, Konsole `/gesture`, Dashboard `/dashboard` + `/api/*`), Scheduler, Telegram, Kameras.
 - `agent.ts` Claude-Loop mit Werkzeugen, Historie (data/chat.json), Prompt-Caching, starkes Modell (`!`), `askWithBudget` für Stimme.
 - `tools.ts` Werkzeugkasten; jedes Werkzeug hat eine Stufe `auto` / `extern` / `sensibel` (queue.ts). `extern` wartet auf Tippen, `sensibel` auf Tippen + PIN. Neue Werkzeuge immer mit richtiger Stufe und `summary`.
-- `telegram.ts` Zentrale: Befehle, Freigabe-Buttons, PIN, Notaus, Sprachnachrichten. `dashboard.ts` dieselben Funktionen fürs Web.
+- `telegram.ts` Zentrale: Befehle, Freigabe-Buttons, PIN, Notaus, Sprachnachrichten. `dashboard.ts` dieselben Funktionen fürs Web (API hinter `lanOnly` + Bearer-Token, im Notfall 423); Oberfläche in `web/dashboard.{html,css,js}` (ausgeliefert als `/dashboard`, `/dashboard/app.css`, `/dashboard/app.js` mit strenger CSP, DOM nur über `textContent`).
 - `brain.ts` Morgen (Cardio aus WHOOP, Tagesbriefing mit Freigaben-Hinweis `freigabenHinweis`), `alexa.ts` Skill (SSML nur über `ssml()`, Nachtstimme `ALEXA_NACHT`, per Stimme nur vorlesen, nie freigeben), `sources.ts` Wetter/Kalender/WHOOP.
 - `cameras.ts`/`watch.ts` Frigate (schauen, melden, wachen), `homeassistant.ts`, `shopify.ts`, `gmail.ts`, `browser.ts`, `workspace.ts` (Sandbox), `werkstatt.ts` (OpenSCAD, PrusaSlicer-CLI mit Profil `SLICER_PROFIL`, OctoPrint; Dateien nur real im Arbeitsordner, Slicer ohne Geheimnisse in der Umgebung; G-Code nur aus `slice()` mit Prüfsumme der Freigabe an den Drucker, Herkunft in `data/slicer-gcode.json`).
 - `profil.ts`/`berater.ts` Lernen über den Nutzer und ehrlicher Berater, `verdichtung.ts` nächtliche Gedächtnis-Verdichtung (Haiku, Vorschlag geprüft, nichts gelöscht, Archiv `data/profil-archiv.jsonl`), `finanzen.ts` Rechnungen und Finanz-Wochenbericht (nur vorbereiten), `notfall.ts` defensives Notfall-Protokoll, `scheduler.ts` Zeitpläne, Rückblick, Rechnungs- und Zielerinnerungen, Finanzbericht, Verdichtungs-Lauf, `check.ts` Selbsttest, `claude.ts` Verbrauch/Kosten, `audit.ts` Protokoll.
@@ -48,8 +48,8 @@ Du arbeitest am persönlichen Assistenten **JARVIS** von Labinot (Service Specia
 - Einmalige Verbindungen: `npm run whoop:auth`, `npm run google:auth` (über SSH-Tunnel, siehe README).
 - Fernzugriff nur über Tailscale, nie Portweiterleitungen. Cloudflare Tunnel nur für `/alexa`.
 
-## Offener Plan (Schicht 2, nach Nutzen sortiert)
+## Plan
 
-1. Dashboard: Freigabe-Historie, Kosten (aus usage.json), Zeitpläne und Wachen bearbeiten; Finanz-Wochenbericht aus `/api/finanzen` darstellen.
+Schicht 2 abgeschlossen (0.22: Kommandozentrale mit Freigabe-Historie, Kosten, Zeitplänen und Wachen, Finanzen).
 
 Was nicht kommt: Anzug, Gegenangriff, Selbstmodifikation, Zahlungsauslösung.

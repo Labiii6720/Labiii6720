@@ -1,5 +1,6 @@
 import { mkdirSync, renameSync, writeFileSync } from "node:fs";
 import { gesperrtText, ladeListe } from "./datei.js";
+import { save, state } from "./state.js";
 import { hhmm, imFenster, minutesOfDay, todayKey } from "./time.js";
 
 /** Wiederkehrende Aufgaben, die Jarvis von selbst erledigt und per Telegram meldet. */
@@ -42,10 +43,24 @@ export function saveZeitplaene(jetzt = new Date()): void {
   for (const z of zeitplaene) {
     if (!gespeicherteIds.has(z.id) && z.lastRun === undefined && z.angelegt === undefined) z.angelegt = jetzt.toISOString();
   }
-  gespeicherteIds = new Set(zeitplaene.map((z) => z.id));
   mkdirSync("data", { recursive: true, mode: 0o700 });
   writeFileSync(`${FILE}.tmp`, JSON.stringify(zeitplaene, null, 2), { mode: 0o600 });
   renameSync(`${FILE}.tmp`, FILE);
+  // Erst nach erfolgreichem Schreiben gelten die IDs als gespeichert
+  gespeicherteIds = new Set(zeitplaene.map((z) => z.id));
+}
+
+/**
+ * Neue Zeitplan-ID, die nie zuvor vergeben war (Werkzeug und Kommandozentrale): Sonst träfe eine offene Lösch-Freigabe,
+ * ein veralteter Dashboard-Tab oder der Startvermerk im Scheduler nach dem Löschen ein neues Objekt. Der Zähler wird vor
+ * der Liste gespeichert; scheitert das, wirft es, bevor etwas angelegt ist (höchstens eine Lücke).
+ */
+export function neueZeitplanId(): number {
+  const gemerkt = state.naechsteZeitplanId;
+  const id = Math.max(1, Number.isSafeInteger(gemerkt) ? gemerkt! : 1, ...zeitplaene.map((z) => z.id).filter(Number.isSafeInteger).map((x) => x + 1));
+  state.naechsteZeitplanId = id + 1;
+  save();
+  return id;
 }
 
 const TAGE = ["so", "mo", "di", "mi", "do", "fr", "sa"];
@@ -91,7 +106,7 @@ export type Pruefung<T> = { ok: true; wert: T } | { ok: false; fehler: Record<st
 const WOCHE = ["mo", "di", "mi", "do", "fr", "sa", "so"];
 
 /** Normalisiert «Mo, Mi» → «mo,mi» (Wochenreihenfolge); undefined, wenn die Angabe nicht gilt. */
-function normaleTage(roh: string): string | undefined {
+export function normaleTage(roh: string): string | undefined {
   const t = roh.toLowerCase().replace(/\s/g, "");
   if (t === "taeglich" || t === "täglich") return "taeglich";
   if (t === "werktags") return "werktags";
@@ -135,10 +150,31 @@ export function naechsterLauf(z: Zeitplan, now: Date, fensterMin = 0): Date | un
   const [h, m] = zeit.split(":").map(Number);
   if (h > 23 || m > 59) return undefined;
   if (faelligIm(z, now, fensterMin)) return now;
-  const heuteOffen = z.lastRun !== todayKey(now) && !heuteZuSpaetAngelegt(z, now) && hhmm(zeit) > minutesOfDay(now);
+  const heuteOffen = z.lastRun !== todayKey(now) && !heuteZuSpaetAngelegt(z, now);
   for (let tag = heuteOffen ? 0 : 1; tag <= 7; tag++) {
-    const kandidat = new Date(now.getFullYear(), now.getMonth(), now.getDate() + tag, h, m, 0, 0);
-    if (tagPasst(z, kandidat)) return kandidat;
+    const kandidat = lokalerLauf(now.getFullYear(), now.getMonth(), now.getDate() + tag, h * 60 + m, fensterMin, tag === 0 ? now : undefined);
+    if (kandidat && tagPasst(z, kandidat)) return kandidat;
   }
   return undefined;
+}
+
+/**
+ * Lauf an einem Kalendertag, so wie ihn der Scheduler sieht (imFenster vergleicht nur die Wanduhr-Minute). Fällt die
+ * Uhrzeit in die Lücke der Sommerzeit-Umstellung (z. B. 02:30), startet er in der ersten danach existierenden Minute,
+ * sofern sie noch im Nachholfenster liegt; sonst läuft an diesem Tag nichts (undefined). Mit `ab` (heute) zählt der
+ * früheste Zeitpunkt ab dann, dessen Wanduhr-Minute im Fenster liegt: Bei der Rückstellung auf Winterzeit gibt es
+ * 02:00–02:59 zweimal (new Date liefert immer das erste Vorkommen), und der Scheduler läuft auch im zweiten Durchgang.
+ */
+function lokalerLauf(jahr: number, monat: number, tag: number, ziel: number, fensterMin: number, ab?: Date): Date | undefined {
+  const ende = Math.min(ziel + Math.max(1, Math.floor(fensterMin) || 0), 24 * 60);
+  let bester: Date | undefined;
+  for (let min = ziel; min < ende; min++) {
+    const d = new Date(jahr, monat, tag, 0, min, 0, 0);
+    if (minutesOfDay(d) !== min) continue;
+    if (!ab) return d;
+    const spaeter = new Date(d.getTime() + 3_600_000);
+    const lauf = d >= ab ? d : minutesOfDay(spaeter) === min && spaeter >= ab ? spaeter : undefined;
+    if (lauf && (!bester || lauf < bester)) bester = lauf;
+  }
+  return bester;
 }

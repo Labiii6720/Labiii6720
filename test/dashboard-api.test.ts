@@ -443,6 +443,29 @@ describe("Zeitpläne über das Dashboard", () => {
     assert.ok(ereignisse.every((e) => e.quelle === "dashboard"));
   });
 
+  it("alte Tage-Schreibweise («täglich», «Mo, Mi»): nur Name geändert ist keine Terminänderung, GET liefert normalisiert", async () => {
+    zeitplaene.length = 0;
+    const alt = new Date(2026, 8, 1, 12, 0).toISOString();
+    // Wie aus einer älteren data/zeitplaene.json: rohe Tage, nie gelaufen, längst angelegt
+    zeitplaene.push(
+      { id: 501, name: "Alt täglich", zeit: "07:00", tage: "täglich", auftrag: "x", angelegt: alt },
+      { id: 502, name: "Alt Mo Mi", zeit: "07:00", tage: "Mo, Mi", auftrag: "y", angelegt: alt },
+    );
+    const jetzt = new Date(2026, 9, 12, 7, 20, 0, 0); // Montag, 07:00 liegt im Nachholfenster
+    dashboard._dashboardUhr.jetzt = () => jetzt;
+    const liste = await rufe(dashboard.zeitplaeneJson);
+    assert.deepEqual(liste.body.zeitplaene.map((z: { tage: string }) => z.tage), ["taeglich", "mo,mi"]);
+    for (const [id, tage] of [[501, "taeglich"], [502, "mo,mi"]] as const) {
+      const z = zeitplaene.find((x) => x.id === id)!;
+      const r = await rufe(dashboard.zeitplanAendern, { params: { id: String(id) }, body: { name: `Neu ${id}`, zeit: "07:00", tage, auftrag: z.auftrag } });
+      assert.equal(r.statusCode, 200);
+      assert.equal(z.angelegt, alt, `#${id}: Anlagezeit bleibt`);
+      assert.equal(faelligIm(z, jetzt, 60), true, `#${id}: der heutige Nachholer bleibt`);
+      assert.equal(r.body.zeitplan.tage, tage);
+    }
+    zeitplaene.length = 0;
+  });
+
   it("Prüfregeln im Server: 400 mit Fehlern je Feld, nichts gespeichert; unbekannte ID 404", async () => {
     zeitplaene.length = 0;
     const r = await rufe(dashboard.zeitplanAnlegen, { body: { name: "", zeit: "24:00", tage: "mo,mo", auftrag: "a".repeat(2001) } });
@@ -456,6 +479,48 @@ describe("Zeitpläne über das Dashboard", () => {
     const falsch = await rufe(dashboard.zeitplanAendern, { params: { id }, body: { name: "x", zeit: "7:00", tage: "taeglich", auftrag: "y" } });
     assert.equal(falsch.statusCode, 400);
     assert.equal(zeitplaene.at(-1)!.zeit, "07:00", "ungültige Änderung ändert nichts");
+    zeitplaene.length = 0;
+  });
+
+  it("IDs werden nach dem Löschen nie neu vergeben (offene Lösch-Freigabe trifft kein neues Objekt); Zähler in state.json", async () => {
+    zeitplaene.length = 0;
+    const eingabe = { zeit: "07:00", tage: "taeglich", auftrag: "y" };
+    const a = await rufe(dashboard.zeitplanAnlegen, { body: { ...eingabe, name: "Morgenbericht" } });
+    const idA = a.body.zeitplan.id as number;
+    assert.equal((await rufe(dashboard.zeitplanLoeschen, { params: { id: String(idA) } })).statusCode, 200);
+    const b = await rufe(dashboard.zeitplanAnlegen, { body: { ...eingabe, name: "Rechnungen prüfen" } });
+    assert.ok(b.body.zeitplan.id > idA, "neue ID statt der gelöschten");
+    assert.equal((await rufe(dashboard.zeitplanLoeschen, { params: { id: String(idA) } })).statusCode, 404, "alte ID trifft nichts");
+    assert.equal(zeitplaene.length, 1);
+    const gespeichert = JSON.parse(readFileSync(join(temp, "data", "state.json"), "utf8")) as { naechsteZeitplanId?: number };
+    assert.equal(gespeichert.naechsteZeitplanId, b.body.zeitplan.id + 1);
+    // Ein von aussen (Werkzeug) höher angelegter Plan wird nicht überholt
+    zeitplaene.push({ id: 50, name: "aus dem Chat", ...eingabe });
+    assert.equal((await rufe(dashboard.zeitplanAnlegen, { body: { ...eingabe, name: "danach" } })).body.zeitplan.id, 51);
+    zeitplaene.length = 0;
+  });
+
+  it("Speicherfehler: Anlegen, Ändern und Löschen werden zurückgerollt, ein zweiter Versuch legt nicht doppelt an", async () => {
+    zeitplaene.length = 0;
+    const eingabe = { name: "Morgen", zeit: "07:00", tage: "taeglich", auftrag: "Briefing" };
+    await rufe(dashboard.zeitplanAnlegen, { body: eingabe });
+    const z = zeitplaene[0]!;
+    const vorher = structuredClone(z);
+    const sperre = join(temp, "data", "zeitplaene.json.tmp");
+    mkdirSync(sperre); // writeFileSync auf ein Verzeichnis scheitert wie bei ENOSPC/EACCES
+    try {
+      await assert.rejects(rufe(dashboard.zeitplanAnlegen, { body: { ...eingabe, name: "Zweiter" } }));
+      assert.equal(zeitplaene.length, 1, "nicht gespeichert = nicht angelegt");
+      dashboard._dashboardUhr.jetzt = () => new Date(Date.now() + 3_600_000);
+      await assert.rejects(rufe(dashboard.zeitplanAendern, { params: { id: String(z.id) }, body: { ...eingabe, zeit: "08:15", name: "Neu" } }));
+      assert.deepEqual(z, vorher, "Änderung samt angelegt zurückgerollt");
+      await assert.rejects(rufe(dashboard.zeitplanLoeschen, { params: { id: String(z.id) } }));
+      assert.deepEqual(zeitplaene, [vorher], "Löschen zurückgerollt");
+    } finally {
+      rmSync(sperre, { recursive: true, force: true });
+    }
+    await rufe(dashboard.zeitplanAnlegen, { body: { ...eingabe, name: "Zweiter" } });
+    assert.deepEqual(zeitplaene.map((x) => x.name), ["Morgen", "Zweiter"], "erneuter Versuch: genau einmal");
     zeitplaene.length = 0;
   });
 });
@@ -520,16 +585,19 @@ describe("Wachen über das Dashboard", () => {
     const neu = await rufe(dashboard.wacheAnlegen, { body: { kamera: "garten", frage: "Person im Garten?", alle_minuten: 30, nur_wenn: "nacht", ruhe_minuten: 60 } });
     assert.equal(neu.statusCode, 201);
     assert.match(neu.body.hinweis, /Claude-API/);
-    assert.deepEqual(neu.body.wache, { id: 1, kamera: "garten", frage: "Person im Garten?", alle_minuten: 30, nur_wenn: "nacht", ruhe_minuten: 60, quelle: "dashboard", bearbeitbar: true });
-    const geaendert = await rufe(dashboard.wacheAendern, { params: { id: "1" }, body: { kamera: "einfahrt", frage: "Tor offen?", alle_minuten: 5 } });
+    // Auch die per Werkzeug angelegte (und wieder entfernte) Wache hat ihre ID verbraucht: gemeinsamer Zähler
+    const id = neu.body.wache.id as number;
+    assert.ok(Number.isSafeInteger(id) && id >= 1);
+    assert.deepEqual(neu.body.wache, { id, kamera: "garten", frage: "Person im Garten?", alle_minuten: 30, nur_wenn: "nacht", ruhe_minuten: 60, quelle: "dashboard", bearbeitbar: true });
+    const geaendert = await rufe(dashboard.wacheAendern, { params: { id: String(id) }, body: { kamera: "einfahrt", frage: "Tor offen?", alle_minuten: 5 } });
     assert.equal(geaendert.statusCode, 200);
-    assert.deepEqual(dynamicWachen[0], { id: 1, kamera: "einfahrt", frage: "Tor offen?", alle_minuten: 5, nur_wenn: "immer", quelle: "dashboard" });
-    const falsch = await rufe(dashboard.wacheAendern, { params: { id: "1" }, body: { kamera: "einfahrt", frage: "Tor offen?", alle_minuten: 4 } });
+    assert.deepEqual(dynamicWachen[0], { id, kamera: "einfahrt", frage: "Tor offen?", alle_minuten: 5, nur_wenn: "immer", quelle: "dashboard" });
+    const falsch = await rufe(dashboard.wacheAendern, { params: { id: String(id) }, body: { kamera: "einfahrt", frage: "Tor offen?", alle_minuten: 4 } });
     assert.equal(falsch.statusCode, 400);
     assert.deepEqual(Object.keys(falsch.body.fehler), ["alle_minuten"]);
     assert.equal(dynamicWachen[0]!.alle_minuten, 5, "ungültige Änderung ändert nichts");
     assert.deepEqual(JSON.parse(readFileSync(join(temp, "data", "wachen.json"), "utf8")), dynamicWachen);
-    assert.equal((await rufe(dashboard.wacheLoeschen, { params: { id: "1" } })).statusCode, 200);
+    assert.equal((await rufe(dashboard.wacheLoeschen, { params: { id: String(id) } })).statusCode, 200);
     assert.equal(dynamicWachen.length, 0);
     const ereignisse = auditZeilen().filter((e) => String(e.event).startsWith("wache_"));
     assert.deepEqual(ereignisse.map((e) => e.event), ["wache_angelegt", "wache_geaendert", "wache_geloescht"]);
@@ -547,6 +615,35 @@ describe("Wachen über das Dashboard", () => {
     assert.equal(fehler.statusCode, 400);
     assert.deepEqual(Object.keys(fehler.body.fehler).sort(), ["alle_minuten", "frage", "kamera"]);
     assert.equal(dynamicWachen.length, 0);
+  });
+
+  it("IDs werden nach dem Löschen nie neu vergeben; Speicherfehler rollt Anlegen, Ändern und Löschen zurück", async () => {
+    dynamicWachen.length = 0;
+    const eingabe = { kamera: "garten", frage: "Person im Garten?", alle_minuten: 30 };
+    const a = await rufe(dashboard.wacheAnlegen, { body: eingabe });
+    await rufe(dashboard.wacheLoeschen, { params: { id: String(a.body.wache.id) } });
+    const b = await rufe(dashboard.wacheAnlegen, { body: { ...eingabe, frage: "Tor offen?" } });
+    assert.ok(b.body.wache.id > a.body.wache.id, "neue ID statt der gelöschten");
+    assert.equal((await rufe(dashboard.wacheLoeschen, { params: { id: String(a.body.wache.id) } })).statusCode, 404);
+    const gespeichert = JSON.parse(readFileSync(join(temp, "data", "state.json"), "utf8")) as { naechsteWacheId?: number };
+    assert.equal(gespeichert.naechsteWacheId, b.body.wache.id + 1);
+
+    const w = dynamicWachen[0]!;
+    w.ruhe_minuten = 60;
+    const vorher = structuredClone(w);
+    const sperre = join(temp, "data", "wachen.json.tmp");
+    mkdirSync(sperre);
+    try {
+      await assert.rejects(rufe(dashboard.wacheAnlegen, { body: eingabe }));
+      assert.equal(dynamicWachen.length, 1, "nicht gespeichert = nicht angelegt");
+      await assert.rejects(rufe(dashboard.wacheAendern, { params: { id: String(w.id) }, body: { kamera: "einfahrt", frage: "x", alle_minuten: 5, nur_wenn: "nacht" } }));
+      assert.deepEqual(w, vorher, "Änderung zurückgerollt, ruhe_minuten wieder da");
+      await assert.rejects(rufe(dashboard.wacheLoeschen, { params: { id: String(w.id) } }));
+      assert.deepEqual(dynamicWachen, [vorher], "Löschen zurückgerollt");
+    } finally {
+      rmSync(sperre, { recursive: true, force: true });
+    }
+    dynamicWachen.length = 0;
   });
 });
 
@@ -708,6 +805,8 @@ describe("server.ts: Routen der Kommandozentrale über HTTP", () => {
   let kind: ChildProcess | undefined;
   let port = 0;
   let ausgabe = "";
+  const startfristWunsch = Number(process.env.JARVIS_TEST_STARTFRIST_MS);
+  const startfrist = Number.isFinite(startfristWunsch) && startfristWunsch > 0 ? startfristWunsch : 30_000;
 
   interface HttpAntwort { status: number; text: string; kopf: Record<string, string | string[] | undefined> }
   const http = (methode: string, pfad: string, kopf: Record<string, string> = {}, inhalt?: unknown) =>
@@ -747,7 +846,13 @@ describe("server.ts: Routen der Kommandozentrale über HTTP", () => {
         clearTimeout(frist);
         ok();
       }, 20);
-      const frist = setTimeout(() => { clearInterval(warte); fehler(new Error(`Server nicht gestartet:\n${ausgabe}`)); }, 4500);
+      // Nur Obergrenze: kalter tsx-Cache, parallele Testdateien oder der Pi brauchen deutlich mehr als 4,5 s
+      const frist = setTimeout(() => {
+        clearInterval(warte);
+        kind?.removeAllListeners("exit");
+        kind?.kill("SIGKILL");
+        fehler(new Error(`Server nicht gestartet:\n${ausgabe}`));
+      }, startfrist);
       kind!.once("exit", (code) => { clearInterval(warte); clearTimeout(frist); fehler(new Error(`Server beendet (${code}):\n${ausgabe}`)); });
     });
   });

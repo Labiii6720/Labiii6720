@@ -2,6 +2,15 @@
 
 Kurz und nur das Wichtigste. Details stehen im README.
 
+## 0.22
+- Kommandozentrale neu (`web/dashboard.{html,css,js}`): Übersicht, Freigabe-Historie, Kosten, Finanzen, Zeitpläne & Wachen, Kameras, Gespräch, Protokoll und Sicherheit als Reiter; hell und dunkel, Handy und Desktop, offline ohne CDN. Diagramme als SVG mit Tabellenansicht.
+- Neue API (Heimnetz/Tailscale + Token): `GET /api/auftraege` (nie `input`, Ergebnis geschwärzt), `GET /api/kosten` (Schätzung aus `data/usage.json`), Zeitpläne und Wachen anlegen, ändern, löschen (`/api/zeitplaene`, `/api/wachen`), `POST /api/notaus`, `POST /api/notfall`; `/api/audit` mit lesbaren Einträgen. Gleiche Prüfregeln wie die Werkzeuge (`pruefeZeitplan`, `pruefeWache`), kein sofortiges Nachholen, nächster Lauf je Zeitplan.
+- Sicherheit: Token nur noch im Header (`?token=` → 401), strenge CSP als Header ohne Inline-Code, `Cache-Control: no-store` für die API, Daten nur als Text im DOM. Im Notfall antworten alle Daten-Routen mit 423, ausser `/status.json`, Notaus und Notfall.
+- Weiter nach dem Notaus im Dashboard nur mit PIN; nach drei Fehlversuchen zehn Minuten keine PIN (auch für sensible Freigaben). Keine Entwarnung im Dashboard, nur per `/entwarnung` in Telegram.
+- Zeitplan- und Wachen-Nummern aus einem gemeinsamen Zähler (Dashboard und Werkzeuge), gelöschte nie neu; `zeitplan_loeschen` und `wache_loeschen` löschen nach der Freigabe nur, was die Freigabe nannte. Ältere Tage-Schreibweisen («Mo, Mi») gelten beim Ändern nicht mehr als neuer Termin.
+- Kommandozentrale: eigener Token-Schlüssel, kollidiert nicht mehr mit der Gesten-Konsole; einmal neu anmelden. Finanzen zählen Rechnungen pro Monat zusätzlich je Währung (`anzahlJe`).
+- Schicht 2 ist abgeschlossen.
+
 ## 0.21.2
 - Falsche PIN im Dashboard lehnt den Auftrag ab wie in Telegram (kein zweiter Versuch); in beiden zählt sie als unbefugter Zugriff, fünf in fünf Minuten lösen den Notfall aus.
 - Notfall gibt nichts heraus: Telegram `/auftraege` nur Anzahl und Nummern, `/vorgaenge`, `/check` und Clip-Knopf gesperrt, `/status` ohne Einzelheiten; Dashboard `/status.json` mit leeren Listen, `/api/kamera`, `/api/geraete` und `/api/audit` mit HTTP 423. Alexa sagt im Notaus und Notfall weder Briefing noch Cardio an. Erinnerungen bleiben bis `/entwarnung` liegen.

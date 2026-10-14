@@ -71,7 +71,10 @@ export async function runProtokoll(name: string, ctx: ToolContext): Promise<stri
       if (s.tool) {
         const t = toolByName(s.tool);
         if (!t) throw new Error(`Werkzeug ${s.tool} nicht verfügbar`);
-        const out = await t.run(s.input ?? {}, ctx);
+        // Das Protokoll ist eine feste, vom Nutzer geschriebene Anweisung und über seine Stufe freigegeben: den Stand
+        // zur Ausführungszeit festhalten, sonst lehnen zeitplan_loeschen und wache_loeschen jeden Schritt ab.
+        const eingabe = t.festhalten ? t.festhalten({ ...(s.input ?? {}) }) : (s.input ?? {});
+        const out = await t.run(eingabe, ctx);
         zeilen.push(`✓ ${s.tool}: ${(typeof out === "string" ? out : out.text).split("\n")[0].slice(0, 120)}`);
       } else if (s.modus) {
         state.mode = s.modus;

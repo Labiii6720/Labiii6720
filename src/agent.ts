@@ -218,7 +218,9 @@ async function execute(use: Anthropic.ToolUseBlock, hooks: AgentHooks): Promise<
   const brief = JSON.stringify(input).slice(0, 300);
   if (stufe !== "auto") {
     const summary = tool.summary ? tool.summary(input) : `${tool.name} ${brief}`;
-    const auftrag = createAuftrag({ tool: tool.name, input, stufe, summary });
+    // Kopie: das Original steht in der Chat-Historie und geht so an die API zurück
+    const gespeichert = tool.festhalten ? tool.festhalten({ ...input }) : input;
+    const auftrag = createAuftrag({ tool: tool.name, input: gespeichert, stufe, summary });
     audit("auftrag_angelegt", { id: auftrag.id, tool: tool.name, stufe, input: brief });
     await hooks.onAuftrag(auftrag).catch((e) => console.error("Freigabe-Nachricht fehlgeschlagen:", e));
     return { content: `Auftrag #${auftrag.id} angelegt (Stufe ${stufe}). Wartet auf Freigabe des Nutzers, ist noch NICHT ausgeführt.` };
