@@ -811,10 +811,11 @@ describe("POST /api/notfall", () => {
 });
 
 describe("GET /api/audit", () => {
-  it("liefert lines und geparste Einträge; kaputte Zeilen übersprungen, Info geschwärzt und gekürzt", async () => {
+  it("liefert nur geparste Einträge (keine Rohzeilen); kaputte Zeilen übersprungen, Info geschwärzt und gekürzt", async () => {
     const r = await rufe(dashboard.auditTail);
     assert.equal(r.statusCode, 200);
-    assert.ok(Array.isArray(r.body.lines));
+    assert.equal(r.body.lines, undefined, "keine ungeschwärzten Rohzeilen an den Browser");
+    assert.ok(!JSON.stringify(r.body).includes("geheim123"));
     const e = r.body.eintraege as { zeit: string; ereignis: string; info: string }[];
     assert.ok(e.length >= 3);
     assert.ok(e.every((x) => typeof x.zeit === "string" && typeof x.ereignis === "string" && typeof x.info === "string"));

@@ -178,7 +178,7 @@ describe("Dashboard im Notfall", () => {
     const res = antwort();
     auditTail(req(), res as unknown as Res);
     assert.equal(res.statusCode, 423);
-    assert.deepEqual((res.body as { lines?: unknown }).lines, []);
+    assert.deepEqual((res.body as { eintraege?: unknown }).eintraege, []);
     assert.ok(!JSON.stringify(res.body).includes("geheimer_eintrag"));
   });
 

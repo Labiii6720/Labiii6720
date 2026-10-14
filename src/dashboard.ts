@@ -194,14 +194,15 @@ export function auditEintrag(zeile: string): AuditEintrag | undefined {
   return { zeit: ts, ereignis: event, info: schwaerze(info).slice(0, 160) };
 }
 
+/** Nur die geschwärzten Einträge, keine Rohzeilen: die Oberfläche braucht sie nicht, und ungeschwärzt gehört nichts in den Browser. */
 export function auditTail(_req: Request, res: Response): void {
-  if (notfallAktiv()) return void res.status(423).json({ ...NOTFALL_GESPERRT, lines: [], eintraege: [] });
+  if (notfallAktiv()) return void res.status(423).json({ ...NOTFALL_GESPERRT, eintraege: [] });
   try {
-    const lines = readFileSync("data/audit.log", "utf8").trim().split("\n").filter(Boolean).slice(-60).reverse();
-    const eintraege = lines.map(auditEintrag).filter((e): e is AuditEintrag => e !== undefined);
-    res.json({ ok: true, lines, eintraege });
+    const zeilen = readFileSync("data/audit.log", "utf8").trim().split("\n").filter(Boolean).slice(-60).reverse();
+    const eintraege = zeilen.map(auditEintrag).filter((e): e is AuditEintrag => e !== undefined);
+    res.json({ ok: true, eintraege });
   } catch {
-    res.json({ ok: true, lines: [], eintraege: [] });
+    res.json({ ok: true, eintraege: [] });
   }
 }
 
