@@ -9,6 +9,8 @@ Kurz und nur das Wichtigste. Details stehen im README.
 - Weiter nach dem Notaus im Dashboard nur mit PIN; nach drei Fehlversuchen zehn Minuten keine PIN (auch für sensible Freigaben). Keine Entwarnung im Dashboard, nur per `/entwarnung` in Telegram.
 - Zeitplan- und Wachen-Nummern aus einem gemeinsamen Zähler (Dashboard und Werkzeuge), gelöschte nie neu; `zeitplan_loeschen` und `wache_loeschen` löschen nach der Freigabe nur, was die Freigabe nannte. Ältere Tage-Schreibweisen («Mo, Mi») gelten beim Ändern nicht mehr als neuer Termin.
 - Kommandozentrale: eigener Token-Schlüssel, kollidiert nicht mehr mit der Gesten-Konsole; einmal neu anmelden. Finanzen zählen Rechnungen pro Monat zusätzlich je Währung (`anzahlJe`).
+- Protokoll-Knöpfe sind im Notaus gesperrt (mit Grund); eine Ablehnung meldet Notaus und `/weiter`, nicht Notfall. Von Hand bearbeitete Zeitpläne ohne `zeit` oder `tage` werfen im Scheduler nicht mehr, sie laufen nie.
+- «Verbindung gestört» und «wieder da» werden angesagt, auch bei offenem Dialog. Wachen aus `cameras.json` bleiben nur lesend, auch mit kopiertem `id`.
 - Schicht 2 ist abgeschlossen.
 
 ## 0.21.2

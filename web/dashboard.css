@@ -560,8 +560,15 @@ body.abgemeldet .seg-oben, body.abgemeldet .uhr, body.abgemeldet #notausKnopf, b
   /* Notfall-Band bricht auf dem Handy auf bis zu drei Zeilen um */
   :root:has(#bandNotfall:not([hidden])) { --kopf-h: 176px; }
   .top-in { height: 60px; gap: 8px; }
-  /* Handy: «Verbindung gestört» nur als Netz-Symbol; das Wort bleibt für Screenreader (font-size 0, nicht versteckt) */
-  .stoerung { font-size: 0; gap: 0; flex: none; }
+  /* Handy: kurz «gestört» neben dem Netz-Symbol (DESIGN §2/§9: warn nie ohne Wort in Textfarbe, kein Text unter 11 px).
+     Der volle Text bleibt im Markup für Screenreader (font-size 0, nicht versteckt); das sichtbare Kurzwort kommt
+     als ::after mit leerem Alternativtext («/ ""»), damit es nicht doppelt vorgelesen wird. */
+  .stoerung { font-size: 0; gap: 4px; flex: none; }
+  .stoerung::after { content: "gestört"; content: "gestört" / ""; font-size: var(--fs-xs); line-height: 1; color: var(--t2); white-space: nowrap; }
+  /* Bei Störung etwas engere Leiste, damit «gestört» neben dem ungekürzten Zustandswort Platz hat */
+  .top-in:has(#stoerung:not([hidden])) { gap: 6px; }
+  .top-in:has(#stoerung:not([hidden])) .brand { margin-right: 0; }
+  .top-in:has(#stoerung:not([hidden])) .plakette { gap: 6px; }
   .brand { letter-spacing: .26em; }
   .uhr, #abmelden { display: none; }
   .eyebrow .nur-handy { display: inline; }
@@ -630,4 +637,6 @@ body.abgemeldet .seg-oben, body.abgemeldet .uhr, body.abgemeldet #notausKnopf, b
 @media (max-width: 380px) {
   .brand .wort { display: none; }
   .plakette { padding: 0 10px 0 8px; }
+  /* Bei Störung weicht auf schmalen Handys auch das Markensymbol: Zustand, «gestört», Thema und Notaus gehen vor */
+  .top-in:has(#stoerung:not([hidden])) .brand { display: none; }
 }

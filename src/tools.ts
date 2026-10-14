@@ -459,6 +459,10 @@ function aendernUndSpeichern<T>(liste: T[], aendern: () => void, speichern: () =
 }
 
 const gleicheTage = (a: string, b: string): boolean => (normaleTage(a) ?? a) === (normaleTage(b) ?? b);
+/** Feld eines Zeitplans oder einer Wache als Text; fehlt es (von Hand bearbeitete Datei), Leertext statt undefined. */
+const feld = (wert: unknown): string => String(wert ?? "");
+/** Für Freigabe-Texte und Listen: ein fehlendes Feld benennen statt «undefined» oder Leertext zeigen. */
+const feldOder = (wert: unknown, ersatz: string): string => feld(wert) || ersatz;
 
 const plaene: Tool[] = [
   {
@@ -492,7 +496,7 @@ const plaene: Tool[] = [
     input_schema: { type: "object", properties: {} },
     stufe: "auto",
     // Unlesbare Datei: leere Liste hiesse sonst fälschlich «keine Zeitpläne»
-    run: async () => (zeitplaeneNichtGeladen ? ZEITPLAENE_UNLESBAR : zeitplaene.map((z) => `#${z.id} ${z.name} · ${z.tage} ${z.zeit} · ${z.auftrag}`).join("\n") || "Keine Zeitpläne."),
+    run: async () => (zeitplaeneNichtGeladen ? ZEITPLAENE_UNLESBAR : zeitplaene.map((z) => `#${z.id} ${feldOder(z.name, "ohne Namen")} · ${feldOder(z.tage, "ohne Tage")} ${feldOder(z.zeit, "ohne Uhrzeit")} · ${feldOder(z.auftrag, "ohne Auftrag")}`).join("\n") || "Keine Zeitpläne."),
   },
   {
     name: "zeitplan_loeschen",
@@ -501,25 +505,31 @@ const plaene: Tool[] = [
     stufe: "extern", // eine eingeschleuste Anweisung darf keinen Zeitplan still entfernen
     summary: (i) => {
       const z = zeitplaene.find((x) => x.id === Number(i.id));
-      return z ? `Zeitplan #${z.id} «${z.name}» löschen (${z.tage} um ${z.zeit})` : `Zeitplan #${i.id} löschen (nicht gefunden)`;
+      return z ? `Zeitplan #${z.id} «${feldOder(z.name, "ohne Namen")}» löschen (${feldOder(z.tage, "ohne Tage")} um ${feldOder(z.zeit, "ohne Uhrzeit")})` : `Zeitplan #${i.id} löschen (nicht gefunden)`;
     },
     festhalten: (i) => {
       const z = zeitplaene.find((x) => x.id === Number(i.id));
-      return { id: i.id, erwartet_name: z?.name ?? null, erwartet_zeit: z?.zeit ?? null, erwartet_tage: z?.tage ?? null, erwartet_auftrag: z?.auftrag ?? null };
+      // null nur, wenn es den Zeitplan nicht gibt. Von Hand bearbeitete Einträge ohne zeit oder tage (laufen nie) halten
+      // Leertext fest, sonst liesse sich ein solcher Eintrag per Chat nie löschen («ältere Version» bei jedem Antrag)
+      if (!z) return { id: i.id, erwartet_name: null, erwartet_zeit: null, erwartet_tage: null, erwartet_auftrag: null };
+      return { id: i.id, erwartet_name: feld(z.name), erwartet_zeit: feld(z.zeit), erwartet_tage: feld(z.tage), erwartet_auftrag: feld(z.auftrag) };
     },
     run: async (i) => {
       pruefeZeitplaeneSchreibbar();
       const idx = zeitplaene.findIndex((z) => z.id === Number(i.id));
       if (idx < 0) throw new Error("Zeitplan nicht gefunden.");
-      // Freigegeben wurde, was die Zusammenfassung nannte: ohne festgehaltenen oder bei geändertem Namen nichts löschen
+      // Freigegeben wurde, was die Zusammenfassung nannte: ohne festgehaltenen oder bei geändertem Namen nichts löschen.
+      // Aufträge vor 0.22 (nur {id}, ohne festhalten) noch offen in data/auftraege.json: neu beantragen lassen
+      if (!Object.hasOwn(i, "erwartet_name")) throw new Error(`Die Freigabe für Zeitplan #${i.id} stammt aus einer älteren Version, Sir. Ich lösche nichts – bitte neu beantragen.`);
+      // null: beim Anlegen des Auftrags gab es diesen Zeitplan nicht
       if (typeof i.erwartet_name !== "string") throw new Error(`Die Freigabe nennt keinen Zeitplan #${i.id}, Sir. Ich lösche nichts.`);
       if (typeof i.erwartet_zeit !== "string" || typeof i.erwartet_tage !== "string" || typeof i.erwartet_auftrag !== "string") {
         throw new Error(`Die Freigabe für Zeitplan #${i.id} stammt aus einer älteren Version und nennt Zeit und Tage nicht, Sir. Ich lösche nichts – bitte neu beantragen.`);
       }
       const z = zeitplaene[idx]!;
-      if (z.name !== i.erwartet_name) throw new Error(`Zeitplan #${i.id} heisst inzwischen anders, Sir. Ich lösche nichts.`);
+      if (feld(z.name) !== i.erwartet_name) throw new Error(`Zeitplan #${i.id} heisst inzwischen anders, Sir. Ich lösche nichts.`);
       // Auch Uhrzeit, Tage und Auftrag: die Kommandozentrale kann sie ändern und den Namen behalten
-      if (z.zeit !== i.erwartet_zeit || !gleicheTage(z.tage, i.erwartet_tage) || z.auftrag !== i.erwartet_auftrag) {
+      if (feld(z.zeit) !== i.erwartet_zeit || !gleicheTage(feld(z.tage), i.erwartet_tage) || feld(z.auftrag) !== i.erwartet_auftrag) {
         throw new Error(`Zeitplan #${i.id} wurde inzwischen geändert, Sir. Ich lösche nichts.`);
       }
       aendernUndSpeichern(zeitplaene, () => zeitplaene.splice(idx, 1), () => saveZeitplaene());
@@ -604,7 +614,7 @@ const kameras: Tool[] = [
     input_schema: { type: "object", properties: {} },
     stufe: "auto",
     run: async () => {
-      const liste = allWachen().map((w) => `${w.id ? "#" + w.id : "(cameras.json)"} ${w.kamera} · alle ${w.alle_minuten} min · ${w.frage} · ${w.nur_wenn ?? "immer"}`).join("\n");
+      const liste = allWachen().map((w) => `${w.id ? "#" + w.id : "(cameras.json)"} ${feldOder(w.kamera, "ohne Kamera")} · alle ${feldOder(w.alle_minuten, "?")} min · ${feldOder(w.frage, "ohne Frage")} · ${w.nur_wenn ?? "immer"}`).join("\n");
       // Unlesbare Datei: eine kurze Liste hiesse sonst fälschlich «das sind alle Wachen»
       return wachenNichtGeladen ? `${WACHEN_UNLESBAR}\n${liste}`.trimEnd() : liste || "Keine Wachen.";
     },
@@ -616,19 +626,25 @@ const kameras: Tool[] = [
     stufe: "extern", // eine Wache abzuschalten ist sicherheitsrelevant, genau wie sie anzulegen
     summary: (i) => {
       const w = dynamicWachen.find((x) => x.id === Number(i.id));
-      return w ? `Wache #${w.id} löschen: ${w.kamera} – ${String(w.frage).slice(0, 200)}` : `Wache #${i.id} löschen (nicht gefunden)`;
+      return w ? `Wache #${w.id} löschen: ${feldOder(w.kamera, "ohne Kamera")} – ${feld(w.frage).slice(0, 200) || "ohne Frage"}` : `Wache #${i.id} löschen (nicht gefunden)`;
     },
     festhalten: (i) => {
       const w = dynamicWachen.find((x) => x.id === Number(i.id));
-      return { id: i.id, erwartet_kamera: w?.kamera ?? null, erwartet_frage: w?.frage ?? null };
+      // null nur, wenn es die Wache nicht gibt. Von Hand bearbeitete Einträge ohne kamera oder frage halten Leertext fest,
+      // sonst liesse sich eine solche Wache per Chat nie löschen («nennt keine Wache» bei jedem Antrag)
+      if (!w) return { id: i.id, erwartet_kamera: null, erwartet_frage: null };
+      return { id: i.id, erwartet_kamera: feld(w.kamera), erwartet_frage: feld(w.frage) };
     },
     run: async (i) => {
       pruefeWachenSchreibbar();
       const idx = dynamicWachen.findIndex((w) => w.id === Number(i.id));
       if (idx < 0) throw new Error("Wache nicht gefunden (Wachen aus cameras.json löschst du in der Datei).");
       const w = dynamicWachen[idx]!;
+      // Aufträge vor 0.22 (nur {id}, ohne festhalten) noch offen in data/auftraege.json: neu beantragen lassen
+      if (!Object.hasOwn(i, "erwartet_kamera")) throw new Error(`Die Freigabe für Wache #${i.id} stammt aus einer älteren Version, Sir. Ich lösche nichts – bitte neu beantragen.`);
+      // null: beim Anlegen des Auftrags gab es diese Wache nicht
       if (typeof i.erwartet_kamera !== "string" || typeof i.erwartet_frage !== "string") throw new Error(`Die Freigabe nennt keine Wache #${i.id}, Sir. Ich lösche nichts.`);
-      if (w.kamera !== i.erwartet_kamera || w.frage !== i.erwartet_frage) throw new Error(`Wache #${i.id} prüft inzwischen etwas anderes, Sir. Ich lösche nichts.`);
+      if (feld(w.kamera) !== i.erwartet_kamera || feld(w.frage) !== i.erwartet_frage) throw new Error(`Wache #${i.id} prüft inzwischen etwas anderes, Sir. Ich lösche nichts.`);
       aendernUndSpeichern(dynamicWachen, () => dynamicWachen.splice(idx, 1), () => saveWachen());
       return "Gelöscht.";
     },

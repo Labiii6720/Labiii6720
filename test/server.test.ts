@@ -155,6 +155,12 @@ describe("server.ts: Start und Netzsperren", () => {
     assert.equal((await anfrage(port, "POST", "/events", { "cf-ray": "8a1b2c3d4e5f-ZRH" })).status, 401);
     assert.equal((await anfrage(port, "OPTIONS", "/events", { "cf-ray": "8a1b2c3d4e5f-ZRH" })).status, 204);
     assert.equal((await anfrage(port, "GET", "/gesture", { "cf-connecting-ip": "203.0.113.7" })).status, 200);
+    // lanOnly vor dem Router (app.use) prüft den vollen Pfad: die Konsole bleibt mit on über den Tunnel offen
+    assert.equal((await anfrage(port, "GET", "/gesture", { "cf-ray": "8a1b2c3d4e5f-ZRH" })).status, 200);
+    assert.equal((await anfrage(port, "OPTIONS", "/gesture", { "cf-ray": "8a1b2c3d4e5f-ZRH" })).status, 200);
+    // … aber nur sie: Unterpfade und die Kommandozentrale nicht
+    assert.equal((await anfrage(port, "GET", "/gesture/x", { "cf-ray": "8a1b2c3d4e5f-ZRH" })).status, 404);
+    assert.equal((await anfrage(port, "OPTIONS", "/api/zeitplaene", { "cf-ray": "8a1b2c3d4e5f-ZRH" })).status, 404);
   });
 
   it("ungültiges JSON an /notfall über den Tunnel: 401 ohne Stacktrace, Parser läuft nicht vor dem Token", async () => {

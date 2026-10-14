@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSy
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
-import { chromium, type Browser, type BrowserContext, type Page } from "playwright-core";
+import { chromium, type Browser, type BrowserContext, type Page, type Route } from "playwright-core";
 import { DEMO_IBAN, DEMO_INPUT_MARKE, DEMO_PIN, DEMO_XSS, legeDemoAn, starteDemoDienst, starteFrigateAttrappe, type DemoDienst } from "./hilfen/dashboard-demo.js";
 
 // Kommandozentrale im echten Browser: Dienst mit Demo-Daten im Temp-Ordner (kein Netz nach aussen), Chromium headless.
@@ -40,6 +40,33 @@ describe("Kommandozentrale im Browser", { skip: chrome ? false : "kein Chromium 
   }
   /** Sofort neu abfragen lassen (statt 5 s zu warten): wie beim Zurückkehren in den Tab */
   const sofort = (p: Page) => p.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+  /** Vertrauliches in Ansage und Toast bringen: Chat-Antwort (#ansage) und Protokoll-Rückmeldung (#toast), beide per route() */
+  const GEHEIM_CHAT = "GEHEIME-ANTWORT Kontostand 12'345";
+  const GEHEIM_TOAST = "GEHEIMER-TOAST Tresorcode 9876";
+  async function geheimesZeigen() {
+    await page.route("**/api/chat", (r) => r.fulfill({ json: { ok: true, reply: GEHEIM_CHAT } }));
+    await page.route("**/api/protokoll", (r) => r.fulfill({ json: { ok: true, text: GEHEIM_TOAST } }));
+    try {
+      await page.evaluate(() => { location.hash = "uebersicht"; });
+      await page.click('#v-uebersicht button[data-aktion="protokoll"][data-name="werkstatt"]');
+      await page.waitForFunction((g) => document.getElementById("toast")?.textContent?.includes(g) ?? false, GEHEIM_TOAST);
+      await page.evaluate(() => { location.hash = "gespraech"; });
+      await page.waitForSelector("#chatIn");
+      await page.fill("#chatIn", "Wie steht das Konto?");
+      await page.keyboard.press("Enter");
+      await page.waitForFunction((g) => document.getElementById("ansage")?.textContent?.includes(g) ?? false, GEHEIM_CHAT);
+    } finally {
+      await page.unroute("**/api/chat");
+      await page.unroute("**/api/protokoll");
+    }
+    const html = await page.content();
+    assert.ok(html.includes(GEHEIM_CHAT) && html.includes(GEHEIM_TOAST), "Vorbedingung: beides steht im DOM");
+  }
+  const ohneGeheimes = async (wann: string) => {
+    const html = await page.content();
+    assert.ok(!html.includes(GEHEIM_CHAT), `${wann}: Chat-Antwort nicht mehr im DOM`);
+    assert.ok(!html.includes(GEHEIM_TOAST), `${wann}: Toast-Text nicht mehr im DOM`);
+  };
 
   before(async () => {
     temp = mkdtempSync(join(tmpdir(), "jarvis-ui-"));
@@ -55,6 +82,13 @@ describe("Kommandozentrale im Browser", { skip: chrome ? false : "kein Chromium 
     });
     page = await ctx.newPage();
     page.setDefaultTimeout(4000);
+    // page.unroute() wartet nicht auf laufende Handler: ein Handler, der gerade route.fetch() abwartet, findet die Anfrage
+    // danach schon weitergeleitet und sein fulfill wirft «Route is already handled!» – nach dem Test, als unhandledRejection.
+    // Nur diesen Fall schlucken; jeder andere Fehler im Handler bleibt sichtbar.
+    const route = page.route.bind(page) as unknown as (url: string, h: (r: Route) => unknown) => Promise<unknown>;
+    (page as unknown as { route: typeof route }).route = (url, h) => route(url, async (r) => {
+      try { await h(r); } catch (e) { if (!/Route is already handled/.test(String(e))) throw e; }
+    });
     page.on("console", (m) => { if (m.type() === "error" || m.type() === "warning") probleme.push(`console ${m.type()}: ${m.text()}`); });
     page.on("pageerror", (e) => probleme.push(`pageerror: ${e.message}`));
     await anmelden(page);
@@ -157,6 +191,56 @@ describe("Kommandozentrale im Browser", { skip: chrome ? false : "kein Chromium 
     await page.keyboard.type(DEMO_PIN);
     await page.keyboard.press("Enter");
     await page.waitForFunction(() => document.getElementById("zustandText")?.textContent === "Bereit", null, { timeout: 3000 });
+    // Die Rückmeldung kommt nach dem Schliessen des Dialogs in #ansage (die Ansage im Dialog wird beim Schliessen geleert)
+    await page.waitForSelector("#dlgPin", { state: "hidden" });
+    await page.waitForFunction(() => /Weiter, Sir\./.test(document.getElementById("ansage")?.textContent ?? ""), null, { timeout: 2000 });
+    await page.waitForTimeout(100);
+    assert.match((await page.textContent("#ansage")) ?? "", /Weiter, Sir\./, "bleibt nach dem close-Ereignis stehen");
+  });
+
+  it("Protokolle im Notaus: Knöpfe gesperrt mit Grund; veraltete Ansicht meldet Notaus und /weiter, nie Notfall", async () => {
+    await page.evaluate(() => { location.hash = "uebersicht"; });
+    const knopf = '#v-uebersicht button[data-aktion="protokoll"][data-name="werkstatt"]';
+    await page.waitForSelector(knopf);
+    assert.equal((await holeApi("/api/notaus", { method: "POST", body: { an: true } })).status, 200);
+    try {
+      await sofort(page);
+      await page.waitForFunction(() => document.getElementById("zustandText")?.textContent === "Pausiert", null, { timeout: 3000 });
+      await page.waitForSelector(`${knopf}[aria-disabled="true"]`, { timeout: 3000 });
+      assert.match((await page.getAttribute(knopf, "aria-description")) ?? "", /Im Notaus laufen keine Protokolle/);
+      assert.match((await page.textContent("#v-uebersicht")) ?? "", /Im Notaus laufen keine Protokolle, Sir\./);
+      // Ein Klick auf den gesperrten Knopf schickt nichts
+      let posts = 0;
+      await page.route("**/api/protokoll", (r) => { posts++; return r.continue(); });
+      await page.click(knopf, { force: true });
+      await page.waitForTimeout(150);
+      assert.equal(posts, 0, "gesperrter Knopf sendet nichts");
+      await page.unroute("**/api/protokoll");
+
+      // Veraltete Ansicht (Notaus kam eben über Telegram): Knopf noch frei, der Server antwortet 423 ohne Notfall
+      await page.route("**/status.json", async (route) => {
+        const echt = await route.fetch();
+        const d = await echt.json();
+        await route.fulfill({ response: echt, json: { ...d, pausiert: false, notfall: false } });
+      });
+      await sofort(page);
+      await page.waitForFunction((k) => { const b = document.querySelector(k); return Boolean(b) && b!.getAttribute("aria-disabled") !== "true"; }, knopf, { timeout: 3000 });
+      const antwort = page.waitForResponse("**/api/protokoll");
+      await page.click(knopf);
+      assert.equal((await antwort).status(), 423);
+      await page.waitForFunction(() => document.getElementById("toast")?.textContent?.includes("pausiert (Notaus)") ?? false, null, { timeout: 3000 });
+      const toast = (await page.textContent("#toast")) ?? "";
+      assert.match(toast, /\/weiter/);
+      assert.doesNotMatch(toast, /Im Notfall gesperrt|\/entwarnung/);
+      await page.unroute("**/status.json");
+    } finally {
+      await page.unroute("**/status.json").catch(() => undefined);
+      await page.unroute("**/api/protokoll").catch(() => undefined);
+      assert.equal((await holeApi("/api/notaus", { method: "POST", body: { an: false, pin: DEMO_PIN } })).status, 200);
+    }
+    await sofort(page);
+    await page.waitForFunction(() => document.getElementById("zustandText")?.textContent === "Bereit", null, { timeout: 3000 });
+    assert.equal(await page.getAttribute(knopf, "aria-disabled"), null, "nach Weiter wieder frei");
   });
 
   it("Notfall: echte Zahl offener Aufträge, keine Inhalte; nach der Entwarnung wird alles neu aufgebaut", async () => {
@@ -185,6 +269,43 @@ describe("Kommandozentrale im Browser", { skip: chrome ? false : "kein Chromium 
     assert.equal(await page.isVisible("#bandNotfall"), false);
     assert.equal(await page.isDisabled("#notausKnopf"), false);
     await page.waitForSelector("#v-uebersicht .kpis .funke", { timeout: 3000 });
+  });
+
+  it("Notfall während eines laufenden Protokolls: der Protokolltext erscheint weder im Toast noch in der Ansage", async () => {
+    const GEHEIM = "GEHEIMES-PROTOKOLL Alarmcode 4711";
+    await page.evaluate(() => { location.hash = "uebersicht"; });
+    const knopf = '#v-uebersicht button[data-aktion="protokoll"][data-name="werkstatt"]';
+    await page.waitForSelector(knopf);
+    let loslassen: () => void = () => undefined;
+    const freigegeben = new Promise<void>((r) => { loslassen = r; });
+    let angekommen: () => void = () => undefined;
+    const unterwegs = new Promise<void>((r) => { angekommen = r; });
+    // Antwort zurückhalten, bis die Kommandozentrale den Notfall sieht
+    await page.route("**/api/protokoll", async (r) => { angekommen(); await freigegeben; await r.fulfill({ json: { ok: true, text: GEHEIM } }); });
+    try {
+      const antwort = page.waitForResponse("**/api/protokoll");
+      await page.click(knopf);
+      await unterwegs;
+      await page.route("**/status.json", async (route) => {
+        const echt = await route.fetch();
+        const d = await echt.json();
+        await route.fulfill({ response: echt, json: { ...d, notfall: true, pausiert: true, offeneAuftraege: 0, auftraege: [], protokolle: [] } });
+      });
+      await sofort(page);
+      await page.waitForFunction(() => document.getElementById("zustandText")?.textContent === "Notfall", null, { timeout: 3000 });
+      loslassen();
+      await antwort;
+      await page.waitForTimeout(300);
+      assert.ok(!((await page.textContent("#toast")) ?? "").includes(GEHEIM), "Protokolltext nicht im Toast");
+      assert.ok(!((await page.textContent("#ansage")) ?? "").includes(GEHEIM), "Protokolltext nicht in der Ansage");
+      assert.ok(!(await page.content()).includes(GEHEIM), "Protokolltext nirgends im DOM");
+    } finally {
+      loslassen();
+      await page.unroute("**/api/protokoll").catch(() => undefined);
+      await page.unroute("**/status.json").catch(() => undefined);
+    }
+    await sofort(page);
+    await page.waitForFunction(() => document.getElementById("zustandText")?.textContent === "Bereit", null, { timeout: 3000 });
   });
 
   it("Kosten: Säulen per Tastatur mit Tooltip, Zeitraum 7 Tage, Tabellenansicht", async () => {
@@ -432,10 +553,12 @@ describe("Kommandozentrale im Browser", { skip: chrome ? false : "kein Chromium 
   });
 
   it("401 führt einmal zur Anmeldung, ohne Schleife; Abmelden löscht den Token", async () => {
+    await geheimesZeigen();
     let abrufe = 0;
     await page.route("**/status.json", async (route) => { abrufe++; await route.fulfill({ status: 401, json: { ok: false, error: "unauthorized" } }); });
     await sofort(page);
     await page.waitForSelector("#dlgAnmelden[open]");
+    await ohneGeheimes("nach 401");
     const bisher = abrufe;
     await sofort(page);
     await page.waitForTimeout(300);
@@ -449,9 +572,11 @@ describe("Kommandozentrale im Browser", { skip: chrome ? false : "kein Chromium 
     await page.keyboard.press("Enter");
     await page.waitForSelector("#dlgAnmelden", { state: "hidden" });
     assert.equal(await page.evaluate(() => localStorage.getItem("jarvis.kommandozentrale.token")), dienst!.token);
+    await geheimesZeigen();
     await page.evaluate(() => { location.hash = "sicherheit"; });
     await page.click('#v-sicherheit button[data-aktion="abmelden"]');
     await page.waitForSelector("#dlgAnmelden[open]");
+    await ohneGeheimes("nach dem Abmelden");
     assert.deepEqual(await page.evaluate(() => [sessionStorage.getItem("jarvis.kommandozentrale.token"), localStorage.getItem("jarvis.kommandozentrale.token")]), [null, null]);
     assert.equal(await page.evaluate(() => localStorage.getItem("jarvis.token")), "wert-der-gesten-konsole", "Konsole behält ihren Wert");
     assert.equal(await page.locator("#v-uebersicht .auftrag").count(), 0, "Inhalte sind weg");
@@ -765,6 +890,48 @@ describe("Kommandozentrale im Browser", { skip: chrome ? false : "kein Chromium 
     assert.equal(await page.isVisible("#stoerung"), false);
   });
 
+  it("Verbindungsstörung wird angesagt: ohne Dialog in #ansage, bei offenem Dialog in dessen Ansage", async () => {
+    const dlgAnsage = () => page.evaluate(() => document.querySelector("#dlgPlan .dlg-ansage")?.textContent ?? "");
+    const ansage = () => page.evaluate(() => document.getElementById("ansage")?.textContent ?? "");
+    // Ohne Dialog: #ansage
+    await page.evaluate(() => { location.hash = "zeitplaene"; });
+    await page.waitForSelector('#v-zeitplaene button[data-aktion="plan-neu"]:not([disabled])');
+    await page.route("**/status.json*", (r) => r.abort("connectionfailed"));
+    try {
+      await sofort(page);
+      await page.waitForSelector("#stoerung:not([hidden])", { timeout: 3000 });
+      await page.waitForFunction(() => /Verbindung gestört/.test(document.getElementById("ansage")?.textContent ?? ""), null, { timeout: 2000 });
+    } finally {
+      await page.unroute("**/status.json*");
+    }
+    await sofort(page);
+    await page.waitForSelector("#stoerung", { state: "hidden", timeout: 3000 });
+    assert.match(await ansage(), /Verbindung wieder da/);
+
+    // Mit offenem Dialog: der Kopf ist inert, also in die Ansage des Dialogs – #ansage bleibt leer
+    await page.click('#v-zeitplaene button[data-aktion="plan-neu"]');
+    await page.waitForSelector("#dlgPlan[open]");
+    await page.evaluate(() => { document.getElementById("ansage")!.textContent = ""; });
+    try {
+      await page.route("**/status.json*", (r) => r.abort("connectionfailed"));
+      try {
+        await sofort(page);
+        await page.waitForSelector("#stoerung:not([hidden])", { state: "attached", timeout: 3000 });
+        assert.match(await dlgAnsage(), /Verbindung gestört/);
+        assert.equal(await ansage(), "", "nicht zusätzlich in #ansage");
+      } finally {
+        await page.unroute("**/status.json*");
+      }
+      await sofort(page);
+      await page.waitForSelector("#stoerung", { state: "hidden", timeout: 3000 });
+      assert.match(await dlgAnsage(), /Verbindung wieder da/);
+      assert.equal(await ansage(), "", "nicht zusätzlich in #ansage");
+    } finally {
+      await page.click("#dlgPlan [data-schliessen]");
+      await page.waitForSelector("#dlgPlan", { state: "hidden" });
+    }
+  });
+
   it("Notfall und 401 schliessen offene Dialoge und leeren ihre Felder", async () => {
     const offeneDialoge = () => page.evaluate(() => [...document.querySelectorAll("dialog[open]")].map((d) => d.id));
     const felder = () => page.evaluate(() => ({
@@ -783,7 +950,8 @@ describe("Kommandozentrale im Browser", { skip: chrome ? false : "kein Chromium 
       assert.notEqual(await page.inputValue("#pAuftrag"), "", "Auftragstext steht im Formular");
     };
 
-    // Notfall bei offenem Zeitplan-Formular
+    // Notfall bei offenem Zeitplan-Formular (vorher Vertrauliches in Ansage, Toast und Gesprächsverlauf)
+    await geheimesZeigen();
     await planOeffnen();
     await page.route("**/status.json", async (route) => {
       const echt = await route.fetch();
@@ -795,6 +963,7 @@ describe("Kommandozentrale im Browser", { skip: chrome ? false : "kein Chromium 
       await page.waitForFunction(() => document.getElementById("zustandText")?.textContent === "Notfall", null, { timeout: 3000 });
       await page.waitForFunction(() => !document.querySelector("dialog[open]"), null, { timeout: 2000 });
       assert.deepEqual(await felder(), leer);
+      await ohneGeheimes("im Notfall");
     } finally {
       await page.unroute("**/status.json");
     }
@@ -841,6 +1010,448 @@ describe("Kommandozentrale im Browser", { skip: chrome ? false : "kein Chromium 
       await p.waitForSelector("#dlgAnmelden", { state: "hidden" });
     } finally {
       await c2.close();
+    }
+  });
+
+  it("Umstellung auf Sommerzeit: «morgen» und «gestern» nach Kalendertag, nicht ±24 h", async () => {
+    // Serverzeit über /status.json injiziert (die Seite rechnet mit dem Versatz zur Serverzeit)
+    let zeitStatus = "2027-03-27T22:30:00.000Z"; // Sa 27.03.2027, 23:30 MEZ; der Sonntag hat nur 23 Stunden
+    await page.route("**/status.json", async (route) => {
+      const echt = await route.fetch();
+      const d = (await echt.json()) as Record<string, unknown>;
+      await route.fulfill({ response: echt, json: { ...d, zeit: zeitStatus } }).catch(() => undefined);
+    });
+    await page.route("**/api/zeitplaene", async (r) => {
+      if (r.request().method() !== "GET") return r.fallback();
+      const echt = await r.fetch();
+      const d = (await echt.json()) as Record<string, unknown>;
+      const plan = (id: number, name: string, tage: string, naechsterLauf: string, lastRun: string) => ({ id, name, zeit: "07:00", tage, auftrag: "Probe.", naechsterLauf, lastRun });
+      await r.fulfill({ response: echt, json: { ...d, zeitplaene: [
+        plan(91, "Sonntagslauf", "so", "2027-03-28T05:00:00.000Z", "2027-03-27"), // So 07:00 MESZ
+        plan(92, "Montagslauf", "mo", "2027-03-29T05:00:00.000Z", "2027-03-26"), // Mo 07:00 MESZ
+      ] } }).catch(() => undefined);
+    });
+    const lauf = (name: string) => page.evaluate((n) => [...document.querySelectorAll("#v-zeitplaene .plan")].find((e) => e.textContent?.includes(n))?.querySelector(".lauf")?.textContent ?? "", name);
+    try {
+      await page.evaluate(() => { location.hash = "zeitplaene"; });
+      await sofort(page);
+      await page.waitForFunction(() => /Sonntagslauf/.test(document.getElementById("v-zeitplaene")?.textContent ?? ""), null, { timeout: 4000 });
+      await page.waitForFunction(() => /nächster morgen 07:00/.test([...document.querySelectorAll("#v-zeitplaene .plan")].find((e) => e.textContent?.includes("Sonntagslauf"))?.textContent ?? ""), null, { timeout: 3000 });
+      assert.equal(await lauf("Sonntagslauf"), "nächster morgen 07:00zuletzt heute");
+      assert.equal(await lauf("Montagslauf"), "nächster Mo 29.03. 07:00zuletzt gestern");
+      // Mo 29.03.2027, 00:30 MESZ: der Samstag ist vorgestern, nicht gestern
+      zeitStatus = "2027-03-28T22:30:00.000Z";
+      await sofort(page);
+      await page.waitForFunction(() => /zuletzt 27\.03\./.test([...document.querySelectorAll("#v-zeitplaene .plan")].find((e) => e.textContent?.includes("Sonntagslauf"))?.textContent ?? ""), null, { timeout: 3000 });
+      assert.equal(await lauf("Montagslauf"), "nächster heute 07:00zuletzt 26.03.");
+    } finally {
+      await page.unroute("**/api/zeitplaene");
+      await page.unroute("**/status.json");
+    }
+    await sofort(page);
+    await page.waitForFunction(() => !/Sonntagslauf/.test(document.getElementById("v-zeitplaene")?.textContent ?? ""), null, { timeout: 4000 });
+  });
+
+  it("Tastaturfokus bleibt nach Ablehnen, PIN-Freigabe und Löschen in der Karte, nie auf <body>", async () => {
+    // Zusätzliche wartende Aufträge nur in der Anzeige (#301–#303); ihre Antworten kommen aus der Attrappe
+    const weg = new Set<number>();
+    const extra = [
+      { id: 301, tool: "gmail_senden", stufe: "extern", summary: "Probe A" },
+      { id: 302, tool: "gmail_senden", stufe: "extern", summary: "Probe B" },
+      { id: 303, tool: "geraet_schalten", stufe: "sensibel", summary: "Probe C" },
+    ];
+    await page.route("**/status.json", async (route) => {
+      const echt = await route.fetch();
+      const d = (await echt.json()) as { auftraege?: unknown[] } & Record<string, unknown>;
+      const neu = extra.filter((a) => !weg.has(a.id)).map((a) => ({ ...a, seit: new Date(Date.now() - 60000).toISOString() }));
+      await route.fulfill({ response: echt, json: { ...d, auftraege: [...(d.auftraege ?? []), ...neu] } }).catch(() => undefined);
+    });
+    await page.route("**/api/auftrag", async (r) => {
+      const b = r.request().postDataJSON() as { id: number; aktion: string };
+      if (!extra.some((a) => a.id === b.id)) return r.fallback();
+      await new Promise((ok) => setTimeout(ok, 400));
+      weg.add(b.id);
+      await r.fulfill({ json: { ok: true, text: `#${b.id} ${b.aktion === "ok" ? "erledigt" : "abgelehnt"}.` } }).catch(() => undefined);
+    });
+    const fokus = () => page.evaluate(() => {
+      const a = document.activeElement as HTMLElement | null;
+      return { body: !a || a === document.body, inKarte: Boolean(a?.closest("#auftrAnker")), aktion: a?.dataset.aktion ?? "", id: a?.dataset.id ?? "", gesperrt: a?.getAttribute("aria-disabled") ?? "" };
+    });
+    try {
+      await page.evaluate(() => { location.hash = "uebersicht"; });
+      await sofort(page);
+      await page.waitForSelector('#v-uebersicht button[data-aktion="ablehnen"][data-id="302"]');
+      // Ablehnen per Tastatur: während der Anfrage bleibt der Fokus auf dem (nur als gesperrt markierten) Knopf
+      await page.focus('#v-uebersicht button[data-aktion="ablehnen"][data-id="302"]');
+      await page.keyboard.press("Enter");
+      await page.waitForSelector('#v-uebersicht button[data-aktion="ablehnen"][data-id="302"][aria-disabled="true"]');
+      assert.deepEqual(await fokus(), { body: false, inKarte: true, aktion: "ablehnen", id: "302", gesperrt: "true" });
+      await page.waitForFunction(() => !document.querySelector('#v-uebersicht [data-id="302"]'), null, { timeout: 4000 });
+      assert.deepEqual(await fokus(), { body: false, inKarte: true, aktion: "ablehnen", id: "301", gesperrt: "" }, "Fokus auf dem nächsten Auftrag");
+      // Sensibel mit PIN: der Dialog gibt den Fokus zurück, nach dem Neuaufbau liegt er auf dem Nachbarn
+      await page.focus('#v-uebersicht button[data-aktion="freigeben"][data-id="303"]');
+      await page.keyboard.press("Enter");
+      await page.waitForSelector("#dlgPin[open]");
+      await page.keyboard.type(DEMO_PIN);
+      await page.keyboard.press("Enter");
+      await page.waitForSelector("#dlgPin", { state: "hidden" });
+      await page.waitForFunction(() => !document.querySelector('#v-uebersicht [data-id="303"]'), null, { timeout: 4000 });
+      assert.match((await page.textContent("#ansage")) ?? "", /#303 erledigt\./, "PIN-Freigabe wird angesagt");
+      const f = await fokus();
+      assert.equal(f.body, false, "nicht auf <body>");
+      assert.equal(f.inKarte, true, `in «Offene Aufträge»: ${JSON.stringify(f)}`);
+      // Der nächste Tab bleibt in der Karte, statt nach oben zur Lage zu springen
+      await page.keyboard.press("Tab");
+      assert.equal((await fokus()).inKarte, true, "Tab danach bleibt in der Karte");
+    } finally {
+      await page.unroute("**/api/auftrag");
+      await page.unroute("**/status.json");
+    }
+    await sofort(page);
+
+    // Zeitplan löschen per Tastatur: Fokus landet im Zeitplan-Bereich, nicht auf <body>
+    assert.equal((await holeApi("/api/zeitplaene", { method: "POST", body: { name: "Fokusprobe", zeit: "05:55", tage: "taeglich", auftrag: "Nichts." } })).status, 201);
+    await page.evaluate(() => { location.hash = "zeitplaene"; });
+    const loeschen = page.locator("#v-zeitplaene .plan", { hasText: "Fokusprobe" }).locator('button[data-aktion="plan-weg"]');
+    await loeschen.waitFor();
+    await loeschen.focus();
+    await page.keyboard.press("Enter");
+    await page.waitForSelector("#dlgFrage[open]");
+    await page.focus("#frageOk");
+    await page.keyboard.press("Enter");
+    await page.waitForFunction(() => ![...document.querySelectorAll("#v-zeitplaene .plan .name")].some((e) => e.textContent === "Fokusprobe"), null, { timeout: 4000 });
+    const z = await page.evaluate(() => {
+      const a = document.activeElement as HTMLElement | null;
+      return { body: !a || a === document.body, karte: a?.closest(".karte")?.querySelector("h2")?.textContent ?? "", aktion: a?.dataset.aktion ?? "" };
+    });
+    assert.deepEqual(z, { body: false, karte: "Zeitpläne", aktion: "plan-edit" }, "Fokus auf dem nächsten Zeitplan");
+  });
+
+  it("Gespräch: nach «Senden» per Tastatur oder Klick liegt der Fokus im Eingabefeld, nie auf <body>", async () => {
+    // Jede Anfrage wartet, bis der Test sie loslässt: so lässt sich der Fokus während «läuft …» prüfen
+    const tore: (() => void)[] = [];
+    await page.route("**/api/chat", async (r) => {
+      await new Promise<void>((ok) => { tore.push(ok); });
+      await r.fulfill({ json: { ok: true, reply: "Erledigt, Sir." } }).catch(() => undefined);
+    });
+    const fokus = () => page.evaluate(() => {
+      const a = document.activeElement as HTMLElement | null;
+      return !a || a === document.body ? "body" : a.id || a.tagName;
+    });
+    const antworten = () => page.locator("#v-gespraech .msg.jv:not(.laeuft)").count();
+    try {
+      await page.evaluate(() => { location.hash = "gespraech"; });
+      await page.waitForSelector("#v-gespraech:not([hidden]) #chatIn");
+      for (const art of ["tastatur", "klick"] as const) {
+        const vorher = await antworten();
+        await page.fill("#chatIn", "Fokusprobe " + art);
+        if (art === "tastatur") {
+          await page.focus("#chatIn");
+          await page.keyboard.press("Tab");
+          assert.equal(await fokus(), "chatSenden", "Vorbedingung: Fokus auf «Senden»");
+          await page.keyboard.press("Enter");
+        } else {
+          await page.click("#chatSenden");
+        }
+        await page.waitForSelector("#v-gespraech .msg.laeuft");
+        assert.equal(await fokus(), "chatIn", `${art}: während der Antwort im Eingabefeld`);
+        for (let i = 0; i < 100 && !tore.length; i++) await page.waitForTimeout(20);
+        tore.shift()!();
+        await page.waitForSelector("#chatSenden:not([disabled])", { timeout: 3000 });
+        await page.waitForFunction((n) => document.querySelectorAll("#v-gespraech .msg.jv:not(.laeuft)").length > n, vorher, { timeout: 3000 });
+        assert.equal(await fokus(), "chatIn", `${art}: nach der Antwort im Eingabefeld`);
+      }
+    } finally {
+      for (const t of tore) t();
+      await page.unroute("**/api/chat");
+    }
+  });
+
+  it("Weiter mit PIN im Bereich Sicherheit per Tastatur: Fokus danach auf «Notaus», nie auf <body>", async () => {
+    await page.evaluate(() => { location.hash = "sicherheit"; });
+    await page.waitForSelector('#v-sicherheit:not([hidden]) button[data-merk="s-notaus"]:not([disabled])');
+    const fokus = () => page.evaluate(() => {
+      const a = document.activeElement as HTMLElement | null;
+      return !a || a === document.body ? "body" : a.dataset.merk || a.id || a.tagName;
+    });
+    try {
+      // Notaus per Tastatur bestätigen
+      await page.focus('#v-sicherheit button[data-merk="s-notaus"]');
+      await page.keyboard.press("Enter");
+      await page.waitForSelector("#dlgFrage[open]");
+      await page.focus("#frageOk");
+      await page.keyboard.press("Enter");
+      await page.waitForFunction(() => document.getElementById("zustandText")?.textContent === "Pausiert", null, { timeout: 3000 });
+      // «Mit PIN fortsetzen» per Tastatur; nach dem Fortsetzen ist der Knopf gesperrt
+      await page.waitForSelector('#v-sicherheit button[data-merk="s-weiter"]:not([disabled])');
+      await page.focus('#v-sicherheit button[data-merk="s-weiter"]');
+      await page.keyboard.press("Enter");
+      await page.waitForSelector("#dlgPin[open]");
+      await page.keyboard.type(DEMO_PIN);
+      await page.keyboard.press("Enter");
+      await page.waitForSelector("#dlgPin", { state: "hidden" });
+      await page.waitForFunction(() => document.getElementById("zustandText")?.textContent === "Bereit", null, { timeout: 3000 });
+      await page.waitForTimeout(100); // close-Ereignis (spätere Task) und Neuaufbau abwarten
+      assert.equal(await page.isDisabled('#v-sicherheit button[data-merk="s-weiter"]'), true, "Vorbedingung: Auslöser gesperrt");
+      assert.equal(await fokus(), "s-notaus");
+      // Auch der nächste Neuaufbau (Status-Abfrage) behält ihn
+      await sofort(page);
+      await page.waitForTimeout(200);
+      assert.equal(await fokus(), "s-notaus");
+    } finally {
+      const st = await holeApi("/status.json");
+      if (st.daten.pausiert) assert.equal((await holeApi("/api/notaus", { method: "POST", body: { an: false, pin: DEMO_PIN } })).status, 200);
+    }
+  });
+
+  it("Notfall bei Fokus auf «Weiter» in der Leiste (auch aus dem PIN-Dialog): Fokus bleibt dort, nie auf <body>", async () => {
+    await page.evaluate(() => { location.hash = "uebersicht"; });
+    await page.waitForSelector("#v-uebersicht:not([hidden]) .kopf");
+    const fokus = () => page.evaluate(() => {
+      const a = document.activeElement as HTMLElement | null;
+      return !a || a === document.body ? "body" : a.id || a.dataset.merk || a.tagName;
+    });
+    const notfallAn = () => page.route("**/status.json", async (route) => {
+      const echt = await route.fetch();
+      const d = await echt.json();
+      await route.fulfill({ response: echt, json: { ...d, notfall: true, pausiert: true, offeneAuftraege: 0, auftraege: [] } });
+    });
+    const notfallAus = async () => {
+      await page.unroute("**/status.json");
+      await sofort(page);
+      await page.waitForFunction(() => document.getElementById("zustandText")?.textContent === "Pausiert", null, { timeout: 3000 });
+    };
+    assert.equal((await holeApi("/api/notaus", { method: "POST", body: { an: true } })).status, 200);
+    try {
+      await sofort(page);
+      await page.waitForFunction(() => document.getElementById("zustandText")?.textContent === "Pausiert", null, { timeout: 3000 });
+
+      // 1. Fokus auf «Weiter», dann kommt der Notfall (Telegram, anderer Tab)
+      await page.focus("#notausKnopf");
+      assert.equal(await fokus(), "notausKnopf", "Vorbedingung");
+      await notfallAn();
+      await sofort(page);
+      await page.waitForFunction(() => document.getElementById("zustandText")?.textContent === "Notfall", null, { timeout: 3000 });
+      await page.waitForTimeout(100);
+      assert.equal(await fokus(), "notausKnopf", "Fokus bleibt auf dem gesperrten Knopf");
+      assert.equal(await page.isDisabled("#notausKnopf"), true, "im Notfall gesperrt");
+      assert.equal(await page.getAttribute("#notausKnopf", "aria-disabled"), "true");
+      // Enter auf dem gesperrten Knopf öffnet keinen PIN-Dialog
+      await page.keyboard.press("Enter");
+      await page.waitForTimeout(150);
+      assert.equal(await page.evaluate(() => (document.getElementById("dlgPin") as HTMLDialogElement).open), false, "kein PIN-Dialog im Notfall");
+      // Tab geht vom Knopf aus weiter, nicht vom Seitenanfang
+      await page.keyboard.press("Tab");
+      assert.notEqual(await fokus(), "body");
+      await notfallAus();
+      assert.equal(await page.getAttribute("#notausKnopf", "aria-disabled"), null, "nach dem Notfall wieder frei");
+      assert.equal(await page.isDisabled("#notausKnopf"), false);
+
+      // 2. PIN-Dialog aus der Leiste offen, dann kommt der Notfall: der Dialog schliesst und gibt den Fokus an «Weiter» zurück
+      await page.focus("#notausKnopf");
+      await page.keyboard.press("Enter");
+      await page.waitForSelector("#dlgPin[open]");
+      await notfallAn();
+      await sofort(page);
+      await page.waitForSelector("#dlgPin", { state: "hidden" });
+      await page.waitForFunction(() => document.getElementById("zustandText")?.textContent === "Notfall", null, { timeout: 3000 });
+      await page.waitForTimeout(100); // close-Ereignis (spätere Task) abwarten
+      assert.equal(await fokus(), "notausKnopf", "Fokus nach dem Schliessen auf dem gesperrten Knopf, nie auf <body>");
+      await notfallAus();
+    } finally {
+      await page.unroute("**/status.json").catch(() => undefined);
+      const st = await holeApi("/status.json");
+      if (st.daten.pausiert) assert.equal((await holeApi("/api/notaus", { method: "POST", body: { an: false, pin: DEMO_PIN } })).status, 200);
+      await sofort(page);
+      await page.waitForFunction(() => document.getElementById("zustandText")?.textContent === "Bereit", null, { timeout: 3000 });
+    }
+  });
+
+  it("Toast bei offenem Dialog auf dem Handy: verdeckt die Dialogknöpfe nicht", async () => {
+    await page.setViewportSize({ width: 390, height: 800 });
+    await page.route("**/api/zeitplaene", (r) => (r.request().method() === "POST" ? r.fulfill({ status: 500, json: { ok: false, error: "intern" } }) : r.fallback()));
+    try {
+      await page.evaluate(() => { location.hash = "zeitplaene"; });
+      await page.waitForSelector('#v-zeitplaene button[data-aktion="plan-neu"]:not([disabled])');
+      await page.click('#v-zeitplaene button[data-aktion="plan-neu"]');
+      await page.waitForSelector("#dlgPlan[open]");
+      await page.fill("#pName", "Nie gespeichert");
+      await page.fill("#pAuftrag", "Kommt nicht an.");
+      await page.focus("#planOk");
+      await page.keyboard.press("Enter");
+      await page.waitForSelector("#toast.an");
+      await page.waitForTimeout(300); // Einblenden abwarten
+      assert.match((await page.textContent("#toast")) ?? "", /Der Zeitplan kam nicht an \(HTTP 500\), Sir\./);
+      // Ohne benannte Hilfsfunktionen im Browser-Code (tsx ergänzt sonst __name)
+      const lage = await page.evaluate(() => {
+        const t = document.getElementById("toast")!.getBoundingClientRect();
+        const ueberdeckt = [...document.querySelectorAll("#dlgPlan .dlg-fuss button")]
+          .filter((b) => { const k = b.getBoundingClientRect(); return t.left < k.right && t.right > k.left && t.top < k.bottom && t.bottom > k.top; })
+          .map((b) => b.textContent?.trim());
+        return { toast: [t.left, t.top, t.right, t.bottom], ueberdeckt, fokus: document.activeElement?.id, imBild: t.top >= 0 && t.bottom <= innerHeight };
+      });
+      assert.equal(lage.fokus, "planOk");
+      assert.deepEqual(lage.ueberdeckt, [], `Toast über den Knöpfen: ${JSON.stringify(lage)}`);
+      assert.equal(lage.imBild, true);
+      await page.click("#dlgPlan [data-schliessen]");
+      await page.waitForSelector("#dlgPlan", { state: "hidden" });
+    } finally {
+      await page.unroute("**/api/zeitplaene");
+      await page.setViewportSize({ width: 1280, height: 860 });
+    }
+  });
+
+  it("hängende Status-Abfrage: nach dem Zeitlimit «Verbindung gestört», danach geht es weiter", async () => {
+    const haengend: Route[] = [];
+    await page.route("**/status.json", (r) => { haengend.push(r); }); // angenommen, nie beantwortet
+    try {
+      await page.evaluate(() => { location.hash = "uebersicht"; });
+      await sofort(page);
+      await page.waitForSelector("#stoerung:not([hidden])", { timeout: 25000 });
+      assert.equal(await page.evaluate(() => document.getElementById("main")!.classList.contains("halten")), true, "Inhalt gedimmt");
+      assert.ok(haengend.length >= 1);
+    } finally {
+      await page.unroute("**/status.json");
+      for (const r of haengend) await r.abort().catch(() => undefined);
+    }
+    await sofort(page);
+    await page.waitForSelector("#stoerung", { state: "hidden", timeout: 4000 });
+  });
+
+  it("PIN-Freigabe: falsche PIN und Zeitlimit werden nach dem Schliessen angesagt; Zeitlimit heisst nicht «nicht erreichbar»", async () => {
+    await page.evaluate(() => { location.hash = "uebersicht"; });
+    const knopf = '#v-uebersicht button[data-aktion="freigeben"][data-id="202"]';
+    await page.waitForSelector(knopf);
+    const ansage = () => page.evaluate(() => ({ seite: document.getElementById("ansage")!.textContent ?? "", dialog: document.querySelector("#dlgPin .dlg-ansage")!.textContent ?? "" }));
+    // Falsche PIN (nachgestellt: der echte Auftrag bleibt offen): Dialog zu, Ablehnung in #ansage
+    await page.route("**/api/auftrag", (r) => r.fulfill({ status: 403, json: { ok: false, error: "pin_falsch", text: "Falsche PIN. #202 abgelehnt." } }).catch(() => undefined));
+    try {
+      await page.click(knopf);
+      await page.waitForSelector("#dlgPin[open]");
+      await page.keyboard.type("9999");
+      await page.keyboard.press("Enter");
+      await page.waitForSelector("#dlgPin", { state: "hidden" });
+      await page.waitForTimeout(100); // close-Ereignis (spätere Task) abwarten
+      const a = await ansage();
+      assert.match(a.seite, /Falsche PIN\. #202 abgelehnt\./, JSON.stringify(a));
+      assert.equal(a.dialog, "");
+    } finally {
+      await page.unroute("**/api/auftrag");
+    }
+    // Zeitlimit einer Aktion (nachgestellt: 120 s → 200 ms, Anfrage hängt): Auftrag läuft weiter, kein «nicht erreichbar»
+    const haengend: Route[] = [];
+    await page.route("**/api/auftrag", (r) => { haengend.push(r); });
+    await page.evaluate(() => {
+      const w = AbortSignal as unknown as { timeout: (ms: number) => AbortSignal; __orig?: (ms: number) => AbortSignal };
+      w.__orig = w.timeout.bind(AbortSignal);
+      w.timeout = (ms: number) => w.__orig!(ms >= 120000 ? 200 : ms);
+    });
+    try {
+      await page.waitForSelector(knopf);
+      await page.click(knopf);
+      await page.waitForSelector("#dlgPin[open]");
+      await page.keyboard.type(DEMO_PIN);
+      await page.keyboard.press("Enter");
+      await page.waitForSelector("#dlgPin", { state: "hidden", timeout: 3000 });
+      await page.waitForTimeout(100);
+      const a = await ansage();
+      assert.match(a.seite, /Das dauert länger, Sir\. Der Auftrag läuft weiter/, JSON.stringify(a));
+      assert.doesNotMatch(a.seite + ((await page.textContent("#toast")) ?? ""), /Ich erreiche den Dienst nicht/);
+      assert.ok(haengend.length >= 1);
+    } finally {
+      await page.evaluate(() => {
+        const w = AbortSignal as unknown as { timeout: (ms: number) => AbortSignal; __orig?: (ms: number) => AbortSignal };
+        if (w.__orig) { w.timeout = w.__orig; delete w.__orig; }
+      });
+      await page.unroute("**/api/auftrag");
+      for (const r of haengend) await r.abort().catch(() => undefined);
+    }
+    assert.equal(await page.locator(knopf).count(), 1, "der echte Auftrag #202 ist unberührt");
+  });
+
+  it("Notfall: eine vorher gestartete Finanz-Abfrage füllt die Lage nicht wieder", async () => {
+    await page.evaluate(() => { location.hash = "uebersicht"; });
+    await page.waitForSelector("#v-uebersicht .auftraege");
+    await page.waitForFunction(() => /überfällig/.test(document.getElementById("v-uebersicht")?.textContent ?? ""), null, { timeout: 3000 });
+    // Finanz-Antworten (200, vor dem Notfall geholt) zurückhalten, bis die Seite den Notfall kennt
+    let loslassen: () => void = () => undefined;
+    const tor = new Promise<void>((ok) => { loslassen = ok; });
+    let gehalten = 0;
+    await page.route("**/api/finanzen", async (r) => {
+      const echt = await r.fetch();
+      gehalten++;
+      await tor;
+      await r.fulfill({ response: echt }).catch(() => undefined);
+    });
+    try {
+      await sofort(page);
+      for (let i = 0; i < 100 && gehalten < 1; i++) await page.waitForTimeout(20);
+      assert.ok(gehalten >= 1, "Vorbedingung: eine Finanz-Abfrage läuft vor dem Notfall");
+      await page.route("**/status.json", async (route) => {
+        const echt = await route.fetch();
+        const d = await echt.json();
+        await route.fulfill({ response: echt, json: { ...d, notfall: true, pausiert: true, offeneAuftraege: 2, auftraege: [], zeitplaene: [], wachen: [], kameras: [] } }).catch(() => undefined);
+      });
+      await sofort(page);
+      await page.waitForFunction(() => document.getElementById("zustandText")?.textContent === "Notfall", null, { timeout: 3000 });
+      const antworten = page.waitForResponse("**/api/finanzen");
+      loslassen();
+      await antworten;
+      await page.waitForTimeout(300);
+      const text = (await page.textContent("#v-uebersicht")) ?? "";
+      assert.match(text, /Inhalte erst nach \/entwarnung/);
+      assert.doesNotMatch(text, /überfällig|Rechnung/, "keine Finanzen in der Notfall-Übersicht");
+      assert.equal(await page.isVisible("#zahlFinanzen"), false);
+      // Auch der nächste Neuaufbau (ohne neue Abfrage) zeigt nichts: der Speicher blieb leer
+      await page.evaluate(() => window.dispatchEvent(new HashChangeEvent("hashchange")));
+      await page.waitForTimeout(100);
+      assert.doesNotMatch((await page.textContent("#v-uebersicht")) ?? "", /überfällig/);
+    } finally {
+      loslassen();
+      await page.unroute("**/status.json");
+      await page.unroute("**/api/finanzen");
+    }
+    await sofort(page);
+    await page.waitForFunction(() => document.getElementById("zustandText")?.textContent === "Bereit", null, { timeout: 3000 });
+    await page.waitForSelector("#v-uebersicht .auftrag", { timeout: 3000 });
+  });
+
+  it("Ersatz-Fokus nach dem Löschen liegt im Bild, nie unter der Sticky-Leiste (Handy)", async () => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    assert.equal((await holeApi("/api/zeitplaene", { method: "POST", body: { name: "Spätprobe", zeit: "23:50", tage: "taeglich", auftrag: "Nichts." } })).status, 201);
+    try {
+      await page.evaluate(() => { location.hash = "zeitplaene"; });
+      const loeschen = page.locator("#v-zeitplaene .plan", { hasText: "Spätprobe" }).locator('button[data-aktion="plan-weg"]');
+      await loeschen.waitFor();
+      // Platz unter dem Inhalt: sonst begrenzt die kürzer gewordene Seite den Bildlauf und schiebt den Nachbarn zufällig ins Bild
+      await page.evaluate(() => { document.getElementById("main")!.style.paddingBottom = "1200px"; });
+      await loeschen.focus();
+      // «Löschen» knapp (20 px) unter die Leiste scrollen
+      const vorher = await page.evaluate(() => {
+        const leiste = document.querySelector("header.top")!.getBoundingClientRect().bottom;
+        const b = document.activeElement!.getBoundingClientRect();
+        window.scrollBy(0, b.top - (leiste + 20));
+        return { leiste, top: document.activeElement!.getBoundingClientRect().top };
+      });
+      assert.ok(Math.abs(vorher.top - (vorher.leiste + 20)) <= 2, `Vorbedingung: Knopf knapp unter der Leiste ${JSON.stringify(vorher)}`);
+      await page.keyboard.press("Enter");
+      await page.waitForSelector("#dlgFrage[open]");
+      await page.focus("#frageOk");
+      await page.keyboard.press("Enter");
+      await page.waitForFunction(() => ![...document.querySelectorAll("#v-zeitplaene .plan .name")].some((e) => e.textContent === "Spätprobe"), null, { timeout: 4000 });
+      await page.waitForTimeout(100);
+      const f = await page.evaluate(() => {
+        const a = document.activeElement as HTMLElement | null;
+        const r = a!.getBoundingClientRect();
+        const leiste = document.querySelector("header.top")!.getBoundingClientRect().bottom;
+        return { body: !a || a === document.body, karte: a?.closest(".karte")?.querySelector("h2")?.textContent ?? "", top: r.top, bottom: r.bottom, leiste, hoehe: innerHeight };
+      });
+      assert.equal(f.body, false);
+      assert.equal(f.karte, "Zeitpläne", JSON.stringify(f));
+      assert.ok(f.top >= f.leiste && f.bottom <= f.hoehe, `Fokus im Bild und nicht unter der Leiste: ${JSON.stringify(f)}`);
+    } finally {
+      await page.evaluate(() => { document.getElementById("main")!.style.paddingBottom = ""; });
+      await page.setViewportSize({ width: 1280, height: 860 });
     }
   });
 

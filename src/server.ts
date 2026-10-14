@@ -27,7 +27,9 @@ const TUNNEL_SCHALTBAR = new Set(["/events", "/gesture"]);
 /** Tunnel → 404. Dashboard, /status.json und /api/* bleiben auch mit EVENTS_VIA_TUNNEL=on gesperrt (Leitplanke 6). */
 const lanOnly = (req: express.Request, res: express.Response, next: express.NextFunction) => {
   const viaTunnel = Boolean(req.headers["cf-connecting-ip"] || req.headers["cf-ray"]);
-  const tunnelErlaubt = config.eventsViaTunnel && TUNNEL_SCHALTBAR.has(req.path);
+  // Voller Pfad: unter app.use kürzt Express req.path (aus /gesture wird «/», aus /api/events «/events»)
+  const pfad = (req.baseUrl + req.path).replace(/\/+$/, "") || "/";
+  const tunnelErlaubt = config.eventsViaTunnel && TUNNEL_SCHALTBAR.has(pfad);
   const ip = req.socket.remoteAddress ?? "";
   if ((viaTunnel && !tunnelErlaubt) || !PRIVATE.test(ip)) return void res.status(404).end();
   next();
@@ -74,7 +76,9 @@ if (config.eventToken) {
 // Ohne Body-Parser: handlePanic braucht keinen Body, und ein Parser vor der Token-Prüfung wäre Angriffsfläche aus dem Internet.
 if (config.panicToken) app.post("/notfall", sicher(handlePanic));
 
-// Gesten- und Sprachkonsole (Webcam-Handtracking im Browser)
+// Gesten- und Sprachkonsole (Webcam-Handtracking im Browser). lanOnly auch vor dem Router: sonst beantwortet er
+// OPTIONS (200 + Allow) selbst, und die Konsole wäre über den Tunnel aufzählbar (Leitplanke 6).
+app.use("/gesture", lanOnly);
 app.get("/gesture", lanOnly, (_req, res) => {
   res.sendFile(fileURLToPath(new URL("../web/gesture.html", import.meta.url)));
 });
@@ -82,6 +86,9 @@ app.get("/gesture", lanOnly, (_req, res) => {
 // Kommandozentrale: der Kern. Seite und API nur aus dem Heimnetz/Tailscale (nie über den Tunnel), API zusätzlich mit Token.
 if (config.dashboard && config.eventToken) {
   const json = express.json({ limit: "64kb" });
+  // lanOnly einmal vor allen Routen der Kommandozentrale: sonst beantwortet der Router OPTIONS (200 + Allow) selbst,
+  // ohne lanOnly – über den Tunnel wären Seite und API aufzählbar (Leitplanke 6). Die lanOnly je Route bleiben als zweite Schicht.
+  app.use(["/dashboard", "/status.json", "/api"], lanOnly);
   // Nur diese drei festen Dateien (kein express.static auf web/): sie enthalten keine Daten, deshalb ohne Token.
   const statisch = (datei: string, typ: string) => (_req: express.Request, res: express.Response) => {
     res.setHeader("Content-Security-Policy", DASHBOARD_CSP);

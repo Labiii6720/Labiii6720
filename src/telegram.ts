@@ -605,8 +605,10 @@ export async function denyAuftrag(a: Auftrag): Promise<string> {
   audit("auftrag_abgelehnt", { id: a.id, tool: a.tool, quelle: "dashboard" });
   setStatus(a, "abgelehnt");
   addSystemNote(`Auftrag #${a.id} (${a.tool}) wurde vom Nutzer abgelehnt.`);
-  if (a.messageId) await apiRobust("editMessageReplyMarkup", { chat_id: owner(), message_id: a.messageId, reply_markup: { inline_keyboard: [] } }).catch(() => undefined);
-  await sendText(`❌ #${a.id} abgelehnt (Dashboard).`).catch(() => undefined);
+  // Wie beim Freigeben ohne Warten: bei gestörtem Telegram dauerten die Wiederholungen Minuten, und die Antwort ans
+  // Dashboard bliebe so lange aus. Die Meldung geht über den Postausgang, also auch nach einer Störung noch hinaus.
+  if (a.messageId) knoepfeEntfernen(a.messageId);
+  void sendeSpaeter(`❌ #${a.id} abgelehnt (Dashboard).`).catch(log);
   return `❌ #${a.id} abgelehnt.`;
 }
 

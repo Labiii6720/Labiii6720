@@ -206,6 +206,9 @@ export let wachenNichtGeladen = false;
 export const WACHEN_UNLESBAR =
   "⚠️ data/wachen.json war beim Start unlesbar, Sir (Sicherung, sofern möglich, unter data/wachen.json.defekt). Die dort angelegten Wachen laufen nicht, und ich ändere keine, bis die Datei repariert ist und ich neu gestartet bin.";
 
+/** Ein Eintrag in data/wachen.json muss ein Objekt sein; null, Zahl, Text oder Liste (Handeingriff) machen die Datei unlesbar. */
+const istWachenEintrag = (w: unknown): boolean => w !== null && typeof w === "object" && !Array.isArray(w);
+
 export const dynamicWachen: Wache[] = (() => {
   let text: string;
   try {
@@ -222,6 +225,8 @@ export const dynamicWachen: Wache[] = (() => {
   try {
     const roh = JSON.parse(text) as unknown;
     if (!Array.isArray(roh)) throw new Error("keine Liste");
+    // Sonst bräche schon der erste Zugriff auf w.id oder w.kamera ab (Start, Ticks, Anzeigen)
+    if (!roh.every(istWachenEintrag)) throw new Error("ungültiger Eintrag");
     return roh as Wache[];
   } catch {
     wachenNichtGeladen = true;
@@ -233,6 +238,40 @@ export const dynamicWachen: Wache[] = (() => {
   }
 })();
 
+/** Gültige IDs der per Werkzeug angelegten Wachen; von Hand bearbeitete Einträge ohne Objekt-Form zählen nicht. */
+function wachenIds(): number[] {
+  return dynamicWachen.flatMap((w) => (istWachenEintrag(w) && Number.isSafeInteger(w.id) ? [w.id as number] : []));
+}
+
+/**
+ * Höchste ID im Bestand beim Start (0 ohne Bestand). Beim Import wird bewusst nichts gespeichert: cameras.js laden auch
+ * `npm run check` und das Setup, und ein save() dort schriebe den beim Prozessstart gelesenen Zustand zurück – ein
+ * inzwischen vom Dienst ausgelöster Notfall oder Notaus wäre auf der Platte weg.
+ */
+const hoechsteWacheIdBeimStart = Math.max(0, ...wachenIds());
+
+/**
+ * Ein Bestand aus 0.21 hat keinen Zähler in state.json, und die Löschpfade rücken ihn nicht vor. Darum zieht jedes
+ * Speichern der Wachen den Zähler zuerst auf mindestens höchste Start-ID + 1 nach und speichert ihn, bevor die Liste
+ * geschrieben wird: Nach dem Löschen der Wache mit der höchsten ID bekommt keine neue Wache diese ID wieder, auch nicht
+ * nach einem Neustart. Scheitert das Speichern, bleibt der Zähler wie er war, und der Fehler geht an den Aufrufer
+ * (der die Änderung an der Liste zurücknimmt).
+ */
+function wachenZaehlerNachziehen(): void {
+  if (hoechsteWacheIdBeimStart === 0) return;
+  const mindestens = hoechsteWacheIdBeimStart + 1;
+  const gemerkt = state.naechsteWacheId;
+  if (Number.isSafeInteger(gemerkt) && gemerkt! >= mindestens) return;
+  state.naechsteWacheId = mindestens;
+  try {
+    save();
+  } catch (e) {
+    if (gemerkt === undefined) delete state.naechsteWacheId;
+    else state.naechsteWacheId = gemerkt;
+    throw e;
+  }
+}
+
 /** Vor jeder Änderung an dynamicWachen aufrufen: wirft, solange data/wachen.json beim Start unlesbar war. */
 export function pruefeWachenSchreibbar(): void {
   if (wachenNichtGeladen) throw new Error(`${WACHEN_FILE} war beim Start unlesbar, Sir. Ich ändere keine Wachen, bis die Datei repariert ist und ich neu gestartet bin – sonst wäre der Bestand weg.`);
@@ -240,6 +279,7 @@ export function pruefeWachenSchreibbar(): void {
 
 export function saveWachen(): void {
   pruefeWachenSchreibbar();
+  wachenZaehlerNachziehen();
   mkdirSync("data", { recursive: true, mode: 0o700 });
   writeFileSync(`${WACHEN_FILE}.tmp`, JSON.stringify(dynamicWachen, null, 2), { mode: 0o600 });
   renameSync(`${WACHEN_FILE}.tmp`, WACHEN_FILE);
@@ -248,16 +288,24 @@ export function saveWachen(): void {
 /** Neue Wachen-ID, die nie zuvor vergeben war (wie neueZeitplanId in zeitplaene.ts). */
 export function neueWacheId(): number {
   const gemerkt = state.naechsteWacheId;
-  const vorhanden = dynamicWachen.flatMap((w) => (w.id !== undefined && Number.isSafeInteger(w.id) ? [w.id + 1] : []));
-  const id = Math.max(1, Number.isSafeInteger(gemerkt) ? gemerkt! : 1, ...vorhanden);
+  const vorhanden = wachenIds().map((id) => id + 1);
+  const id = Math.max(1, hoechsteWacheIdBeimStart + 1, Number.isSafeInteger(gemerkt) ? gemerkt! : 1, ...vorhanden);
   state.naechsteWacheId = id + 1;
   save();
   return id;
 }
 
-/** Alle Wachen: aus cameras.json (ohne ID) und die per Werkzeug angelegten (mit ID). */
+/**
+ * Alle Wachen: aus cameras.json (ohne ID) und die per Werkzeug angelegten (mit ID). Ein «id» in cameras.json (etwa aus
+ * data/wachen.json kopiert) fällt weg: sonst gälte die Wache in Kommandozentrale und Werkzeugen als bearbeitbar.
+ */
 export function allWachen(): Wache[] {
-  const fromConfig = Object.entries(cameras).flatMap(([kamera, c]) => (c.wachen ?? []).map((w) => ({ ...w, kamera })));
+  const fromConfig = Object.entries(cameras).flatMap(([kamera, c]) =>
+    (c.wachen ?? []).map((w) => {
+      const { id: _id, ...rest } = w as typeof w & { id?: unknown };
+      return { ...rest, kamera };
+    }),
+  );
   return [...fromConfig, ...dynamicWachen];
 }
 

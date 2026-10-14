@@ -206,6 +206,7 @@ describe("Löschen von Zeitplänen und Wachen braucht Freigabe", () => {
     // Ohne festgehaltenen Stand (oder bei unbekannter ID) nichts löschen
     await assert.rejects(t.run({ id: 7 }, ctx), /Ich lösche nichts/);
     assert.equal(t.festhalten!({ id: 99 }).erwartet_name, null);
+    assert.equal(zeitplaene.length, 1);
     zeitplaene[0]!.name = "Anderes";
     await assert.rejects(t.run(gespeichert, ctx), /heisst inzwischen anders, Sir\. Ich lösche nichts\./);
     assert.equal(zeitplaene.length, 1);
@@ -233,6 +234,91 @@ describe("Löschen von Zeitplänen und Wachen braucht Freigabe", () => {
     zeitplaene[0]!.auftrag = "Briefing";
     assert.equal(await t.run(gespeichert, ctx), "Gelöscht.");
     assert.equal(zeitplaene.length, 0);
+  });
+
+  it("zeitplan_loeschen: von Hand bearbeiteter Eintrag ohne zeit oder tage lässt sich löschen, nicht «ältere Version»", async () => {
+    // So steht es in einer von Hand bearbeiteten data/zeitplaene.json: läuft nie, soll aber per Chat entfernbar sein
+    zeitplaene.push({ id: 12, name: "Kaputt", zeit: "07:00", auftrag: "x" } as never, { id: 13, name: "Ohne Zeit", tage: "taeglich", auftrag: "y" } as never);
+    const t = werkzeug("zeitplan_loeschen");
+    const ohneTage = t.festhalten!({ id: 12 });
+    assert.deepEqual(ohneTage, { id: 12, erwartet_name: "Kaputt", erwartet_zeit: "07:00", erwartet_tage: "", erwartet_auftrag: "x" });
+    const ohneZeit = t.festhalten!({ id: 13 });
+    assert.equal(ohneZeit.erwartet_zeit, "");
+    // Die Freigabe benennt das Fehlende, statt «undefined» zu zeigen; die Liste ebenso
+    assert.equal(t.summary!({ id: 12 }), "Zeitplan #12 «Kaputt» löschen (ohne Tage um 07:00)");
+    assert.equal(t.summary!({ id: 13 }), "Zeitplan #13 «Ohne Zeit» löschen (taeglich um ohne Uhrzeit)");
+    zeitplaene.push({ id: 15, auftrag: "leer" } as never);
+    assert.equal(t.summary!({ id: 15 }), "Zeitplan #15 «ohne Namen» löschen (ohne Tage um ohne Uhrzeit)");
+    const liste = String(await werkzeug("zeitplaene_anzeigen").run({}, ctx));
+    assert.doesNotMatch(liste, /undefined/);
+    assert.match(liste, /#12 Kaputt · ohne Tage 07:00 · x/);
+    assert.equal(await t.run(t.festhalten!({ id: 15 }), ctx), "Gelöscht.");
+    assert.equal(await t.run(ohneTage, ctx), "Gelöscht.");
+    assert.equal(await t.run(ohneZeit, ctx), "Gelöscht.");
+    assert.equal(zeitplaene.length, 0);
+    // Wird ein fehlendes Feld inzwischen gesetzt, gilt das weiterhin als Änderung
+    zeitplaene.push({ id: 14, name: "Halb", zeit: "07:00", auftrag: "z" } as never);
+    const auftrag = t.festhalten!({ id: 14 });
+    zeitplaene[0]!.tage = "taeglich";
+    await assert.rejects(t.run(auftrag, ctx), /Zeitplan #14 wurde inzwischen geändert, Sir\. Ich lösche nichts\./);
+    assert.equal(zeitplaene.length, 1);
+    zeitplaene.length = 0;
+  });
+
+  it("wache_loeschen: von Hand bearbeiteter Eintrag ohne frage oder kamera lässt sich löschen, nicht «nennt keine Wache»", async () => {
+    // So steht es in einer von Hand bearbeiteten data/wachen.json (cameras.ts übernimmt die Einträge ungeprüft)
+    dynamicWachen.push({ id: 40, kamera: "balkon", alle_minuten: 60 } as never, { id: 41, frage: "Licht an?", alle_minuten: 60 } as never);
+    const t = werkzeug("wache_loeschen");
+    const ohneFrage = t.festhalten!({ id: 40 });
+    assert.deepEqual(ohneFrage, { id: 40, erwartet_kamera: "balkon", erwartet_frage: "" });
+    const ohneKamera = t.festhalten!({ id: 41 });
+    assert.deepEqual(ohneKamera, { id: 41, erwartet_kamera: "", erwartet_frage: "Licht an?" });
+    // Die Freigabe benennt das Fehlende, statt «undefined» zu zeigen; die Liste ebenso
+    assert.equal(t.summary!({ id: 40 }), "Wache #40 löschen: balkon – ohne Frage");
+    assert.equal(t.summary!({ id: 41 }), "Wache #41 löschen: ohne Kamera – Licht an?");
+    const liste = String(await werkzeug("wachen_anzeigen").run({}, ctx));
+    assert.doesNotMatch(liste, /undefined/);
+    assert.match(liste, /#40 balkon · alle 60 min · ohne Frage/);
+    assert.match(liste, /#41 ohne Kamera · alle 60 min · Licht an\?/);
+    assert.equal(await t.run(ohneFrage, ctx), "Gelöscht.");
+    assert.equal(await t.run(ohneKamera, ctx), "Gelöscht.");
+    assert.equal(dynamicWachen.length, 0);
+    // Wird ein fehlendes Feld inzwischen gesetzt, gilt das weiterhin als Änderung
+    dynamicWachen.push({ id: 42, kamera: "balkon", alle_minuten: 60 } as never);
+    const auftrag = t.festhalten!({ id: 42 });
+    dynamicWachen[0]!.frage = "Tür offen?";
+    await assert.rejects(t.run(auftrag, ctx), { message: "Wache #42 prüft inzwischen etwas anderes, Sir. Ich lösche nichts." });
+    assert.equal(dynamicWachen.length, 1);
+    dynamicWachen.length = 0;
+  });
+
+  it("offene Lösch-Aufträge aus 0.21 (nur {id}) verlangen eine neue Freigabe, statt «nennt keinen» zu melden", async () => {
+    zeitplaene.push({ id: 7, name: "News", zeit: "07:00", tage: "werktags", auftrag: "News zusammenfassen" });
+    dynamicWachen.push({ id: 3, kamera: "balkon", frage: "Steht die Balkontür offen?", alle_minuten: 60 });
+    const plan = werkzeug("zeitplan_loeschen");
+    const wache = werkzeug("wache_loeschen");
+    await assert.rejects(plan.run({ id: 7 }, ctx), { message: "Die Freigabe für Zeitplan #7 stammt aus einer älteren Version, Sir. Ich lösche nichts – bitte neu beantragen." });
+    await assert.rejects(wache.run({ id: 3 }, ctx), { message: "Die Freigabe für Wache #3 stammt aus einer älteren Version, Sir. Ich lösche nichts – bitte neu beantragen." });
+    assert.equal(zeitplaene.length, 1);
+    assert.equal(dynamicWachen.length, 1);
+    zeitplaene.length = 0;
+    dynamicWachen.length = 0;
+  });
+
+  it("Ziel fehlte beim Anlegen (null) → «nennt keinen», nichts gelöscht", async () => {
+    const plan = werkzeug("zeitplan_loeschen");
+    const wache = werkzeug("wache_loeschen");
+    const planAuftrag = plan.festhalten!({ id: 9 });
+    const wacheAuftrag = wache.festhalten!({ id: 9 });
+    // Erst nach dem Anlegen des Auftrags taucht ein Eintrag mit dieser Nummer auf
+    zeitplaene.push({ id: 9, name: "Spät", zeit: "22:00", tage: "taeglich", auftrag: "x" });
+    dynamicWachen.push({ id: 9, kamera: "balkon", frage: "Licht an?", alle_minuten: 60 });
+    await assert.rejects(plan.run(planAuftrag, ctx), { message: "Die Freigabe nennt keinen Zeitplan #9, Sir. Ich lösche nichts." });
+    await assert.rejects(wache.run(wacheAuftrag, ctx), { message: "Die Freigabe nennt keine Wache #9, Sir. Ich lösche nichts." });
+    assert.equal(zeitplaene.length, 1);
+    assert.equal(dynamicWachen.length, 1);
+    zeitplaene.length = 0;
+    dynamicWachen.length = 0;
   });
 
   it("wache_loeschen löscht nur, was die Freigabe nannte", async () => {

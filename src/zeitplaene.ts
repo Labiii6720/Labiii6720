@@ -31,6 +31,40 @@ export function pruefeZeitplaeneSchreibbar(): void {
   if (zeitplaeneNichtGeladen) throw new Error(gesperrtText(FILE, "keine Zeitpläne"));
 }
 
+/** Gültige IDs der Zeitpläne; von Hand bearbeitete Einträge ohne Objekt-Form zählen nicht. */
+function zeitplanIds(): number[] {
+  return zeitplaene.flatMap((z) => (z && typeof z === "object" && Number.isSafeInteger(z.id) ? [z.id] : []));
+}
+
+/**
+ * Höchste ID im Bestand beim Start (0 ohne Bestand). Beim Import wird bewusst nichts gespeichert: zeitplaene.js laden
+ * auch `npm run check` und das Setup, und ein save() dort schriebe den beim Prozessstart gelesenen Zustand zurück – ein
+ * inzwischen vom Dienst ausgelöster Notfall oder Notaus wäre auf der Platte weg.
+ */
+const hoechsteZeitplanIdBeimStart = zeitplaeneNichtGeladen ? 0 : Math.max(0, ...zeitplanIds());
+
+/**
+ * Ein Bestand aus 0.21 hat keinen Zähler in state.json, und die Löschpfade rücken ihn nicht vor. Darum zieht jedes
+ * Speichern der Zeitpläne den Zähler zuerst auf mindestens höchste Start-ID + 1 nach und speichert ihn, bevor die Liste
+ * geschrieben wird: Nach dem Löschen des Zeitplans mit der höchsten ID bekommt kein neuer Zeitplan diese ID wieder, auch
+ * nicht nach einem Neustart. Scheitert das Speichern, bleibt der Zähler wie er war, und der Fehler geht an den Aufrufer
+ * (der die Änderung an der Liste zurücknimmt).
+ */
+function zeitplanZaehlerNachziehen(): void {
+  if (hoechsteZeitplanIdBeimStart === 0) return;
+  const mindestens = hoechsteZeitplanIdBeimStart + 1;
+  const gemerkt = state.naechsteZeitplanId;
+  if (Number.isSafeInteger(gemerkt) && gemerkt! >= mindestens) return;
+  state.naechsteZeitplanId = mindestens;
+  try {
+    save();
+  } catch (e) {
+    if (gemerkt === undefined) delete state.naechsteZeitplanId;
+    else state.naechsteZeitplanId = gemerkt;
+    throw e;
+  }
+}
+
 /** IDs, die schon gespeichert waren (Stand beim Laden bzw. beim letzten Speichern) – alles andere ist neu angelegt. */
 let gespeicherteIds = new Set(zeitplaene.map((z) => z.id));
 
@@ -40,6 +74,7 @@ let gespeicherteIds = new Set(zeitplaene.map((z) => z.id));
  */
 export function saveZeitplaene(jetzt = new Date()): void {
   pruefeZeitplaeneSchreibbar();
+  zeitplanZaehlerNachziehen();
   for (const z of zeitplaene) {
     if (!gespeicherteIds.has(z.id) && z.lastRun === undefined && z.angelegt === undefined) z.angelegt = jetzt.toISOString();
   }
@@ -57,7 +92,8 @@ export function saveZeitplaene(jetzt = new Date()): void {
  */
 export function neueZeitplanId(): number {
   const gemerkt = state.naechsteZeitplanId;
-  const id = Math.max(1, Number.isSafeInteger(gemerkt) ? gemerkt! : 1, ...zeitplaene.map((z) => z.id).filter(Number.isSafeInteger).map((x) => x + 1));
+  const vorhanden = zeitplanIds().map((x) => x + 1);
+  const id = Math.max(1, hoechsteZeitplanIdBeimStart + 1, Number.isSafeInteger(gemerkt) ? gemerkt! : 1, ...vorhanden);
   state.naechsteZeitplanId = id + 1;
   save();
   return id;
@@ -74,6 +110,8 @@ function tagPasst(z: Zeitplan, now: Date): boolean {
 
 /** Genau zur Minute (Fenster 1 Minute) – bleibt für Kompatibilität. */
 export function faelltAn(z: Zeitplan, now: Date): boolean {
+  // Von Hand bearbeitete Einträge ohne zeit/tage: nie fällig statt Absturz im Scheduler-Takt
+  if (typeof z.zeit !== "string" || typeof z.tage !== "string") return false;
   if (!tagPasst(z, now)) return false;
   const hhmm = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
   return hhmm === z.zeit;
@@ -92,6 +130,7 @@ function heuteZuSpaetAngelegt(z: Zeitplan, now: Date): boolean {
  * fensterMin 0 = nur zur Minute (kein Nachholen). Ein heute erst nach der Uhrzeit angelegter Zeitplan ist heute nicht fällig.
  */
 export function faelligIm(z: Zeitplan, now: Date, fensterMin: number): boolean {
+  if (typeof z.zeit !== "string" || typeof z.tage !== "string") return false;
   if (z.lastRun === todayKey(now)) return false;
   if (!tagPasst(z, now)) return false;
   if (heuteZuSpaetAngelegt(z, now)) return false;
@@ -145,6 +184,7 @@ export const pruefungsText = (fehler: Record<string, string>): string => Object.
  * Lokale Zeit wie der Scheduler (TZ Europe/Zurich, config.ts). undefined bei ungültiger Uhrzeit oder Tagesangabe.
  */
 export function naechsterLauf(z: Zeitplan, now: Date, fensterMin = 0): Date | undefined {
+  if (typeof z.zeit !== "string" || typeof z.tage !== "string") return undefined;
   const zeit = z.zeit.trim();
   if (!/^\d{1,2}:\d{2}$/.test(zeit)) return undefined;
   const [h, m] = zeit.split(":").map(Number);

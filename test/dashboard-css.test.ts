@@ -74,6 +74,22 @@ describe("Kommandozentrale: Layout aus dashboard.css", { skip: chrome ? false : 
         assert.ok(m.symbolSichtbar, `${breite} px: Netz-Symbol sichtbar`);
         assert.ok(m.wortImText, "Wort bleibt im Text (Screenreader)");
         if (breite > 700) assert.ok(m.wortSichtbar, `${breite} px: Wort «Verbindung gestört» vollständig sichtbar`);
+        else {
+          // Handy: nie nur das gelbe Symbol (DESIGN §2/§9) – sichtbares Kurzwort in Textfarbe, ≥ 11 px, ungekürzt
+          const k = await p.evaluate(() => {
+            const st = document.getElementById("stoerung")!;
+            const nach = getComputedStyle(st, "::after");
+            const sym = st.querySelector("svg")!.getBoundingClientRect();
+            const r = st.getBoundingClientRect();
+            const probe = document.createElement("span"); probe.style.color = "var(--t2)"; document.body.append(probe);
+            const t2 = getComputedStyle(probe).color; probe.remove();
+            return { inhalt: nach.content, groesse: parseFloat(nach.fontSize), farbe: nach.color, t2, platz: r.right - sym.right, ganz: st.scrollWidth <= st.clientWidth + 1 };
+          });
+          assert.match(k.inhalt, /^"gestört"/, `${breite} px: Kurzwort «gestört» sichtbar (${k.inhalt})`);
+          assert.ok(k.groesse >= 11, `${breite} px: Kurzwort mindestens 11 px (${k.groesse})`);
+          assert.equal(k.farbe, k.t2, `${breite} px: Kurzwort in Textfarbe --t2, nicht in warn`);
+          assert.ok(k.platz >= 35 && k.ganz, `${breite} px: Kurzwort hat Fläche und ist nicht abgeschnitten (${k.platz} px)`);
+        }
         // Die echten Zustandswörter werden auch bei Störung nie gekürzt (nur das kurzlebige «Verbinde …» darf notfalls)
         for (const wort of ["Bereit", "Pausiert", "Notfall"]) {
           const z = await p.evaluate((wort) => {
@@ -85,6 +101,32 @@ describe("Kommandozentrale: Layout aus dashboard.css", { skip: chrome ? false : 
           assert.ok(z.notaus <= z.breite, `${breite} px, «${wort}»: Notaus im Bild`);
         }
       }
+    } finally { await p.context().close(); }
+  });
+
+  it("Handy, hell: «Verbindung gestört» ist lesbar und wird genau einmal vorgelesen", async () => {
+    const p = await seite(360);
+    try {
+      await p.evaluate(() => {
+        document.documentElement.dataset.theme = "light";
+        document.getElementById("zustandText")!.textContent = "Bereit";
+        document.getElementById("stoerung")!.hidden = false;
+      });
+      const m = await p.evaluate(() => {
+        const st = document.getElementById("stoerung")!;
+        const nach = getComputedStyle(st, "::after");
+        const r = st.getBoundingClientRect();
+        return { groesse: parseFloat(nach.fontSize), farbe: nach.color, breite: r.width, notaus: document.getElementById("notausKnopf")!.getBoundingClientRect(), fenster: document.documentElement.clientWidth };
+      });
+      assert.ok(m.groesse >= 11, `Kurzwort ${m.groesse} px`);
+      assert.equal(m.farbe, "rgb(79, 77, 72)", "Kurzwort in --t2 (hell), nicht in warn");
+      assert.ok(m.breite >= 15 + 35, `Störungsanzeige ${m.breite} px breit (Symbol + Wort)`);
+      assert.ok(m.notaus.left >= 0 && m.notaus.right <= m.fenster && m.notaus.width >= 80, "Notaus vollständig im Bild");
+      // Kurzwort hat leeren Alternativtext: Screenreader hören nur «Verbindung gestört», nicht zusätzlich «gestört»
+      const aria = await p.locator("#stoerung").ariaSnapshot();
+      // Keine eigene Live-Region mehr: angesagt wird der Wechsel über #ansage bzw. die Ansage des offenen Dialogs
+      assert.match(aria, /Verbindung gestört\s*$/, aria);
+      assert.doesNotMatch(aria, /status|gestört.*gestört/s, aria);
     } finally { await p.context().close(); }
   });
 

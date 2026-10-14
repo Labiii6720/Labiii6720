@@ -757,6 +757,40 @@ describe("Notaus über das Dashboard", () => {
   });
 });
 
+describe("POST /api/auftrag: Ablehnen ohne Hängen", () => {
+  it("Telegram antwortet nie: «nein» kommt innert 1 s zurück, der Auftrag ist abgelehnt, die Meldung folgt später", async () => {
+    const a = createAuftrag({ tool: "erinnerung", input: { zeit: new Date(Date.now() + 3_600_000).toISOString(), text: "x" }, stufe: "extern", summary: "Ablehnen ohne Telegram" });
+    a.messageId = 4242; // mit Freigabe-Nachricht: auch das Entfernen der Knöpfe darf nicht bremsen
+    const vorher = globalThis.fetch;
+    let freigeben!: () => void;
+    const haengt = new Promise<void>((r) => { freigeben = r; });
+    const haengende: string[] = [];
+    globalThis.fetch = (async (eingabe: string | URL | Request, init?: RequestInit) => {
+      const url = String(eingabe instanceof Request ? eingabe.url : eingabe);
+      if (url.startsWith("https://api.telegram.org/bot")) {
+        haengende.push(url.slice(url.lastIndexOf("/") + 1));
+        await haengt; // keine Antwort, bis der Test sie freigibt
+      }
+      return vorher(eingabe, init);
+    }) as typeof fetch;
+    try {
+      const start = Date.now();
+      const r = await rufe(dashboard.auftragAction, { body: { id: a.id, aktion: "nein" } });
+      assert.ok(Date.now() - start < 1000, `Antwort nach ${Date.now() - start} ms`);
+      assert.equal(r.statusCode, 200);
+      assert.deepEqual(r.body, { ok: true, text: `❌ #${a.id} abgelehnt.`, status: "abgelehnt" });
+      assert.equal(getAuftrag(a.id)?.status, "abgelehnt");
+      await ruhe();
+      assert.deepEqual(haengende.sort(), ["editMessageReplyMarkup", "sendMessage"], "beide Aufrufe laufen im Hintergrund");
+    } finally {
+      globalThis.fetch = vorher;
+      freigeben();
+    }
+    await ruhe();
+    assert.ok(telegram.includes(`❌ #${a.id} abgelehnt (Dashboard).`), "die Meldung kommt nach, sobald Telegram antwortet");
+  });
+});
+
 describe("POST /api/notfall", () => {
   it("ohne Bestätigung 400; mit Bestätigung ausgelöst, Audit quelle dashboard; zweiter Aufruf ohne zweiten Alarm", async () => {
     assert.equal((await rufe(dashboard.notfallAusloesen, { body: {} })).statusCode, 400);
@@ -892,6 +926,22 @@ describe("server.ts: Routen der Kommandozentrale über HTTP", () => {
       assert.equal(r.status, 200, pfad);
       assert.match(String(r.kopf["content-security-policy"]), /^default-src 'none'; script-src 'self'; style-src 'self';/);
     }
+  });
+
+  it("OPTIONS über den Tunnel: 404 ohne Allow-Kopf (Routen nicht aufzählbar)", async () => {
+    for (const pfad of ["/dashboard", "/dashboard/app.js", "/status.json", "/api/zeitplaene", "/api/zeitplaene/1", "/api/notfall", "/gesture"]) {
+      for (const tunnel of [{ "cf-ray": "8a1b2c3d4e5f-ZRH" }, { "cf-connecting-ip": "203.0.113.7" }] as Record<string, string>[]) {
+        const r = await http("OPTIONS", pfad, tunnel);
+        assert.equal(r.status, 404, `OPTIONS ${pfad}`);
+        assert.equal(r.kopf.allow, undefined, `OPTIONS ${pfad}`);
+      }
+    }
+    // Die Konsole (EVENTS_VIA_TUNNEL aus): auch GET über den Tunnel 404, aus dem Heimnetz erreichbar
+    assert.equal((await http("GET", "/gesture", { "cf-ray": "8a1b2c3d4e5f-ZRH" })).status, 404);
+    assert.equal((await http("GET", "/gesture")).status, 200);
+    // Aus dem Heimnetz antwortet der Router wie bisher (keine Daten, nur die Methoden)
+    assert.equal((await http("OPTIONS", "/api/zeitplaene")).status, 200);
+    assert.equal((await http("OPTIONS", "/gesture")).status, 200);
   });
 
   it("Ablauf: anlegen über HTTP, Prüfung 400, dann Notfall → 423 überall, Ausnahmen offen", async () => {

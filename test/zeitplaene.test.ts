@@ -195,3 +195,25 @@ describe("naechsterLauf an der Rückstellung auf Winterzeit", () => {
     }
   });
 });
+
+describe("von Hand beschädigte Einträge", () => {
+  type Zeitplan = Parameters<typeof faelligIm>[0];
+  const ohneTage = { id: 7, name: "Ohne Tage", zeit: "08:30", auftrag: "x" } as unknown as Zeitplan;
+  const ohneZeit = { id: 8, name: "Ohne Zeit", tage: "taeglich", auftrag: "x" } as unknown as Zeitplan;
+  const zahlen = { id: 9, name: "Zahlen", zeit: 830, tage: 1, auftrag: "x" } as unknown as Zeitplan;
+
+  it("ohne tage oder zeit: nie fällig, kein nächster Lauf, kein Absturz", () => {
+    for (const z of [ohneTage, ohneZeit, zahlen]) {
+      assert.doesNotThrow(() => faelltAn(z, sa(8, 30)), z.name);
+      assert.equal(faelltAn(z, sa(8, 30)), false, z.name);
+      assert.equal(faelligIm(z, sa(8, 45), 60), false, z.name);
+      assert.equal(naechsterLauf(z, sa(8, 0), 60), undefined, z.name);
+    }
+  });
+
+  it("mit Anlagedatum (heuteZuSpaetAngelegt) ebenso ohne Absturz", () => {
+    const z = { ...ohneZeit, angelegt: sa(7, 0).toISOString() } as Zeitplan;
+    assert.equal(faelligIm(z, sa(8, 45), 60), false);
+    assert.equal(naechsterLauf(z, sa(8, 0), 0), undefined);
+  });
+});

@@ -94,6 +94,24 @@ describe("wachen.json: weitere Fälle (frischer Import im eigenen Ordner)", () =
     assert.throws(() => mod.saveWachen(), /unlesbar/);
   });
 
+  for (const [name, eintrag] of [["null", "null"], ["Zahl", "5"], ["Text", '"x"'], ["Liste", "[]"]] as const) {
+    it(`Eintrag ${name} statt Objekt: Import gelingt, Sperre mit Sicherung, nichts gespeichert`, async () => {
+      let dir = "";
+      const inhalt = `[{"id": 1, "kamera": "x", "frage": "f", "alle_minuten": 30}, ${eintrag}]`;
+      const { mod, fehler: f } = await ladeIn((d) => {
+        dir = d;
+        mkdirSync(join(d, "data"));
+        writeFileSync(join(d, "data", "wachen.json"), inhalt);
+      });
+      assert.equal(mod.wachenNichtGeladen, true);
+      assert.equal(mod.dynamicWachen.length, 0);
+      assert.ok(f.some((x) => x.includes("Wachen unlesbar")));
+      assert.equal(readFileSync(join(dir, "data", "wachen.json.defekt"), "utf8"), inhalt);
+      assert.ok(!existsSync(join(dir, "data", "state.json")), "beim Import wird kein Zustand geschrieben");
+      assert.throws(() => mod.saveWachen(), /unlesbar/);
+    });
+  }
+
   it("ohne Leserechte: Sperre ohne Sicherung", { skip: process.getuid?.() === 0 ? "als root immer lesbar" : false }, async () => {
     const { mod } = await ladeIn((dir) => {
       mkdirSync(join(dir, "data"));

@@ -52,6 +52,17 @@ export function notfallSperre(_req: Request, res: Response, next: NextFunction):
 /** Text für Audit-Einträge: Auftragstexte und Fragen nur gekürzt (sie können Inhalte tragen). */
 const kurz = (t: unknown, n = 120): string => schwaerze(String(t ?? "")).slice(0, n);
 
+/**
+ * Von Hand bearbeitete data/zeitplaene.json: ladeListe prüft die Einträge nicht. Fehlt «tage» oder «zeit», darf das
+ * Dashboard nicht mit 500 ausfallen (sonst «Verbindung gestört» samt Notaus-Anzeige); der Eintrag erscheint ohne nächsten Lauf.
+ */
+const tageAnzeige = (tage: unknown): string => (typeof tage === "string" ? (normaleTage(tage) ?? tage) : "");
+const zeitAnzeige = (zeit: unknown): string => (typeof zeit === "string" ? zeit : "");
+/** Dasselbe für von Hand bearbeitete Wachen (data/wachen.json, cameras.json): fehlt «frage», kein 500. */
+const frageAnzeige = (frage: unknown): string => (typeof frage === "string" ? frage : "");
+const naechsterLaufSicher = (z: Zeitplan, jetzt: Date): Date | undefined =>
+  typeof z.zeit === "string" && typeof z.tage === "string" ? naechsterLauf(z, jetzt, config.zeitplanNachholenMin) : undefined;
+
 export function statusJson(_req: Request, res: Response): void {
   // Im Notfall nur der Zustand: keine Rechnungen, Ziele, Werte, Auftrags- oder Vorgangstexte, Kameras.
   // Leere Listen statt fehlender Felder, damit das Dashboard weiter rendert und nur «NOTFALL» zeigt.
@@ -92,8 +103,8 @@ export function statusJson(_req: Request, res: Response): void {
     zeitplaeneUnlesbar: zeitplaeneNichtGeladen,
     vorgaengeUnlesbar: vorgaengeNichtGeladen,
     vorgaenge: vorgaenge.slice(-8).map((v) => ({ id: v.id, status: v.status, steps: v.steps, auftrag: v.auftrag.slice(0, 90) })),
-    zeitplaene: zeitplaene.map((z) => ({ id: z.id, name: z.name, zeit: z.zeit, tage: normaleTage(z.tage) ?? z.tage })),
-    wachen: allWachen().map((w) => ({ kamera: w.kamera, frage: w.frage.slice(0, 80), alle_minuten: w.alle_minuten })),
+    zeitplaene: zeitplaene.map((z) => ({ id: z.id, name: z.name, zeit: zeitAnzeige(z.zeit), tage: tageAnzeige(z.tage) })),
+    wachen: allWachen().map((w) => ({ kamera: w.kamera, frage: frageAnzeige(w.frage).slice(0, 80), alle_minuten: w.alle_minuten })),
     kameras: Object.entries(cameras).map(([k, c]) => ({ name: k, beschreibung: c.beschreibung })),
     protokolle: Object.entries(protokolle).map(([k, p]) => ({ name: k, beschreibung: p.beschreibung, stufe: p.stufe })),
     ziele: profil.ziele.filter((z) => z.status === "offen").map((z) => ({ id: z.id, text: z.text, frist: z.frist })),
@@ -155,6 +166,8 @@ export async function kameraBild(req: Request, res: Response): Promise<void> {
   if (!cameras[name]) return void res.status(404).end();
   try {
     const img = await snapshot(name, 480);
+    // Kam der Notfall während des Abrufs (Frigate, mit Wiederholungen Sekunden), bleibt das Bild hier
+    if (notfallAktiv()) return void res.status(423).json(NOTFALL_GESPERRT);
     res.set("Content-Type", "image/jpeg").set("Cache-Control", "no-store").send(img);
   } catch (e) {
     // Fehlertexte von fetch enthalten die URL samt Zugangsdaten (FRIGATE_URL mit user:pw@)
@@ -195,12 +208,17 @@ export function auditTail(_req: Request, res: Response): void {
 export async function protokollAction(req: Request, res: Response): Promise<void> {
   const name = String((req.body ?? {}).name ?? "");
   const p = protokolle[name];
-  if (!p) return void res.status(404).json({ ok: false, error: "Protokoll unbekannt" });
+  if (!p) return void res.status(404).json({ ok: false, error: "nicht_gefunden", text: "Dieses Protokoll gibt es nicht, Sir." });
+  // Text im Feld `text` (wie überall): das Dashboard zeigt ihn an. Ohne ihn meldete es bei 423 fest einen Notfall,
+  // auch wenn nur der Notaus aktiv ist (dann gilt «Weiter mit PIN» bzw. /weiter, nicht /entwarnung).
   const gesperrt = protokollGesperrt();
-  if (gesperrt) return void res.status(423).json({ ok: false, error: gesperrt });
+  if (gesperrt) return void res.status(423).json({ ok: false, error: notfallAktiv() ? "notfall" : "pausiert", text: gesperrt });
   if (p.stufe === "auto") {
     const out = await runProtokoll(name, hooks);
     audit("protokoll", { name, quelle: "dashboard" });
+    // Wie beim Kamerabild und den Geräten: kam der Notfall während des Laufs, bleiben die Ergebniszeilen
+    // (erste Ausgabezeilen der Werkzeuge, z. B. Zustände aus Home Assistant) hier
+    if (notfallAktiv()) return void res.status(423).json(NOTFALL_GESPERRT);
     return void res.json({ ok: true, text: out });
   }
   const a = createAuftrag({ tool: "protokoll_ausfuehren", input: { name }, stufe: p.stufe, summary: `Protokoll «${name}»: ${p.beschreibung}` });
@@ -213,8 +231,12 @@ export async function geraete(req: Request, res: Response): Promise<void> {
   if (notfallAktiv()) return void res.status(423).json(NOTFALL_GESPERRT);
   if (!config.homeAssistant) return void res.json({ ok: true, text: "Home Assistant nicht eingerichtet." });
   try {
-    res.json({ ok: true, text: await haStates(req.query.filter ? String(req.query.filter) : undefined) });
+    const text = await haStates(req.query.filter ? String(req.query.filter) : undefined);
+    // Wie beim Kamerabild: ein während des Abrufs ausgelöster Notfall sperrt auch diese Antwort
+    if (notfallAktiv()) return void res.status(423).json(NOTFALL_GESPERRT);
+    res.json({ ok: true, text });
   } catch (e) {
+    if (notfallAktiv()) return void res.status(423).json(NOTFALL_GESPERRT);
     res.json({ ok: false, text: schwaerze(e instanceof Error ? e.message : String(e)) });
   }
 }
@@ -295,8 +317,8 @@ function zuruecksetzen<T extends object>(ziel: T, alt: T): void {
 const pfadId = (req: Request): number | undefined => (/^\d{1,9}$/.test(String(req.params.id ?? "")) ? Number(req.params.id) : undefined);
 
 const zeitplanJson = (z: Zeitplan, jetzt: Date) => {
-  const n = naechsterLauf(z, jetzt, config.zeitplanNachholenMin);
-  return { id: z.id, name: z.name, zeit: z.zeit, tage: normaleTage(z.tage) ?? z.tage, auftrag: z.auftrag, ...(z.lastRun ? { lastRun: z.lastRun } : {}), ...(z.angelegt ? { angelegt: z.angelegt } : {}), ...(n ? { naechsterLauf: n.toISOString() } : {}) };
+  const n = naechsterLaufSicher(z, jetzt);
+  return { id: z.id, name: z.name, zeit: zeitAnzeige(z.zeit), tage: tageAnzeige(z.tage), auftrag: z.auftrag, ...(z.lastRun ? { lastRun: z.lastRun } : {}), ...(z.angelegt ? { angelegt: z.angelegt } : {}), ...(n ? { naechsterLauf: n.toISOString() } : {}) };
 };
 
 const zeitplanAudit = (z: Zeitplan) => ({ id: z.id, name: kurz(z.name, 60), zeit: z.zeit, tage: z.tage, auftrag: kurz(z.auftrag), quelle: "dashboard" });
@@ -345,7 +367,7 @@ export function zeitplanAendern(req: Request, res: Response): void {
   if (!p.ok) return void res.status(400).json({ ok: false, error: "pruefung", fehler: p.fehler });
   const jetzt = _dashboardUhr.jetzt();
   // Gespeicherte Tage normalisiert vergleichen: «So, sa» und «sa,so» sind derselbe Termin
-  const termin = p.wert.zeit !== z.zeit || p.wert.tage !== (normaleTage(z.tage) ?? z.tage);
+  const termin = p.wert.zeit !== z.zeit || p.wert.tage !== tageAnzeige(z.tage);
   const alt = { ...z };
   Object.assign(z, p.wert);
   // Wie beim Anlegen: eine heute schon vergangene neue Uhrzeit wird nicht sofort nachgeholt (faelligIm: heute zu spät
@@ -380,8 +402,8 @@ export function zeitplanLoeschen(req: Request, res: Response): void {
 
 const wacheJson = (w: Wache) =>
   w.id === undefined
-    ? { kamera: w.kamera, frage: w.frage, alle_minuten: w.alle_minuten, nur_wenn: w.nur_wenn ?? "immer", ...(w.ruhe_minuten !== undefined ? { ruhe_minuten: w.ruhe_minuten } : {}), quelle: "cameras.json", bearbeitbar: false }
-    : { id: w.id, kamera: w.kamera, frage: w.frage, alle_minuten: w.alle_minuten, nur_wenn: w.nur_wenn ?? "immer", ...(w.ruhe_minuten !== undefined ? { ruhe_minuten: w.ruhe_minuten } : {}), quelle: w.quelle ?? "chat", bearbeitbar: true };
+    ? { kamera: w.kamera, frage: frageAnzeige(w.frage), alle_minuten: w.alle_minuten, nur_wenn: w.nur_wenn ?? "immer", ...(w.ruhe_minuten !== undefined ? { ruhe_minuten: w.ruhe_minuten } : {}), quelle: "cameras.json", bearbeitbar: false }
+    : { id: w.id, kamera: w.kamera, frage: frageAnzeige(w.frage), alle_minuten: w.alle_minuten, nur_wenn: w.nur_wenn ?? "immer", ...(w.ruhe_minuten !== undefined ? { ruhe_minuten: w.ruhe_minuten } : {}), quelle: w.quelle ?? "chat", bearbeitbar: true };
 
 const wacheAudit = (w: Wache) => ({ id: w.id, kamera: kurz(w.kamera, 60), alle_minuten: w.alle_minuten, nur_wenn: w.nur_wenn ?? "immer", frage: kurz(w.frage), quelle: "dashboard" });
 

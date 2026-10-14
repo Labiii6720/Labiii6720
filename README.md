@@ -581,7 +581,7 @@ Das Dashboard aus dem Reel, unter `http://JARVIS-IP:3000/dashboard` (nur Heimnet
 
 **Oben** stehen Status (bereit, pausiert oder Notfall, immer mit Symbol und Wort), der Modus (Normal, Fokus, Nacht), die Uhr, das Thema, Notaus und Abmelden. Darunter die Bereiche als Reiter, auf dem Handy seitlich wischbar, jeder mit eigener Adresse (`#uebersicht`, `#freigaben` …):
 
-- **Übersicht:** Kacheln für offene Aufträge, Kosten heute und im Monat (mit Mini-Verlauf der letzten 14 Tage), offene Rechnungen je Währung und «x von y Anbindungen in Ordnung». Darunter die offenen Aufträge zum Freigeben oder Ablehnen; sensible öffnen einen PIN-Dialog. Ein Auftrag, der gerade läuft, steht als «läuft …» ohne Knöpfe da. Dazu die Gesundheit der Anbindungen («seit 12 Min»), Ziele mit Frist, laufende Vorgänge und die nächsten Zeitpläne.
+- **Übersicht:** Kacheln für offene Aufträge, Kosten heute und im Monat (mit Mini-Verlauf der letzten 14 Tage), offene Rechnungen je Währung und «x von y Anbindungen in Ordnung». Darunter die offenen Aufträge zum Freigeben oder Ablehnen; sensible öffnen einen PIN-Dialog. Ein Auftrag, der gerade läuft, steht als «läuft …» ohne Knöpfe da. Dazu die Gesundheit der Anbindungen («seit 12 Min»), Ziele mit Frist, laufende Vorgänge und die nächsten Zeitpläne. Die Protokolle startest du hier per «Ausführen»; im Notaus sind die Knöpfe gesperrt (Hinweis «Im Notaus laufen keine Protokolle»), erst «Weiter» mit PIN gibt sie frei. Lehnt der Dienst trotzdem ab (Notaus kam eben über Telegram), sagt die Meldung «pausiert (Notaus)» und `/weiter`, nicht Notfall.
 - **Freigaben:** die Historie aus `GET /api/auftraege` (die letzten 200 Aufträge), filterbar nach Status und Stufe, das Ergebnis aufklappbar, auf dem Handy als Karten. Den Inhalt eines Auftrags (`input`, also Mailtexte, Pfade, Dateiinhalte) gibt die API nie heraus, nur Zusammenfassung und gekürztes, geschwärztes Ergebnis.
 - **Kosten:** Monat, heute, Aufrufe und Cache-Anteil, ein Säulendiagramm «Kosten pro Tag» über 7, 30 oder 90 Tage und die Token-Aufteilung, aus `data/usage.json` über `GET /api/kosten`. Das sind **Schätzungen** nach den Preisen in der `.env` (`PREIS_INPUT` usw.), keine Rechnung von Anthropic. Massgebend bleibt die Abrechnung in der Anthropic-Konsole.
 - **Finanzen:** offen, überfällig, fällig in 7 Tagen, bezahlt letzte Woche, ein Diagramm «Bezahlt und offen pro Monat» (sechs Monate, Hauptwährung; weitere Währungen in der Tabelle; die Anzahl bezahlt/offen gilt je Währung, `anzahlJe` in der API) und die Listen «Überfällig» und «Fällig in 7 Tagen». Quelle ist `GET /api/finanzen`, dieselbe Übersicht wie `/finanzen` in Telegram. **Keine IBAN und keine Referenz** im Dashboard; Zahlungen bereitet Jarvis nur vor, auslösen tust du sie in der Bank-App.
@@ -591,7 +591,7 @@ Das Dashboard aus dem Reel, unter `http://JARVIS-IP:3000/dashboard` (nur Heimnet
 - **Protokoll:** das Audit-Protokoll als lesbare Zeilen (Zeit, Ereignis, Kurzinfo, geschwärzt), filterbar nach Ereignis.
 - **Sicherheit:** Notaus, Weiter, Notfall auslösen.
 
-Jedes Diagramm hat eine Tabellenansicht und Tooltips auch per Tastatur. Die Seite fragt den Status alle 5 s ab, einen Bereich beim Öffnen und dann jede Minute, und pausiert, solange der Tab im Hintergrund liegt. Fällt die Verbindung aus, bleibt die letzte Ansicht gedimmt stehen, mit dem Hinweis «Verbindung gestört».
+Jedes Diagramm hat eine Tabellenansicht und Tooltips auch per Tastatur. Die Seite fragt den Status alle 5 s ab, einen Bereich beim Öffnen und dann jede Minute, und pausiert, solange der Tab im Hintergrund liegt. Fällt die Verbindung aus, bleibt die letzte Ansicht gedimmt stehen, mit dem Hinweis «Verbindung gestört». Screenreader hören den Wechsel einmal («Verbindung gestört, Sir.» bzw. «Verbindung wieder da, Sir.»), auch bei offenem Dialog.
 
 ### Zeitpläne und Wachen bearbeiten
 
@@ -600,7 +600,7 @@ Im Chat legt Jarvis einen Zeitplan oder eine Wache nur als Auftrag an, der auf d
 Der Server prüft dieselben Regeln wie das Werkzeug im Chat, die Fehlermeldung steht direkt am Feld:
 
 - **Zeitplan:** Name 1 bis 60 Zeichen, Uhrzeit `HH:MM` (00:00 bis 23:59), Tage `täglich`, `werktags` oder Wochentage (`mo,mi,fr`, ohne Doppel), Auftrag 1 bis 2000 Zeichen. Eine heute schon vergangene Uhrzeit holt Jarvis nach dem Anlegen oder Ändern nicht sofort nach; der erste Lauf ist der nächste reguläre. Die Liste zeigt je Zeitplan den nächsten Lauf, die Übersicht die nächsten drei unter «Als Nächstes».
-- **Wache:** Kamera aus deiner `cameras.json`, Frage 1 bis 300 Zeichen, alle 5 bis 1440 Minuten, Bedingung immer, abwesend oder nacht, Ruhezeit nach einer Meldung 0 bis 1440 Minuten. Wachen aus `cameras.json` stehen nur lesend mit Vermerk da; die änderst du in der Datei.
+- **Wache:** Kamera aus deiner `cameras.json`, Frage 1 bis 300 Zeichen, alle 5 bis 1440 Minuten, Bedingung immer, abwesend oder nacht, Ruhezeit nach einer Meldung 0 bis 1440 Minuten. Wachen aus `cameras.json` stehen nur lesend mit Vermerk da (auch mit einem dorthin kopierten `id`); die änderst du in der Datei.
 
 **Datensparsamkeit bei Wachen:** Eine Wache schickt regelmässig ein Standbild der Kamera an die Claude-API (Haiku). Die Seite sagt das beim Anlegen. Richte Wachen nur dort ein, wo du das willst, und lieber selten als minütlich.
 

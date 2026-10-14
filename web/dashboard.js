@@ -7,7 +7,7 @@
    ========================================================================= */
 (() => {
   const TZ = "Europe/Zurich";
-  const MIN = 60000, STD = 3600000, TAG = 86400000;
+  const MIN = 60000, STD = 3600000;
   const $ = (id) => document.getElementById(id);
 
   /* ---------- Speicher: im privaten Modus kann jeder Zugriff werfen ---------- */
@@ -58,6 +58,9 @@
     return Number.isNaN(d.getTime()) ? null : d;
   }
   const isoTag = (d) => d.toLocaleDateString("sv-SE", { timeZone: TZ });
+  /** Kalendertag n Tage neben «YYYY-MM-DD» – nicht ±24 h: an den Umstellungstagen hat ein Tag 23 oder 25 Stunden */
+  const nachbar = (iso, n) => { const [j, m, t] = iso.split("-").map(Number); return new Date(Date.UTC(j, m - 1, t + n, 12)).toISOString().slice(0, 10); };
+  const heuteTag = () => isoTag(jetzt());
   const datum = (x) => { const d = alsDatum(x); return d ? d.toLocaleDateString("de-CH", { timeZone: TZ, day: "2-digit", month: "2-digit", year: "numeric" }) : String(x ?? ""); };
   const datumKurz = (x) => { const d = alsDatum(x); return d ? d.toLocaleDateString("de-CH", { timeZone: TZ, day: "2-digit", month: "2-digit" }).replace(/\.?$/, ".") : ""; };
   const zeit = (x) => { const d = alsDatum(x); return d ? d.toLocaleTimeString("de-CH", { timeZone: TZ, hour: "2-digit", minute: "2-digit" }) : "–"; };
@@ -77,7 +80,7 @@
   const ZAHLWORT = ["Nichts", "Eine Sache", "Zwei Dinge", "Drei Dinge", "Vier Dinge", "Fünf Dinge"];
   function tagName(x) {
     const d = alsDatum(x); if (!d) return "Unbekannt";
-    const t = isoTag(d), heute = isoTag(jetzt()), gestern = isoTag(new Date(jetzt() - TAG));
+    const t = isoTag(d), heute = heuteTag(), gestern = nachbar(heute, -1);
     if (t === heute) return "Heute · " + datum(t);
     if (t === gestern) return "Gestern · " + datum(t);
     return alsDatum(t).toLocaleDateString("de-CH", { timeZone: TZ, weekday: "long" }) + " · " + datum(t);
@@ -85,7 +88,7 @@
   /** «heute», «morgen» oder «Sa 17.10.» für einen kommenden Zeitpunkt */
   function wannTag(x) {
     const d = alsDatum(x); if (!d) return "–";
-    const t = isoTag(d), heute = isoTag(jetzt()), morgen = isoTag(new Date(jetzt().getTime() + TAG));
+    const t = isoTag(d), heute = heuteTag(), morgen = nachbar(heute, 1);
     if (t === heute) return "heute";
     if (t === morgen) return "morgen";
     return d.toLocaleDateString("de-CH", { timeZone: TZ, weekday: "short" }).replace(".", "") + " " + datumKurz(d);
@@ -112,8 +115,13 @@
     const headers = { Authorization: "Bearer " + token, Accept: opt.bild ? "image/jpeg" : "application/json" };
     const init = { method: opt.methode || "GET", headers, cache: "no-store", credentials: "omit" };
     if (opt.body !== undefined) { headers["Content-Type"] = "application/json"; init.body = JSON.stringify(opt.body); }
+    // Zeitlimit: eine angenommene, nie beantwortete Anfrage (WLAN-Wechsel, alter Socket) hielte sonst den Status-Takt an.
+    // Lesen 15 s; Aktionen warten serverseitig länger (Telegram-Versand mit Wiederholung), Gespräch bis 60 s → opt.frist.
+    const frist = opt.frist ?? (init.method === "GET" ? 15000 : 120000);
+    if (typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function") init.signal = AbortSignal.timeout(frist);
     let res;
-    try { res = await fetch(pfad, init); } catch { return { status: 0, daten: null }; }
+    // Zeitlimit getrennt vom Netzfehler: eine lange Aktion (Slicer, Upload) läuft im Dienst weiter, er ist nicht weg
+    try { res = await fetch(pfad, init); } catch (e) { return { status: 0, daten: null, zeitlimit: Boolean(e && e.name === "TimeoutError") }; }
     // Kamerabild: als Blob (der Token geht nur als Header mit, deshalb kein <img src> auf die API)
     if (opt.bild && res.ok) { try { return { status: res.status, daten: null, bild: await res.blob() }; } catch { return { status: 0, daten: null }; } }
     let daten = null;
@@ -121,8 +129,10 @@
     if (res.status === 401 && angemeldet) abgewiesen();
     return { status: res.status, daten };
   }
-  function fehlerText(r, rueckfall) {
+  /** lang: Text für ein abgelaufenes Zeitlimit (die Aktion läuft im Dienst weiter) */
+  function fehlerText(r, rueckfall, lang) {
     if (r.daten && typeof r.daten.text === "string" && r.daten.text) return ohneSymbol(r.daten.text);
+    if (r.status === 0 && r.zeitlimit) return lang || "Das dauert länger, Sir. Es läuft weiter; den Stand sehen Sie gleich hier.";
     if (r.status === 0) return "Ich erreiche den Dienst nicht, Sir.";
     if (r.status === 423) return "Im Notfall gesperrt, Sir. Erst /entwarnung in Telegram.";
     return (rueckfall || "Das hat nicht geklappt") + " (HTTP " + r.status + "), Sir.";
@@ -148,22 +158,30 @@
   const Q = { status: null };
   const fehler = { status: false, quellen: new Set() };
   const inArbeit = new Set();
+  /** Steigt bei jedem Leeren: Antworten auf vorher gestartete Abfragen füllen den Speicher nicht wieder */
+  let quellenGen = 0;
   let aktuell = "uebersicht";
   let letzteSig = {};
 
-  /** Alle Inhalte aus dem Speicher: Quellen, Kamerabilder, Gesprächsverlauf (Notfall, Entwarnung, Abmelden) */
+  /** Alle Inhalte aus dem Speicher: Quellen, Kamerabilder, Gesprächsverlauf, letzte Ansage und Toast (Notfall, Entwarnung, Abmelden) */
   function leereQuellen() {
+    quellenGen++;
     for (const k of Object.keys(QUELLEN)) delete Q[k];
     fehler.quellen.clear();
     letzteSig = {};
     bilderLeeren();
     gespraech.verlauf = []; gespraech.laeuft = false; gespraech.entwurf = ""; gespraech.gen++;
+    rueckmeldungLeeren();
+    // Verborgene Bereiche behalten sonst ihren letzten Aufbau (etwa den Gesprächsverlauf); der sichtbare zeichnet gleich neu
+    for (const k of Object.keys(BEREICHE)) if (k !== aktuell) V(k).replaceChildren();
   }
 
   async function holeQuelle(name) {
     const pfad = pfadVon(name);
+    const gen = quellenGen;
     const r = await api(pfad);
-    if (!angemeldet) return;
+    // Abgemeldet, inzwischen geleert (Notfall, Entwarnung) oder im Notfall: die Antwort kommt nicht mehr in den Speicher
+    if (!angemeldet || gen !== quellenGen || (Q.status && Q.status.notfall)) return;
     if (pfadVon(name) !== pfad) return; // Zeitraum inzwischen gewechselt: alte Antwort verwerfen
     if (r.status === 200 && r.daten && r.daten.ok) { Q[name] = { daten: r.daten }; fehler.quellen.delete(name); }
     else if (r.status === 0 || (r.status >= 500 && r.status !== 503)) fehler.quellen.add(name);
@@ -228,13 +246,20 @@
   document.addEventListener("visibilitychange", () => { if (document.hidden) stopp(); else if (angemeldet) zyklen(); });
 
   let stoerungAn = false;
-  function stoerungZeigen() {
+  /**
+   * Störungsanzeige im Kopf; jeder Wechsel wird hörbar angesagt (ansageAktiv: auch bei offenem Dialog, der den Kopf inert macht).
+   * nurBereich: der Wechsel kommt nur vom Bereichswechsel (die gestörte Quelle ist nicht mehr sichtbar) – dann kein «wieder da».
+   */
+  function stoerungZeigen(nurBereich) {
     const namen = sichtbareQuellen();
     const an = fehler.status || [...fehler.quellen].some((q) => namen.has(q));
-    if (an === stoerungAn) return; // nur Wechsel anfassen: kein Flackern
+    if (an === stoerungAn) return; // nur Wechsel anfassen: kein Flackern, beim Start kein falsches «wieder da»
     stoerungAn = an;
     $("stoerung").hidden = !an;
     $("main").classList.toggle("halten", an);
+    // Abgemeldet (Token weg) oder nur der Bereich gewechselt: nichts ansagen
+    if (!token || (!an && nurBereich)) return;
+    ansageAktiv(an ? "Verbindung gestört, Sir. Ich zeige den letzten Stand." : "Verbindung wieder da, Sir.");
   }
 
   /* ---------- Anmelden und Abmelden ---------- */
@@ -372,10 +397,26 @@
     }
     return null;
   }
+  /**
+   * Ersatz für den Auslöser eines Dialogs, beim Öffnen gemerkt: erst die Nachbarn in seiner Karte, dann die übrigen im Bereich,
+   * die nächsten zuerst (bei Gleichstand der vorherige). Greift, wenn der Auslöser beim Schliessen gesperrt oder weg ist.
+   */
+  function dialogErsatz(el) {
+    if (!(el instanceof Element)) return [];
+    const keys = ersatzSchluessel(el);
+    const view = el.closest(".view");
+    if (view) {
+      const alle = [...view.querySelectorAll(FOKUSSIERBAR)];
+      const i = alle.indexOf(el);
+      if (i >= 0) for (let n = 1; n < alle.length; n++) for (const x of [alle[i - n], alle[i + n]]) if (x) keys.push(schluessel(x));
+    }
+    return [...new Set(keys.filter(Boolean))];
+  }
   function zeigeDialog(d, fokus) {
     const vorher = document.activeElement;
     d._vorher = vorher;
     d._vorherKey = schluessel(vorher);
+    d._ersatz = dialogErsatz(vorher);
     d.returnValue = "";
     d.showModal();
     toastNachOben();
@@ -383,10 +424,17 @@
   }
   document.querySelectorAll("dialog").forEach((d) => d.addEventListener("close", () => {
     const v = d._vorher;
-    d._vorher = null;
+    const ersatz = d._ersatz || [];
+    d._vorher = null; d._ersatz = null;
     if (!angemeldet && d.id !== "dlgAnmelden") return;
     const ziel = v && v.isConnected && v.getClientRects().length ? v : findeSchluessel(document, d._vorherKey);
     if (ziel) ziel.focus({ preventScroll: true });
+    if (ziel && document.activeElement === ziel) return;
+    // Auslöser weg oder gesperrt (etwa «Mit PIN fortsetzen» nach dem Fortsetzen): Nachbar, sonst main – nie <body>
+    if (!angemeldet || d.id === "dlgAnmelden" || !(v instanceof Element) || v === document.body) return;
+    const nachbar = ersatz.map((k) => findeSchluessel(document, k)).find((el) => { if (!el) return false; el.focus({ preventScroll: true }); return document.activeElement === el; });
+    if (!nachbar) $("main").focus({ preventScroll: true });
+    insBild(nachbar || $("main"));
   }));
 
   function frage(titel, text, okText, gefahr) {
@@ -403,7 +451,10 @@
   }
 
   let pinSenden = null;
-  /** PIN-Dialog statt prompt(): senden(pin) liefert { fertig } oder { fehler } (Dialog bleibt offen). */
+  /**
+   * PIN-Dialog statt prompt(): senden(pin) liefert { fertig, meldung } oder { fehler } (Dialog bleibt offen).
+   * Die meldung kommt erst nach dem Schliessen: im offenen Dialog landete sie in seiner Ansage, die «close» gleich wieder leert.
+   */
   function pinAbfrage(o) {
     pinSenden = o.senden;
     $("pinTitel").textContent = o.titel || "PIN, bitte";
@@ -425,7 +476,11 @@
     const erg = pinSenden ? await pinSenden(pin) : { fertig: true };
     ok.disabled = false;
     feld.value = "";
-    if (erg.fertig) { $("dlgPin").close("ok"); return; }
+    if (erg.fertig) {
+      $("dlgPin").close("ok");
+      if (erg.meldung && angemeldet) toast(erg.meldung);
+      return;
+    }
     feldFehler($("pinGr"), erg.fehler || "Das hat nicht geklappt, Sir.");
     feld.focus();
   });
@@ -454,11 +509,40 @@
     dlgAnsage.set(d, a);
     d.addEventListener("close", () => { a.textContent = ""; });
   });
+  /** Hörbare Ansage: in die Live-Region des fokussierten bzw. obersten offenen Dialogs, ohne Dialog in #ansage */
+  function ansageAktiv(text) {
+    const offen = [...document.querySelectorAll("dialog[open]")];
+    const dlg = offen.find((d) => d.contains(document.activeElement)) || offen[offen.length - 1];
+    const a = dlg && dlgAnsage.get(dlg);
+    if (a) { a.textContent = ""; a.textContent = text; } else ansage(text);
+  }
   /** Holt einen sichtbaren Toast über das zuletzt geöffnete Modal */
   function toastNachOben() {
     if (!toastPopover || !toastEl.matches(":popover-open")) return;
     toastEl.hidePopover();
     toastEl.showPopover();
+    toastLage();
+  }
+  /**
+   * Lage des Toasts: unten Mitte (dashboard.css). Läge er dort über den Knöpfen oder dem Fokus des offenen Dialogs
+   * (auf dem Handy reicht der Dialog bis an den Rand), kommt er oben hin. Per CSSOM, CSP-konform.
+   */
+  function toastLage() {
+    const el = toastEl;
+    el.style.top = "auto"; el.style.bottom = "";
+    const offen = [...document.querySelectorAll("dialog[open]")];
+    const dlg = offen[offen.length - 1];
+    if (!dlg || !el.offsetHeight) return;
+    const b = el.offsetWidth, hh = el.offsetHeight;
+    const unten = parseFloat(getComputedStyle(el).bottom) || 24;
+    const t = { l: (innerWidth - b) / 2, r: (innerWidth + b) / 2, o: innerHeight - unten - hh - 8, u: innerHeight - unten + 8 };
+    const wichtig = [...dlg.querySelectorAll(".dlg-fuss button")];
+    if (dlg.contains(document.activeElement)) wichtig.push(document.activeElement);
+    const deckt = wichtig.some((x) => {
+      const r = x.getBoundingClientRect();
+      return r.width > 0 && r.left < t.r && r.right > t.l && r.top < t.u && r.bottom > t.o;
+    });
+    if (deckt) { el.style.top = "16px"; el.style.bottom = "auto"; }
   }
   let toastTimer = 0, toastWeg = 0;
   function toast(text) {
@@ -470,15 +554,21 @@
       el.showPopover();
       if (!el.classList.contains("an")) void el.offsetWidth; // Ausgangszustand setzen, damit das Einblenden animiert
     }
+    toastLage();
     el.classList.add("an");
-    const offen = [...document.querySelectorAll("dialog[open]")];
-    const dlg = offen.find((d) => d.contains(document.activeElement)) || offen[offen.length - 1];
-    const a = dlg && dlgAnsage.get(dlg);
-    if (a) { a.textContent = ""; a.textContent = text; } else ansage(text);
+    ansageAktiv(text);
     toastTimer = setTimeout(() => {
       el.classList.remove("an");
       if (toastPopover) toastWeg = setTimeout(() => { if (!el.classList.contains("an") && el.matches(":popover-open")) el.hidePopover(); }, 250);
     }, Math.min(8000, 3200 + text.length * 25));
+  }
+  /** Ansage und Toast leeren: ausgeblendet stünde der letzte Text (etwa eine Chat-Antwort) sonst weiter im DOM */
+  function rueckmeldungLeeren() {
+    clearTimeout(toastTimer); clearTimeout(toastWeg);
+    toastEl.classList.remove("an");
+    if (toastPopover && toastEl.matches(":popover-open")) toastEl.hidePopover();
+    toastEl.textContent = "";
+    $("ansage").textContent = "";
   }
 
   /* ---------- Bausteine ---------- */
@@ -719,7 +809,7 @@
     if (st.notfall) p.push({ k: "notfall", s: "krit", t: "Notfall aktiv", d: "Entwarnung nur per /entwarnung in Telegram", w: "Sicherheit", href: "#sicherheit" });
     for (const [feld, datei, w, href] of DATEIEN) if (st[feld]) p.push({ k: "datei:" + feld, s: "ernst", t: datei + " unlesbar", d: "Reparieren und Jarvis neu starten, Sir", w, href: href || "#uebersicht", ziel: href ? null : "vorgAnker" });
     for (const a of anbindungen().filter((x) => !x.ok)) p.push({ k: "anb:" + a.k, s: a.schwere, t: a.name + " " + a.wort, d: (a.auth ? "Zugang abgelehnt" : a.kurz || "Störung") + " · " + seit(a.seit), w: "Anbindungen", ziel: "anbAnker" });
-    const fd = Q.finanzen && Q.finanzen.daten;
+    const fd = !st.notfall && Q.finanzen && Q.finanzen.daten;
     if (fd && Array.isArray(fd.ueberfaellig) && fd.ueberfaellig.length) {
       const ue = fd.ueberfaellig; const summe = {};
       for (const r of ue) if (istZahl(r.betrag)) summe[r.waehrung] = (summe[r.waehrung] || 0) + r.betrag;
@@ -744,6 +834,11 @@
   };
   const wartende = () => offene().filter((a) => !a.gestartetAm);
 
+  /** Knopf während seiner Aktion: aria-disabled statt disabled – ein gesperrter Knopf verliert den Tastaturfokus (Aussehen wie .knopf[disabled]) */
+  function besetzt(el, an) {
+    if (an) { el.setAttribute("aria-disabled", "true"); el.style.opacity = ".45"; el.style.cursor = "not-allowed"; }
+    return el;
+  }
   function auftragKarte(a) {
     const meta = h("div", { class: "meta" }, stufeEl(a.stufe), h("span", { class: "mono", text: "#" + a.id }), h("span", { class: "mono", text: a.tool }), h("span", { text: vorZeit(a.seit) }));
     if (a.gestartetAm) {
@@ -753,10 +848,10 @@
     }
     const beschaeftigt = inArbeit.has(String(a.id));
     const sens = a.stufe === "sensibel";
-    const ok = h("button", { class: "knopf prim", type: "button", "data-aktion": "freigeben", "data-id": a.id, disabled: beschaeftigt, "aria-label": (sens ? "Auftrag #" + a.id + " mit PIN freigeben" : "Auftrag #" + a.id + " freigeben") },
+    const ok = h("button", { class: "knopf prim", type: "button", "data-aktion": "freigeben", "data-id": a.id, "aria-label": (sens ? "Auftrag #" + a.id + " mit PIN freigeben" : "Auftrag #" + a.id + " freigeben") },
       sens ? ikon("lock", true) : null, sens ? "Mit PIN freigeben" : "Freigeben");
-    const nein = h("button", { class: "knopf", type: "button", "data-aktion": "ablehnen", "data-id": a.id, disabled: beschaeftigt, "aria-label": "Auftrag #" + a.id + " ablehnen" }, "Ablehnen");
-    return h("article", { class: "auftrag" }, meta, h("div", { class: "was", text: a.summary }), h("div", { class: "aktion" }, nein, ok));
+    const nein = h("button", { class: "knopf", type: "button", "data-aktion": "ablehnen", "data-id": a.id, "aria-label": "Auftrag #" + a.id + " ablehnen" }, "Ablehnen");
+    return h("article", { class: "auftrag" }, meta, h("div", { class: "was", text: a.summary }), h("div", { class: "aktion" }, besetzt(nein, beschaeftigt), besetzt(ok, beschaeftigt)));
   }
 
   function anbKarte() {
@@ -863,11 +958,20 @@
     v.append(h("div", { class: "raster r-2 oben-ausr mt" }, zieleK, vorgK));
 
     const protos = Array.isArray(st.protokolle) ? st.protokolle : [];
+    // Im Notaus lehnt der Server jedes Protokoll ab (423): Knöpfe gesperrt (aria-disabled behält den Fokus), Grund sichtbar
+    const angehalten = Boolean(st.pausiert);
+    const sperrGrund = "Im Notaus laufen keine Protokolle, Sir. Erst «Weiter» mit PIN.";
+    const protoKnopf = (p) => {
+      const b = h("button", { class: "knopf", type: "button", "data-aktion": "protokoll", "data-name": p.name, "aria-label": "Protokoll " + p.name + " ausführen" }, "Ausführen");
+      if (angehalten) { b.title = sperrGrund; b.setAttribute("aria-description", sperrGrund); }
+      return besetzt(b, inArbeit.has("p:" + p.name) || angehalten);
+    };
     v.append(h("div", { class: "karte mt" }, h("h2", { class: "etikett" }, "Protokolle", h("span", { class: "rest t3", text: "laufen über die Freigabe" })),
+      protos.length > 0 && angehalten ? h("p", { class: "ruhig", text: sperrGrund }) : null,
       protos.length ? h("div", { class: "protos" }, protos.map((p) => h("div", { class: "proto" },
         h("div", { class: "kopfz" }, h("b", { text: p.name }), stufeEl(p.stufe)),
         h("p", { text: p.beschreibung }),
-        h("button", { class: "knopf", type: "button", "data-aktion": "protokoll", "data-name": p.name, disabled: inArbeit.has("p:" + p.name), "aria-label": "Protokoll " + p.name + " ausführen" }, "Ausführen"))))
+        protoKnopf(p))))
         : h("p", { class: "ruhig", text: "Keine Protokolle in protokolle.json." })));
   }
 
@@ -975,8 +1079,9 @@
   function wannLang(x) {
     const d = alsDatum(x); if (!d) return "–";
     const t = isoTag(d);
-    if (t === isoTag(jetzt())) return "heute " + zeit(d);
-    if (t === isoTag(new Date(jetzt() - TAG))) return "gestern " + zeit(d);
+    const heute = heuteTag();
+    if (t === heute) return "heute " + zeit(d);
+    if (t === nachbar(heute, -1)) return "gestern " + zeit(d);
     return datumKurz(d) + " " + zeit(d);
   }
 
@@ -1197,8 +1302,9 @@
   function zuletzt(x) {
     if (!x) return "noch nie gelaufen";
     if (/^\d{4}-\d{2}-\d{2}$/.test(x)) {
-      if (x === isoTag(jetzt())) return "zuletzt heute";
-      if (x === isoTag(new Date(jetzt() - TAG))) return "zuletzt gestern";
+      const heute = heuteTag();
+      if (x === heute) return "zuletzt heute";
+      if (x === nachbar(heute, -1)) return "zuletzt gestern";
       return "zuletzt " + datumKurz(x);
     }
     return "zuletzt " + wannLang(x);
@@ -1211,10 +1317,10 @@
   const kamerasListe = () => (Q.status && Array.isArray(Q.status.kameras) ? Q.status.kameras.map((k) => String(k.name)) : []);
   function knoepfe(art, id, name) {
     const wort = art === "plan" ? "Zeitplan " : "Wache ";
-    const besetzt = inArbeit.has(art + ":" + id);
+    const belegt = inArbeit.has(art + ":" + id);
     return h("div", { class: "akt" },
-      h("button", { class: "knopf leise", type: "button", "data-aktion": art + "-edit", "data-id": id, disabled: besetzt, "aria-label": wort + name + " bearbeiten" }, ikon("stift", true), h("span", { text: "Bearbeiten" })),
-      h("button", { class: "knopf leise", type: "button", "data-aktion": art + "-weg", "data-id": id, disabled: besetzt, "aria-label": wort + name + " löschen" }, ikon("weg", true), h("span", { text: "Löschen" })));
+      besetzt(h("button", { class: "knopf leise", type: "button", "data-aktion": art + "-edit", "data-id": id, "aria-label": wort + name + " bearbeiten" }, ikon("stift", true), h("span", { text: "Bearbeiten" })), belegt),
+      besetzt(h("button", { class: "knopf leise", type: "button", "data-aktion": art + "-weg", "data-id": id, "aria-label": wort + name + " löschen" }, ikon("weg", true), h("span", { text: "Löschen" })), belegt));
   }
   function renderZeitplaene(v) {
     v.append(kopf("zeitplaene", "Zeitpläne & Wachen", "Was ich regelmässig tue – und wo ich hinschaue."));
@@ -1320,10 +1426,14 @@
   /** Gemeinsame Antwortbehandlung für Zeitplan- und Wache-Formular */
   async function formularSenden(o) {
     const ok = $(o.knopf);
+    const hatteFokus = document.activeElement === ok;
     ok.disabled = true;
     const r = await api(o.pfad, { methode: o.methode, body: o.body });
     ok.disabled = false;
     if (!angemeldet) return;
+    // disabled hat dem Knopf den Fokus genommen: im offenen Dialog zurückgeben (sonst liegt er auf dem Dialog selbst)
+    const jetztFokus = document.activeElement;
+    if (hatteFokus && $(o.dialog).open && (!jetztFokus || jetztFokus === document.body || jetztFokus === $(o.dialog))) ok.focus();
     if ((r.status === 200 || r.status === 201) && r.daten && r.daten.ok) {
       $(o.dialog).close("ok");
       toast(o.erfolg(r.daten));
@@ -1494,7 +1604,7 @@
     const inp = h("input", { class: "feld", id: "chatIn", placeholder: "Sagen Sie es mir, Sir …", "aria-label": "Nachricht an Jarvis", autocomplete: "off", maxlength: 4000 });
     inp.value = g.entwurf;
     const form = h("form", { class: "eingabe", id: "chatForm" }, inp,
-      h("button", { class: "knopf prim", type: "submit", "aria-label": "Senden", disabled: g.laeuft }, ikon("senden", true), h("span", { class: "wort", text: "Senden" })));
+      h("button", { class: "knopf prim", type: "submit", id: "chatSenden", "aria-label": "Senden", disabled: g.laeuft }, ikon("senden", true), h("span", { class: "wort", text: "Senden" })));
     v.append(log, form);
   }
   function ansage(text) { const a = $("ansage"); a.textContent = ""; a.textContent = text; }
@@ -1505,8 +1615,12 @@
     const gen = g.gen;
     g.verlauf.push({ wer: "ich", text, zeit: jetzt().toISOString() });
     g.entwurf = ""; g.laeuft = true;
+    // «Senden» ist während der Antwort gesperrt und hält keinen Fokus (Tab+Enter, in Chromium auch ein Klick):
+    // der Fokus geht ins Eingabefeld, dort bleibt er über beide Neuaufbauten – nie auf <body>
+    const knopf = $("chatSenden");
+    if (knopf && document.activeElement === knopf && $("chatIn")) $("chatIn").focus({ preventScroll: true });
     rendern();
-    const r = await api("/api/chat", { methode: "POST", body: { text } });
+    const r = await api("/api/chat", { methode: "POST", body: { text }, frist: 75000 }); // der Server wartet bis 60 s
     if (!angemeldet || gen !== g.gen) return; // abgemeldet oder Notfall: nichts mehr anhängen
     g.laeuft = false;
     if (r.status === 200 && r.daten && r.daten.ok) {
@@ -1587,6 +1701,7 @@
     letzteSig[aktuell] = sig;
     const aktiv = document.activeElement;
     const fokusKey = v.contains(aktiv) ? schluessel(aktiv) : null;
+    const ersatz = fokusKey ? ersatzSchluessel(aktiv) : [];
     const auswahl = fokusKey && (aktiv instanceof HTMLInputElement || aktiv instanceof HTMLTextAreaElement) && aktiv.type !== "number" ? [aktiv.selectionStart, aktiv.selectionEnd] : null;
     const offenKeys = [...v.querySelectorAll("details[data-merk][open]")].map((d) => d.dataset.merk);
     v.querySelectorAll(".diagramm").forEach((el) => ro.unobserve(el));
@@ -1602,7 +1717,36 @@
     if (fokusKey) {
       const z = findeSchluessel(v, fokusKey);
       if (z) { z.focus({ preventScroll: true }); if (auswahl && typeof z.setSelectionRange === "function") try { z.setSelectionRange(auswahl[0], auswahl[1]); } catch { /* Feldtyp ohne Auswahl */ } }
+      // Element weg (Auftrag erledigt, Zeitplan gelöscht) oder nicht fokussierbar: Nachbar in derselben Karte, sonst main – nie <body>
+      if (!z || document.activeElement !== z) {
+        const ziel = ersatz.map((k) => findeSchluessel(v, k)).find((el) => { if (!el) return false; el.focus({ preventScroll: true }); return document.activeElement === el; });
+        if (!ziel) $("main").focus({ preventScroll: true });
+        // Der Nachbar liegt oft anderswo als das alte Element (und die Seite wurde kürzer): sichtbar machen, nie unter der Leiste
+        insBild(ziel || $("main"));
+      }
     }
+  }
+  /** Ersatz-Fokus ins Bild: liegt er (ganz oder teilweise) unter der Sticky-Leiste oder unterhalb, scrollt scroll-padding-top ihn frei */
+  function insBild(el) {
+    const kopf = document.querySelector("header.top");
+    const oben = kopf ? kopf.getBoundingClientRect().bottom : 0;
+    const r = el.getBoundingClientRect();
+    const passt = r.height <= innerHeight - oben;
+    // Grösser als der freie Platz (etwa main): nur holen, wenn nichts davon zu sehen ist
+    const aussen = passt ? r.top < oben || r.bottom > innerHeight : r.bottom <= oben || r.top >= innerHeight;
+    if (aussen) el.scrollIntoView({ block: "nearest" });
+  }
+  const FOKUSSIERBAR = "a[href], button, select, input, textarea, summary, [tabindex]";
+  /** Schlüssel der Nachbarn von el in seiner Karte (erst die folgenden, dann die vorherigen), zuletzt der Anker der Karte */
+  function ersatzSchluessel(el) {
+    const karte = el.closest(".karte") || el.closest(".view");
+    if (!karte) return [];
+    const alle = [...karte.querySelectorAll(FOKUSSIERBAR)].filter((x) => x !== el);
+    const nach = alle.filter((x) => el.compareDocumentPosition(x) & Node.DOCUMENT_POSITION_FOLLOWING);
+    const vor = alle.filter((x) => el.compareDocumentPosition(x) & Node.DOCUMENT_POSITION_PRECEDING).reverse();
+    const keys = [...nach, ...vor].map(schluessel);
+    if (karte.id && karte.getAttribute("tabindex") === "-1") keys.push("#" + karte.id);
+    return keys.filter(Boolean);
   }
 
   /* ---------- Obere Leiste ---------- */
@@ -1632,7 +1776,11 @@
       const nk = $("notausKnopf");
       nk.dataset.aktion = angehalten ? "weiter" : "notaus";
       nk.className = "knopf notaus" + (angehalten ? "" : " gefahr");
-      nk.disabled = Boolean(st.notfall);
+      // Gesperrt per aria-disabled wie besetzt(): disabled nähme einem fokussierten Knopf den Fokus (Notfall aus Telegram,
+      // anderem Tab oder beim Schliessen des PIN-Dialogs, der ihn zurückgibt) – er fiele auf <body>. Klick und weiter() prüfen selbst.
+      nk.disabled = false;
+      if (st.notfall) besetzt(nk, true);
+      else { nk.removeAttribute("aria-disabled"); nk.style.opacity = ""; nk.style.cursor = ""; }
       nk.replaceChildren(ikon(angehalten ? "lock" : "pause", true), h("span", { text: angehalten ? "Weiter" : "Notaus" }));
       nk.setAttribute("aria-label", st.notfall ? "Weiter erst nach /entwarnung in Telegram" : angehalten ? "Weiter mit PIN" : "Notaus: sofort alles anhalten");
     }
@@ -1675,7 +1823,7 @@
     document.title = "JARVIS · " + BEREICHE[aktuell].titel;
     letzteSig[aktuell] = null;
     fremdeFehlerWeg();
-    stoerungZeigen();
+    stoerungZeigen(true);
     rendern();
     zyklen();
   }
@@ -1716,8 +1864,12 @@
     void holeStatus();
   }
 
-  async function nachAuftrag(d) {
-    toast(ohneSymbol(d && d.text ? d.text : "Erledigt, Sir."));
+  const auftragText = (d) => ohneSymbol(d && d.text ? d.text : "Erledigt, Sir.");
+  /** Text des Auftrags bei einem Zeitlimit: der Dienst führt ihn weiter aus und meldet das Ergebnis in Telegram */
+  const AUFTRAG_LANG = "Das dauert länger, Sir. Der Auftrag läuft weiter, das Ergebnis kommt per Telegram.";
+  /** stumm: der Aufrufer sagt die Rückmeldung selbst an (PIN-Dialog, nach dem Schliessen) */
+  async function nachAuftrag(d, stumm) {
+    if (!stumm) toast(auftragText(d));
     await holeStatus();
     if (Q.auftraege) { await holeQuelle("auftraege"); rendern(); }
   }
@@ -1730,10 +1882,10 @@
         hilfe: "Eine falsche PIN lehnt den Auftrag ab – wie in Telegram. Nach drei Fehlversuchen nehme ich hier zehn Minuten lang keine PIN an.",
         senden: async (pin) => {
           const r = await api("/api/auftrag", { methode: "POST", body: { id: a.id, aktion: "ok", pin } });
-          if (r.status === 200 && r.daten && r.daten.ok) { void nachAuftrag(r.daten); return { fertig: true }; }
+          if (r.status === 200 && r.daten && r.daten.ok) { void nachAuftrag(r.daten, true); return { fertig: true, meldung: auftragText(r.daten) }; }
           if (r.status === 429 || r.status === 400) return { fehler: fehlerText(r) };
-          toast(fehlerText(r, "Die Freigabe kam nicht an")); void holeStatus();
-          return { fertig: true };
+          void holeStatus();
+          return { fertig: true, meldung: fehlerText(r, "Die Freigabe kam nicht an", AUFTRAG_LANG) };
         },
       });
       return;
@@ -1742,7 +1894,7 @@
     const r = await api("/api/auftrag", { methode: "POST", body: { id: a.id, aktion: "ok" } });
     inArbeit.delete(id);
     if (r.status === 200 && r.daten && r.daten.ok) await nachAuftrag(r.daten);
-    else { toast(fehlerText(r, "Die Freigabe kam nicht an")); neuZeichnen(); }
+    else { toast(fehlerText(r, "Die Freigabe kam nicht an", AUFTRAG_LANG)); neuZeichnen(); if (r.zeitlimit) void holeStatus(); }
   }
   async function ablehnen(id) {
     const a = offene().find((x) => String(x.id) === id);
@@ -1757,9 +1909,12 @@
     const key = "p:" + name;
     if (inArbeit.has(key)) return;
     inArbeit.add(key); neuZeichnen();
+    const gen = quellenGen;
     const r = await api("/api/protokoll", { methode: "POST", body: { name } });
     inArbeit.delete(key);
-    toast(r.status === 200 && r.daten && r.daten.ok ? ohneSymbol(r.daten.text || "Erledigt, Sir.") : fehlerText(r, "Das Protokoll kam nicht an"));
+    // Inzwischen Notfall (oder geleert): kein Protokolltext mehr in Toast und Ansage, ein 423 zeigt nur den Sperrtext
+    const verworfen = gen !== quellenGen || Boolean(Q.status && Q.status.notfall);
+    if (!verworfen || r.status === 423) toast(r.status === 200 && r.daten && r.daten.ok ? ohneSymbol(r.daten.text || "Erledigt, Sir.") : fehlerText(r, "Das Protokoll kam nicht an", "Das dauert länger, Sir. Das Protokoll läuft weiter; den Stand sehen Sie gleich hier."));
     await holeStatus();
     neuZeichnen();
   }
@@ -1780,12 +1935,12 @@
         const r = await api("/api/notaus", { methode: "POST", body: { an: false, pin } });
         if (r.status === 200 && r.daten && r.daten.ok) {
           if (Q.status && r.daten.pausiert === false) Q.status.pausiert = false;
-          toast(ohneSymbol(r.daten.text || "Weiter, Sir.")); neuZeichnen(); void holeStatus();
-          return { fertig: true };
+          neuZeichnen(); void holeStatus();
+          return { fertig: true, meldung: ohneSymbol(r.daten.text || "Weiter, Sir.") };
         }
         if (r.status === 403 || r.status === 429 || r.status === 400) return { fehler: fehlerText(r) };
-        toast(fehlerText(r, "Das Fortsetzen kam nicht an")); void holeStatus();
-        return { fertig: true };
+        void holeStatus();
+        return { fertig: true, meldung: fehlerText(r, "Das Fortsetzen kam nicht an") };
       },
     });
   }
@@ -1793,8 +1948,10 @@
     if (!(await frage("Notfall auslösen?", "Ich isoliere, sperre und alarmiere. Nur im Ernstfall.", "Weiter", true))) return;
     if (!(await frage("Sicher, Sir?", "Zweite Bestätigung. Die Entwarnung geht danach nur per /entwarnung in Telegram.", "Notfall auslösen", true))) return;
     const r = await api("/api/notfall", { methode: "POST", body: { bestaetigt: true } });
-    toast(r.status === 200 && r.daten && r.daten.ok ? ohneSymbol(r.daten.text || "Notfall ausgelöst, Sir.") : fehlerText(r, "Der Notfall kam nicht an"));
+    // Erst den Status holen: der Wechsel in den Notfall leert Ansage und Toast, die Bestätigung kommt danach
     await holeStatus();
+    if (!angemeldet) return;
+    toast(r.status === 200 && r.daten && r.daten.ok ? ohneSymbol(r.daten.text || "Notfall ausgelöst, Sir.") : fehlerText(r, "Der Notfall kam nicht an"));
   }
 
   /** Aktionen über data-aktion (Event-Delegation, keine Inline-Handler). */
@@ -1842,7 +1999,7 @@
     const kt = t.closest("[data-tage]");
     if (kt) { void zeitraumSetzen(Number(kt.dataset.tage)); return; }
     const b = t.closest("[data-aktion]");
-    if (b && !b.disabled && Object.hasOwn(AKTIONEN, b.dataset.aktion)) void AKTIONEN[b.dataset.aktion](b);
+    if (b && !b.disabled && b.getAttribute("aria-disabled") !== "true" && Object.hasOwn(AKTIONEN, b.dataset.aktion)) void AKTIONEN[b.dataset.aktion](b);
   });
   document.addEventListener("change", (e) => {
     const sel = e.target instanceof Element ? e.target.closest("select[data-filter]") : null;

@@ -1,5 +1,5 @@
 import mqtt from "mqtt";
-import { allWachen, cameraByFrigateName, cameras, eventSnapshot, look, snapshot, type Bedingung } from "./cameras.js";
+import { allWachen, cameraByFrigateName, cameras, dynamicWachen, eventSnapshot, look, snapshot, type Bedingung, type Wache } from "./cameras.js";
 import { config } from "./config.js";
 import { isHome } from "./homeassistant.js";
 import { notfallAktiv } from "./notfall.js";
@@ -150,20 +150,38 @@ const lastHit = new Map<string, number>();
 
 export async function wachenTick(now = Date.now()): Promise<void> {
   if (!config.frigateUrl || gestoppt()) return;
+  /**
+   * Wurde die Wache gelöscht (Kommandozentrale oder freigegebenes wache_loeschen), während der Tick auf bedingung/snapshot/look
+   * wartete? allWachen() ist eine Momentaufnahme mit denselben Objekten wie dynamicWachen – fehlt ein beim Tick-Start
+   * dynamisches Objekt dort, geht kein Bild mehr an die API (wie zeitplanTick bei gelöschten Zeitplänen).
+   * Nur die beim Start dynamischen Objekte zählen: Wachen aus cameras.json sind jedes Mal neue Objekte und dürfen
+   * nie als gelöscht gelten, auch wenn dort (etwa aus data/wachen.json kopiert) ein Feld «id» steht.
+   */
+  const dynamisch = new Set<Wache>(dynamicWachen);
+  const geloescht = (w: Wache) => dynamisch.has(w) && !dynamicWachen.includes(w);
   for (const w of allWachen()) {
     // Kommt während einer Wache /pause oder /notfall, läuft keine weitere mehr (kein neues Bild an die API)
     if (gestoppt()) return;
+    if (geloescht(w)) continue;
     const key = `${w.kamera}|${w.frage}`;
     if (!cameras[w.kamera]) continue;
     if (now - (lastRun.get(key) ?? 0) < Math.max(1, w.alle_minuten) * 60_000) continue;
     lastRun.set(key, now);
     if (!(await bedingung(w.nur_wenn))) continue;
     if (gestoppt()) return;
+    if (geloescht(w)) continue;
     try {
-      const r = await look(w.kamera, `${w.frage}\nErste Zeile: nur JA oder NEIN. Zweite Zeile: ein Satz Begründung.`);
+      // Standbild selbst holen und danach erneut prüfen: Der Frigate-Abruf dauert (Zeitlimit, Wiederholungen), und
+      // claudeAufruf prüft beim ersten Versuch weder Notaus noch Notfall – ein inzwischen gestopptes oder gelöschtes
+      // Wachen-Bild darf nicht mehr an die API (wie onCameraEvent: erst snapshot, dann gestoppt, dann look mit Bild)
+      const bild = await snapshot(w.kamera);
+      if (gestoppt()) return;
+      if (geloescht(w)) continue;
+      const r = await look(w.kamera, `${w.frage}\nErste Zeile: nur JA oder NEIN. Zweite Zeile: ein Satz Begründung.`, bild);
       const ja = /^\s*ja\b/i.test(r.text);
       if (gestoppt()) return;
-      if (!ja) continue;
+      // Während look() gelöscht: keine Meldung mehr für eine Wache, die der Nutzer nicht mehr will
+      if (!ja || geloescht(w)) continue;
       const ruhe = (w.ruhe_minuten ?? 30) * 60_000;
       if (now - (lastHit.get(key) ?? 0) < ruhe) continue;
       lastHit.set(key, now);
