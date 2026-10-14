@@ -86,6 +86,10 @@ describe("server.ts: Start und Netzsperren", () => {
     const ziele: [string, string][] = [
       ["GET", "/status.json"], ["POST", "/api/auftrag"], ["GET", "/api/finanzen"], ["GET", "/dashboard"],
       ["POST", "/api/chat"], ["GET", "/api/kamera/garten"], ["GET", "/api/audit"],
+      ["GET", "/dashboard/app.js"], ["GET", "/dashboard/app.css"], ["GET", "/api/auftraege"], ["GET", "/api/kosten"],
+      ["GET", "/api/zeitplaene"], ["POST", "/api/zeitplaene"], ["PUT", "/api/zeitplaene/1"], ["DELETE", "/api/zeitplaene/1"],
+      ["GET", "/api/wachen"], ["POST", "/api/wachen"], ["PUT", "/api/wachen/1"], ["DELETE", "/api/wachen/1"],
+      ["POST", "/api/notaus"], ["POST", "/api/notfall"],
     ];
     for (const kopf of tunnel) {
       for (const [methode, pfad] of ziele) {
@@ -101,14 +105,42 @@ describe("server.ts: Start und Netzsperren", () => {
     assert.equal((await anfrage(port, "GET", "/api/finanzen")).status, 401);
   });
 
-  it("/dashboard aus dem Heimnetz: Sicherheits-Header zusätzlich zur CSP im Meta-Tag", async () => {
-    const r = await anfrage(port, "GET", "/dashboard");
+  it("/dashboard, app.css, app.js aus dem Heimnetz: CSP als Header mit genauem Wortlaut, Sicherheits-Header, richtiger Typ", async () => {
+    const CSP =
+      "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' blob: data:; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; object-src 'none'";
+    const routen: [string, RegExp][] = [
+      ["/dashboard", /^text\/html; charset=utf-8$/i],
+      ["/dashboard/app.css", /^text\/css; charset=utf-8$/i],
+      ["/dashboard/app.js", /^text\/javascript; charset=utf-8$/i],
+    ];
+    for (const [pfad, typ] of routen) {
+      // Ohne Token: die Dateien enthalten keine Daten
+      const r = await anfrage(port, "GET", pfad);
+      assert.equal(r.status, 200, pfad);
+      assert.equal(r.kopf["content-security-policy"], CSP, pfad);
+      assert.equal(r.kopf["x-content-type-options"], "nosniff", pfad);
+      assert.equal(r.kopf["referrer-policy"], "no-referrer", pfad);
+      assert.equal(r.kopf["x-frame-options"], "DENY", pfad);
+      assert.match(String(r.kopf["content-type"]), typ, pfad);
+      assert.ok(r.text.length > 0, pfad);
+    }
+    const seite = await anfrage(port, "GET", "/dashboard");
+    assert.doesNotMatch(seite.text, /http-equiv/i, "keine Meta-CSP mehr");
+    assert.doesNotMatch(seite.text, /<script(?![^>]*\ssrc=)[^>]*>/i, "kein Inline-Skript");
+  });
+
+  it("nur die drei festen Dateien: web/ ist nicht als Ordner erreichbar", async () => {
+    for (const pfad of ["/dashboard/gesture.html", "/dashboard/dashboard.js", "/dashboard/../web/dashboard.js", "/web/dashboard.js", "/dashboard.js"]) {
+      assert.equal((await anfrage(port, "GET", pfad)).status, 404, pfad);
+    }
+  });
+
+  it("API mit Token: Cache-Control no-store", async () => {
+    const r = await anfrage(port, "GET", "/api/kosten", { authorization: `Bearer ${TOKEN}` });
     assert.equal(r.status, 200);
-    const csp = String(r.kopf["content-security-policy"] ?? "");
-    for (const teil of ["frame-ancestors 'none'", "base-uri 'none'", "form-action 'none'"]) assert.ok(csp.includes(teil), csp);
+    assert.equal(r.kopf["cache-control"], "no-store");
     assert.equal(r.kopf["x-content-type-options"], "nosniff");
-    assert.equal(r.kopf["referrer-policy"], "no-referrer");
-    assert.match(r.text, /http-equiv="Content-Security-Policy"/);
+    assert.equal((await anfrage(port, "GET", "/status.json")).kopf["cache-control"], "no-store");
   });
 
   it("/events folgt weiterhin EVENTS_VIA_TUNNEL=on (Token-Prüfung statt 404)", async () => {

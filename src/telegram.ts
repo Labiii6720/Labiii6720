@@ -48,6 +48,92 @@ function pinVersuch(eingabe: string): boolean {
   return true;
 }
 
+// ---------- PIN aus der Kommandozentrale ----------
+
+/** Eigene Sperre fürs Dashboard: nach 3 Fehlversuchen (innert 10 Minuten) 10 Minuten lang keine PIN annehmen. */
+const PIN_FEHLVERSUCHE_MAX = 3;
+const PIN_SPERRE_MS = 10 * 60_000;
+let pinUhr: () => number = () => Date.now();
+const pinFehler: number[] = [];
+let pinGesperrtBis = 0;
+
+/** Nur für Tests: Uhr der Dashboard-PIN-Sperre ersetzen (ohne Argument: echte Zeit) und den Zähler leeren. */
+export function setzePinUhr(uhr?: () => number): void {
+  pinUhr = uhr ?? (() => Date.now());
+  pinFehler.length = 0;
+  pinGesperrtBis = 0;
+}
+
+/** Restdauer der Dashboard-PIN-Sperre in ms (0 = keine Sperre). */
+export function pinSperreRest(): number {
+  return Math.max(0, pinGesperrtBis - pinUhr());
+}
+
+export const pinGesperrtText = (): string =>
+  `Zu viele falsche PIN-Eingaben, Sir. Die Kommandozentrale nimmt erst in ${Math.max(1, Math.ceil(pinSperreRest() / 60_000))} Minuten wieder eine PIN an.`;
+
+/** Zählt einen Dashboard-Fehlversuch; beim dritten innert 10 Minuten greift die Sperre. */
+function dashboardPinFehlversuch(): void {
+  const jetzt = pinUhr();
+  pinFehler.push(jetzt);
+  while (pinFehler.length && jetzt - pinFehler[0]! > PIN_SPERRE_MS) pinFehler.shift();
+  if (pinFehler.length >= PIN_FEHLVERSUCHE_MAX) {
+    pinFehler.length = 0;
+    pinGesperrtBis = jetzt + PIN_SPERRE_MS;
+    audit("pin_sperre", { quelle: "dashboard", minuten: PIN_SPERRE_MS / 60_000 });
+    void sendeSpaeter("⚠️ Dreimal falsche PIN in der Kommandozentrale. Dort nehme ich zehn Minuten lang keine PIN an, Sir.").catch(log);
+  }
+}
+
+export type PinErgebnis = "ok" | "falsch" | "gesperrt" | "ohne_pin";
+
+/**
+ * PIN-Prüfung für Dashboard-Aktionen ausser Freigaben (z. B. Notaus aufheben). Ein Fehlversuch zählt wie bei sensiblen
+ * Freigaben: Audit, abuseSignal (5 in 5 Minuten → Notfall) und Warnung; dazu die eigene Dashboard-Sperre. Während der
+ * Sperre wird auch eine richtige PIN abgewiesen (sonst wäre die Sperre ein Orakel). Die PIN selbst geht nirgends hin.
+ */
+export function pinPruefen(pin: string | undefined, anlass: string): PinErgebnis {
+  if (!config.pin) return "ohne_pin";
+  if (pinSperreRest() > 0) return "gesperrt";
+  if (pinStimmt(pin)) {
+    pinFehler.length = 0;
+    return "ok";
+  }
+  audit("pin_falsch", { anlass, quelle: "dashboard" });
+  abuseSignal("pin");
+  void sendeSpaeter(`⚠️ Falsche PIN in der Kommandozentrale (${anlass}), Sir.`).catch(log);
+  dashboardPinFehlversuch();
+  return "falsch";
+}
+
+// ---------- Notaus (Telegram /pause, /weiter und Kommandozentrale) ----------
+
+export type NotausQuelle = "telegram" | "dashboard";
+
+/**
+ * Notaus an. Aus dem Dashboard zusätzlich notausVermerken (ein schon eingereihtes Telegram-/weiter hebt ihn nicht auf)
+ * und eine Meldung mit Vorrang, damit der Chat davon weiss.
+ */
+export function notausAn(quelle: NotausQuelle): void {
+  state.paused = true;
+  save();
+  audit("pause", { quelle });
+  if (quelle === "dashboard") {
+    notausVermerken();
+    void sendeSpaeter("⛔ Notaus über die Kommandozentrale.", { vorrang: true }).catch(log);
+  }
+}
+
+/** Notaus aus; im Notfall nicht (nur /entwarnung hebt dann auf). Rückgabe: aufgehoben? */
+export function notausAus(quelle: NotausQuelle): boolean {
+  if (notfallAktiv()) return false;
+  state.paused = false;
+  save();
+  audit("weiter", { quelle });
+  if (quelle === "dashboard") void sendeSpaeter("▶️ Weiter über die Kommandozentrale.").catch(log);
+  return true;
+}
+
 /** Hinweis bei gesperrter Aktion: im Notfall hebt nur /entwarnung auf, nicht /weiter. */
 const notausHinweis = (nachsatz = ""): string =>
   notfallAktiv() ? "🚨 Notfall aktiv, Sir. Erst /entwarnung." : `⛔ Notaus aktiv. Erst /weiter${nachsatz}.`;
@@ -490,6 +576,8 @@ export async function approveAuftrag(a: Auftrag, pin?: string): Promise<string> 
   if (state.paused) return notausHinweis();
   if (a.stufe === "sensibel") {
     if (!config.pin) return "Für sensible Aufträge fehlt eine PIN (JARVIS_PIN).";
+    // Dashboard-Sperre: abweisen, ohne den Auftrag abzulehnen (er bleibt offen, auch in Telegram)
+    if (pinSperreRest() > 0) return pinGesperrtText();
     if (!pinStimmt(pin)) {
       // Wie in Telegram: eine falsche PIN lehnt den Auftrag ab, sonst liesse sich die PIN durchprobieren.
       audit("pin_falsch", { id: a.id, tool: a.tool, quelle: "dashboard" });
@@ -497,8 +585,10 @@ export async function approveAuftrag(a: Auftrag, pin?: string): Promise<string> 
       abuseSignal("pin");
       if (a.messageId) knoepfeEntfernen(a.messageId);
       void sendeSpaeter(`⚠️ Falsche PIN im Dashboard. #${a.id} abgelehnt, Sir.`).catch(log);
+      dashboardPinFehlversuch();
       return `Falsche PIN. #${a.id} abgelehnt.`;
     }
+    pinFehler.length = 0;
   }
   // Zwischen Prüfung und Ausführung kein await: execute beansprucht den Auftrag synchron.
   if (a.messageId) knoepfeEntfernen(a.messageId);
@@ -635,16 +725,11 @@ async function onCommand(cmd: string, arg: string): Promise<void> {
       aufheben();
       return void await sendText("✅ Entwarnung. Notfall aufgehoben, Jarvis läuft wieder. Denk daran, erneuerte Tokens einzutragen.");
     case "/pause":
-      state.paused = true;
-      save();
-      audit("pause", {});
+      notausAn("telegram");
       return void await sendText("⛔ Notaus. Keine Werkzeuge, Zeitpläne oder Wachen, bis /weiter kommt. Offene Aufträge bleiben offen.");
     case "/weiter":
       // Im Notfall hebt nur /entwarnung den Notaus auf (bewusster Schritt mit Checkliste)
-      if (notfallAktiv()) return void await sendText("Es läuft ein Notfall, Sir. Erst /entwarnung.");
-      state.paused = false;
-      save();
-      audit("weiter", {});
+      if (!notausAus("telegram")) return void await sendText("Es läuft ein Notfall, Sir. Erst /entwarnung.");
       return void await sendText("▶️ Weiter geht's.");
     case "/verdichten":
       return verdichtenBefehl(arg.trim().toLowerCase());

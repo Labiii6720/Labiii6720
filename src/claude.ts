@@ -49,10 +49,11 @@ export async function claudeAufruf<T>(zweck: string, fn: (versuch: number) => Pr
 }
 
 export interface Verbrauch { calls: number; input: number; output: number; cacheRead: number; cacheWrite: number }
-type Usage = Record<string, Verbrauch>; // YYYY-MM-DD → Verbrauch
+export type Usage = Record<string, Verbrauch>; // YYYY-MM-DD → Verbrauch
 
 const FILE = "data/usage.json";
-const usage: Usage = (() => {
+/** Verbrauch je Tag (Schweizer Datum), Stand im Speicher; nur lesen – geschrieben wird über trackUsage. */
+export const usage: Usage = (() => {
   try { return JSON.parse(readFileSync(FILE, "utf8")) as Usage; } catch { return {}; }
 })();
 
@@ -98,4 +99,57 @@ export function verbrauchBericht(): string {
     .reduce((acc, [, v]) => ({ calls: acc.calls + v.calls, input: acc.input + v.input, output: acc.output + v.output, cacheRead: acc.cacheRead + v.cacheRead, cacheWrite: acc.cacheWrite + v.cacheWrite }), { calls: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
   const zeile = (n: string, v: Verbrauch) => `${n}: ${v.calls} Aufrufe · ${(v.input / 1000).toFixed(1)}k ein · ${(v.output / 1000).toFixed(1)}k aus · ${(v.cacheRead / 1000).toFixed(1)}k aus Cache · ca. ${kosten(v).toFixed(2)} $`;
   return `${zeile("Heute", tag)}\n${zeile("Monat", monat)}\n(Schätzung nach den Preisen in .env; der echte Betrag steht in der Claude Console.)`;
+}
+
+export interface VerbrauchTag extends Verbrauch { datum: string; kostenUsd: number }
+
+export interface VerbrauchVerlauf {
+  preise: { input: number; output: number; cacheRead: number; cacheWrite: number };
+  /** lückenlos, älteste zuerst, letzter Eintrag = heute */
+  tage: VerbrauchTag[];
+  heute: VerbrauchTag;
+  /** Kalendermonat von heute (unabhängig vom Zeitraum) */
+  monat: Verbrauch & { kostenUsd: number };
+  /** cacheRead / (input + cacheRead + cacheWrite) über den Zeitraum, 0 ohne Verbrauch */
+  cacheAnteil: number;
+}
+
+const leer = (): Verbrauch => ({ calls: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+const summe = (a: Verbrauch, b: Partial<Verbrauch>): Verbrauch => ({
+  calls: a.calls + (Number(b.calls) || 0),
+  input: a.input + (Number(b.input) || 0),
+  output: a.output + (Number(b.output) || 0),
+  cacheRead: a.cacheRead + (Number(b.cacheRead) || 0),
+  cacheWrite: a.cacheWrite + (Number(b.cacheWrite) || 0),
+});
+const usd = (v: Verbrauch) => Math.round(kosten(v) * 1e6) / 1e6;
+
+/**
+ * Verlauf der letzten `tage` Tage (1–90) bis einschliesslich `heute`, Schweizer Datum. Fehlende Tage kommen mit 0.
+ * Gerechnet wird auf dem Kalenderdatum (UTC-Mittag als Anker), damit Sommerzeitwechsel keinen Tag doppeln oder auslassen.
+ */
+export function verbrauchVerlauf(tage: number, heute: Date = new Date(), daten: Usage = usage): VerbrauchVerlauf {
+  const roh = Math.floor(Number(tage));
+  const n = Number.isFinite(roh) ? Math.min(90, Math.max(1, roh)) : 30;
+  const heuteKey = heute.toLocaleDateString("en-CA", { timeZone: "Europe/Zurich" });
+  const [j, m, t] = heuteKey.split("-").map(Number);
+  const liste: VerbrauchTag[] = [];
+  let zeitraum = leer();
+  for (let i = n - 1; i >= 0; i--) {
+    const datum = new Date(Date.UTC(j, m - 1, t - i, 12)).toISOString().slice(0, 10);
+    const v = summe(leer(), daten[datum] ?? {});
+    zeitraum = summe(zeitraum, v);
+    liste.push({ datum, ...v, kostenUsd: usd(v) });
+  }
+  const monatV = Object.entries(daten)
+    .filter(([d]) => d.startsWith(heuteKey.slice(0, 7)))
+    .reduce((acc, [, v]) => summe(acc, v), leer());
+  const nenner = zeitraum.input + zeitraum.cacheRead + zeitraum.cacheWrite;
+  return {
+    preise: { ...config.preise },
+    tage: liste,
+    heute: liste[liste.length - 1]!,
+    monat: { ...monatV, kostenUsd: usd(monatV) },
+    cacheAnteil: nenner > 0 ? Math.round((zeitraum.cacheRead / nenner) * 1e4) / 1e4 : 0,
+  };
 }

@@ -415,7 +415,8 @@ describe("GET /api/finanzen", () => {
   it("server.ts registriert den Endpunkt nur hinter lanOnly und dashboardAuth", () => {
     const quelle = readFileSync(join(projekt, "src", "server.ts"), "utf8");
     const zeilen = quelle.split("\n").filter((z) => z.includes("/api/finanzen"));
-    assert.deepEqual(zeilen.map((z) => z.trim()), ['app.get("/api/finanzen", lanOnly, dashboardAuth, finanzenJson);']);
+    // 0.22: zusätzlich Kopfzeilen (no-store), Notfall-Sperre und sicher(); lanOnly und dashboardAuth bleiben vorn
+    assert.deepEqual(zeilen.map((z) => z.trim()), ['app.get("/api/finanzen", lanOnly, apiKopf, dashboardAuth, notfallSperre, sicher(finanzenJson));']);
     const block = quelle.slice(quelle.indexOf("if (config.dashboard && config.eventToken) {"));
     assert.ok(block.indexOf("/api/finanzen") > 0 && block.indexOf("/api/finanzen") < block.indexOf("\n}\n"), "im Dashboard-Block");
   });

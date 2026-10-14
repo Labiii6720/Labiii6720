@@ -11,7 +11,10 @@ import { closeBrowser } from "./browser.js";
 import { handleEvent } from "./events.js";
 import { startWatch } from "./watch.js";
 import { handlePanic } from "./notfall.js";
-import { auditTail, auftragAction, chat, dashboardAuth, finanzenJson, geraete, kameraBild, modus, protokollAction, statusJson } from "./dashboard.js";
+import {
+  auditTail, auftraegeJson, auftragAction, chat, DASHBOARD_CSP, dashboardAuth, finanzenJson, geraete, kameraBild, kostenJson, modus, notaus, notfallAusloesen, notfallSperre,
+  protokollAction, statusJson, wacheAendern, wacheAnlegen, wacheLoeschen, wachenJson, zeitplaeneJson, zeitplanAendern, zeitplanAnlegen, zeitplanLoeschen,
+} from "./dashboard.js";
 import { gesundheit, schwaerze } from "./robust.js";
 
 const app = express();
@@ -30,11 +33,12 @@ const lanOnly = (req: express.Request, res: express.Response, next: express.Next
   next();
 };
 
-/** Async-Handler absichern: ein Fehler wird geschwärzt geloggt und mit 500 beantwortet statt als unbehandelte Rejection. */
+/** Handler absichern (synchron oder async): ein Fehler wird geschwärzt geloggt und mit 500 beantwortet statt als unbehandelte Rejection. */
 const sicher =
-  (h: (req: express.Request, res: express.Response) => Promise<unknown>) =>
+  (h: (req: express.Request, res: express.Response) => unknown) =>
   (req: express.Request, res: express.Response): void =>
-    void h(req, res).catch((e: unknown) => {
+    // new Promise ruft h sofort (synchron) auf und fängt auch einen synchronen Wurf
+    void new Promise((ok) => ok(h(req, res))).catch((e: unknown) => {
       console.error(e instanceof Error ? schwaerze(e.message) : e);
       if (!res.headersSent) res.status(500).json({ ok: false });
     });
@@ -78,24 +82,50 @@ app.get("/gesture", lanOnly, (_req, res) => {
 // Kommandozentrale: der Kern. Seite und API nur aus dem Heimnetz/Tailscale (nie über den Tunnel), API zusätzlich mit Token.
 if (config.dashboard && config.eventToken) {
   const json = express.json({ limit: "64kb" });
-  app.get("/dashboard", lanOnly, (_req, res) => {
-    // Ergänzt die CSP im Meta-Tag (gilt kumulativ): frame-ancestors wirkt nur als Header. script-src bleibt im Meta-Tag,
-    // so laufen Hash und Skript nie auseinander.
-    res.setHeader("Content-Security-Policy", "frame-ancestors 'none'; base-uri 'none'; form-action 'none'; object-src 'none'");
+  // Nur diese drei festen Dateien (kein express.static auf web/): sie enthalten keine Daten, deshalb ohne Token.
+  const statisch = (datei: string, typ: string) => (_req: express.Request, res: express.Response) => {
+    res.setHeader("Content-Security-Policy", DASHBOARD_CSP);
     res.setHeader("X-Content-Type-Options", "nosniff");
     res.setHeader("Referrer-Policy", "no-referrer");
     res.setHeader("X-Frame-Options", "DENY");
-    res.sendFile(fileURLToPath(new URL("../web/dashboard.html", import.meta.url)));
-  });
-  app.get("/status.json", lanOnly, dashboardAuth, statusJson);
-  app.post("/api/auftrag", lanOnly, dashboardAuth, json, sicher(auftragAction));
-  app.post("/api/chat", lanOnly, dashboardAuth, json, sicher(chat));
-  app.post("/api/protokoll", lanOnly, dashboardAuth, json, sicher(protokollAction));
-  app.post("/api/modus", lanOnly, dashboardAuth, json, modus);
-  app.get("/api/kamera/:name", lanOnly, dashboardAuth, sicher(kameraBild));
-  app.get("/api/geraete", lanOnly, dashboardAuth, sicher(geraete));
-  app.get("/api/audit", lanOnly, dashboardAuth, auditTail);
-  app.get("/api/finanzen", lanOnly, dashboardAuth, finanzenJson);
+    res.setHeader("Cache-Control", "no-cache");
+    res.setHeader("Content-Type", typ);
+    res.sendFile(fileURLToPath(new URL(`../web/${datei}`, import.meta.url)));
+  };
+  app.get("/dashboard", lanOnly, statisch("dashboard.html", "text/html; charset=utf-8"));
+  app.get("/dashboard/app.css", lanOnly, statisch("dashboard.css", "text/css; charset=utf-8"));
+  app.get("/dashboard/app.js", lanOnly, statisch("dashboard.js", "text/javascript; charset=utf-8"));
+
+  // API: nie zwischenspeichern; Antworten sind JSON (bzw. das Kamerabild) und nie als Seite deutbar
+  const apiKopf = (_req: express.Request, res: express.Response, next: express.NextFunction) => {
+    res.setHeader("Cache-Control", "no-store");
+    res.setHeader("X-Content-Type-Options", "nosniff");
+    res.setHeader("Referrer-Policy", "no-referrer");
+    next();
+  };
+  // Reihenfolge je Route: Netz, Kopfzeilen, Token, Notfall-Sperre (423), erst dann der Body-Parser
+  app.get("/status.json", lanOnly, apiKopf, dashboardAuth, sicher(statusJson));
+  app.post("/api/auftrag", lanOnly, apiKopf, dashboardAuth, notfallSperre, json, sicher(auftragAction));
+  app.post("/api/chat", lanOnly, apiKopf, dashboardAuth, notfallSperre, json, sicher(chat));
+  app.post("/api/protokoll", lanOnly, apiKopf, dashboardAuth, notfallSperre, json, sicher(protokollAction));
+  app.post("/api/modus", lanOnly, apiKopf, dashboardAuth, notfallSperre, json, sicher(modus));
+  app.get("/api/kamera/:name", lanOnly, apiKopf, dashboardAuth, notfallSperre, sicher(kameraBild));
+  app.get("/api/geraete", lanOnly, apiKopf, dashboardAuth, notfallSperre, sicher(geraete));
+  app.get("/api/audit", lanOnly, apiKopf, dashboardAuth, notfallSperre, sicher(auditTail));
+  app.get("/api/finanzen", lanOnly, apiKopf, dashboardAuth, notfallSperre, sicher(finanzenJson));
+  app.get("/api/auftraege", lanOnly, apiKopf, dashboardAuth, notfallSperre, sicher(auftraegeJson));
+  app.get("/api/kosten", lanOnly, apiKopf, dashboardAuth, notfallSperre, sicher(kostenJson));
+  app.get("/api/zeitplaene", lanOnly, apiKopf, dashboardAuth, notfallSperre, sicher(zeitplaeneJson));
+  app.post("/api/zeitplaene", lanOnly, apiKopf, dashboardAuth, notfallSperre, json, sicher(zeitplanAnlegen));
+  app.put("/api/zeitplaene/:id", lanOnly, apiKopf, dashboardAuth, notfallSperre, json, sicher(zeitplanAendern));
+  app.delete("/api/zeitplaene/:id", lanOnly, apiKopf, dashboardAuth, notfallSperre, sicher(zeitplanLoeschen));
+  app.get("/api/wachen", lanOnly, apiKopf, dashboardAuth, notfallSperre, sicher(wachenJson));
+  app.post("/api/wachen", lanOnly, apiKopf, dashboardAuth, notfallSperre, json, sicher(wacheAnlegen));
+  app.put("/api/wachen/:id", lanOnly, apiKopf, dashboardAuth, notfallSperre, json, sicher(wacheAendern));
+  app.delete("/api/wachen/:id", lanOnly, apiKopf, dashboardAuth, notfallSperre, sicher(wacheLoeschen));
+  // Auch im Notfall erreichbar: Pause bleibt möglich, ein zweiter Auslöser ist harmlos
+  app.post("/api/notaus", lanOnly, apiKopf, dashboardAuth, json, sicher(notaus));
+  app.post("/api/notfall", lanOnly, apiKopf, dashboardAuth, json, sicher(notfallAusloesen));
 }
 
 // Eigener Fehlerhandler (zuletzt registriert): nie Stacktrace oder Pfade an den Aufrufer, auch ohne NODE_ENV=production.

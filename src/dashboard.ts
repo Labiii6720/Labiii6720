@@ -3,20 +3,20 @@ import { readFileSync } from "node:fs";
 import type { NextFunction, Request, Response } from "express";
 import { askWithBudget } from "./agent.js";
 import { audit } from "./audit.js";
-import { cameras, snapshot } from "./cameras.js";
+import { allWachen, cameras, camerasNichtGeladen, dynamicWachen, pruefeWache, saveWachen, snapshot, WACHEN_UNLESBAR, wachenNichtGeladen, type Wache } from "./cameras.js";
+import { verbrauchVerlauf } from "./claude.js";
 import { config } from "./config.js";
 import { finanzUebersicht, offeneRechnungen, RECHNUNGEN_UNLESBAR, rechnungenNichtGeladen, type Rechnung } from "./finanzen.js";
 import { haStates } from "./homeassistant.js";
 import { ausloesen, notfallAktiv } from "./notfall.js";
 import { profil } from "./profil.js";
 import { protokolle, protokollGesperrt, runProtokoll } from "./protokolle.js";
-import { createAuftrag, getAuftrag, offeneAuftraege } from "./queue.js";
+import { auftraege, createAuftrag, getAuftrag, offeneAuftraege, type Status } from "./queue.js";
 import { gesundheit, schwaerze } from "./robust.js";
 import { save, state, type Mode } from "./state.js";
-import { approveAuftrag, denyAuftrag, hooks, sendText } from "./telegram.js";
-import { allWachen, camerasNichtGeladen, wachenNichtGeladen } from "./cameras.js";
+import { approveAuftrag, denyAuftrag, hooks, notausAn, notausAus, pinGesperrtText, pinPruefen, pinSperreRest, sendText } from "./telegram.js";
 import { vorgaenge, vorgaengeNichtGeladen } from "./vorgaenge.js";
-import { zeitplaene, zeitplaeneNichtGeladen } from "./zeitplaene.js";
+import { naechsterLauf, pruefeZeitplan, saveZeitplaene, ZEITPLAENE_UNLESBAR, zeitplaene, zeitplaeneNichtGeladen, type Zeitplan } from "./zeitplaene.js";
 
 /**
  * Kommandozentrale («der Kern»): Lesen und Handeln über das Dashboard. Nur Heimnetz/Tailscale (lanOnly im Server)
@@ -24,7 +24,8 @@ import { zeitplaene, zeitplaeneNichtGeladen } from "./zeitplaene.js";
  */
 export function dashboardAuth(req: Request, res: Response, next: NextFunction): void {
   const token = config.eventToken;
-  const given = (req.header("authorization") ?? "").replace(/^Bearer\s+/i, "") || String(req.query.token ?? "");
+  // Nur der Header: ein ?token= landete in Browser-Verlauf, Proxy- und Server-Logs.
+  const given = (req.header("authorization") ?? "").replace(/^Bearer\s+/i, "");
   if (!token || given.length !== token.length || !timingSafeEqual(Buffer.from(given), Buffer.from(token))) {
     res.status(401).json({ ok: false, error: "unauthorized" });
     return;
@@ -32,8 +33,24 @@ export function dashboardAuth(req: Request, res: Response, next: NextFunction): 
   next();
 }
 
+/** CSP der Kommandozentrale (Header für /dashboard und die beiden statischen Dateien): nur eigener Ursprung, kein Inline-Code. */
+export const DASHBOARD_CSP =
+  "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' blob: data:; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; object-src 'none'";
+
 /** Antwort auf gesperrte Daten-Endpunkte im Notfall (423 Locked), ohne die Quelle anzufragen. */
 const NOTFALL_GESPERRT = { ok: false, error: "notfall", text: "Im Notfall gebe ich keine Daten heraus, Sir. Erst /entwarnung." } as const;
+
+/**
+ * Vor jede Daten- und Schreibroute (server.ts): im Notfall 423, ohne den Handler zu erreichen. Ausnahmen bleiben
+ * /status.json (zeigt den Notfall), POST /api/notaus (Pause bleibt möglich) und POST /api/notfall.
+ */
+export function notfallSperre(_req: Request, res: Response, next: NextFunction): void {
+  if (notfallAktiv()) return void res.status(423).json(NOTFALL_GESPERRT);
+  next();
+}
+
+/** Text für Audit-Einträge: Auftragstexte und Fragen nur gekürzt (sie können Inhalte tragen). */
+const kurz = (t: unknown, n = 120): string => schwaerze(String(t ?? "")).slice(0, n);
 
 export function statusJson(_req: Request, res: Response): void {
   // Im Notfall nur der Zustand: keine Rechnungen, Ziele, Werte, Auftrags- oder Vorgangstexte, Kameras.
@@ -104,20 +121,30 @@ export function finanzenJson(_req: Request, res: Response): void {
 }
 
 export async function auftragAction(req: Request, res: Response): Promise<void> {
-  const { id, aktion, pin } = (req.body ?? {}) as { id?: number; aktion?: string; pin?: string };
+  if (notfallAktiv()) return void res.status(423).json(NOTFALL_GESPERRT);
+  const { id, aktion, pin } = (req.body ?? {}) as { id?: number; aktion?: string; pin?: unknown };
+  if (aktion !== "ok" && aktion !== "nein") return void res.status(400).json({ ok: false, error: "aktion", text: "Aktion: ok oder nein, Sir." });
   const a = getAuftrag(Number(id));
   if (!a) return void res.status(404).json({ ok: false, error: "Auftrag nicht gefunden" });
-  const text = aktion === "ok" ? await approveAuftrag(a, pin) : await denyAuftrag(a);
+  // Gesperrte PIN-Eingabe: abweisen, der Auftrag bleibt offen
+  if (aktion === "ok" && a.stufe === "sensibel" && a.status === "offen" && pinSperreRest() > 0) {
+    return void res.status(429).json({ ok: false, error: "pin_gesperrt", text: pinGesperrtText(), status: a.status });
+  }
+  const text = aktion === "ok" ? await approveAuftrag(a, typeof pin === "string" ? pin : undefined) : await denyAuftrag(a);
+  if (aktion === "ok") audit("auftrag_freigabe", { id: a.id, tool: a.tool, status: a.status, quelle: "dashboard" });
   res.json({ ok: true, text, status: a.status });
 }
 
 export async function chat(req: Request, res: Response): Promise<void> {
   const text = String((req.body ?? {}).text ?? "").slice(0, 4000).trim();
   if (!text) return void res.status(400).json({ ok: false, error: "text fehlt" });
+  // Der Chat-Weg bleibt rückwärtskompatibel; das UI nutzt POST /api/notfall.
   if (text === "/notfall") {
     await ausloesen("Über die Kommandozentrale ausgelöst.");
     return void res.json({ ok: true, reply: "🚨 Notfall ausgelöst." });
   }
+  if (notfallAktiv()) return void res.status(423).json(NOTFALL_GESPERRT);
+  audit("chat", { quelle: "dashboard", zeichen: text.length });
   const reply = await askWithBudget(`[Kommandozentrale] ${text}`, 60_000, hooks, async (r) => void (await sendText(`Zur Frage aus der Zentrale («${text.slice(0, 60)}»):\n\n${r}`)));
   res.json({ ok: true, reply: reply ?? "Das braucht länger, die Antwort kommt per Telegram.", queued: reply === undefined });
 }
@@ -135,13 +162,33 @@ export async function kameraBild(req: Request, res: Response): Promise<void> {
   }
 }
 
-export function auditTail(_req: Request, res: Response): void {
-  if (notfallAktiv()) return void res.status(423).json({ ...NOTFALL_GESPERRT, lines: [] });
+export interface AuditEintrag { zeit: string; ereignis: string; info: string }
+
+/** Eine Audit-Zeile lesbar: Zeit, Ereignis, übrige Felder kurz (geschwärzt, max. 160 Zeichen). Kaputt → undefined. */
+export function auditEintrag(zeile: string): AuditEintrag | undefined {
+  let roh: unknown;
   try {
-    const lines = readFileSync("data/audit.log", "utf8").trim().split("\n").slice(-60).reverse();
-    res.json({ ok: true, lines });
+    roh = JSON.parse(zeile);
   } catch {
-    res.json({ ok: true, lines: [] });
+    return undefined;
+  }
+  if (!roh || typeof roh !== "object" || Array.isArray(roh)) return undefined;
+  const { ts, event, ...rest } = roh as Record<string, unknown>;
+  if (typeof ts !== "string" || typeof event !== "string") return undefined;
+  const info = Object.entries(rest)
+    .map(([k, v]) => `${k}: ${typeof v === "string" ? v : JSON.stringify(v)}`)
+    .join(" · ");
+  return { zeit: ts, ereignis: event, info: schwaerze(info).slice(0, 160) };
+}
+
+export function auditTail(_req: Request, res: Response): void {
+  if (notfallAktiv()) return void res.status(423).json({ ...NOTFALL_GESPERRT, lines: [], eintraege: [] });
+  try {
+    const lines = readFileSync("data/audit.log", "utf8").trim().split("\n").filter(Boolean).slice(-60).reverse();
+    const eintraege = lines.map(auditEintrag).filter((e): e is AuditEintrag => e !== undefined);
+    res.json({ ok: true, lines, eintraege });
+  } catch {
+    res.json({ ok: true, lines: [], eintraege: [] });
   }
 }
 
@@ -157,6 +204,7 @@ export async function protokollAction(req: Request, res: Response): Promise<void
     return void res.json({ ok: true, text: out });
   }
   const a = createAuftrag({ tool: "protokoll_ausfuehren", input: { name }, stufe: p.stufe, summary: `Protokoll «${name}»: ${p.beschreibung}` });
+  audit("auftrag_angelegt", { id: a.id, tool: a.tool, stufe: a.stufe, name, quelle: "dashboard" });
   await hooks.onAuftrag(a).catch(() => undefined);
   res.json({ ok: true, text: `Auftrag #${a.id} angelegt (${p.stufe}), Freigabe unten in den Aufträgen.` });
 }
@@ -172,9 +220,234 @@ export async function geraete(req: Request, res: Response): Promise<void> {
 }
 
 export function modus(req: Request, res: Response): void {
+  if (notfallAktiv()) return void res.status(423).json(NOTFALL_GESPERRT);
   const m = String((req.body ?? {}).modus ?? "");
   if (!["normal", "fokus", "nacht"].includes(m)) return void res.status(400).json({ ok: false });
   state.mode = m as Mode;
   save();
+  audit("modus", { modus: m, quelle: "dashboard" });
   res.json({ ok: true, modus: m });
+}
+
+// ---------- Freigabe-Historie und Kosten ----------
+
+const STATUS: readonly Status[] = ["offen", "erledigt", "abgelehnt", "fehler"];
+
+/** Zahl aus dem Query-Parameter, auf [min, max] begrenzt; fehlt oder ungültig → Standard. */
+function grenze(v: unknown, min: number, max: number, standard: number): number {
+  const n = Number.parseInt(String(v ?? ""), 10);
+  return Number.isFinite(n) ? Math.min(max, Math.max(min, n)) : standard;
+}
+
+/**
+ * GET /api/auftraege?status=&stufe=&limit= – Freigabe-Historie, neueste zuerst. Nie `input` (Mailtexte, Pfade, Inhalte);
+ * `result` geschwärzt und auf 300 Zeichen gekürzt.
+ */
+export function auftraegeJson(req: Request, res: Response): void {
+  if (notfallAktiv()) return void res.status(423).json(NOTFALL_GESPERRT);
+  const status = String(req.query.status ?? "alle");
+  if (status !== "alle" && !STATUS.includes(status as Status)) {
+    return void res.status(400).json({ ok: false, error: "status", text: "Status: offen, erledigt, abgelehnt, fehler oder alle, Sir." });
+  }
+  const stufe = String(req.query.stufe ?? "alle");
+  if (!["alle", "extern", "sensibel"].includes(stufe)) return void res.status(400).json({ ok: false, error: "stufe", text: "Stufe: extern, sensibel oder alle, Sir." });
+  const limit = grenze(req.query.limit, 1, 200, 100);
+  const treffer = auftraege
+    .filter((a) => (status === "alle" || a.status === status) && (stufe === "alle" || a.stufe === stufe))
+    .sort((x, y) => y.id - x.id);
+  res.json({
+    ok: true,
+    gesamt: treffer.length,
+    auftraege: treffer.slice(0, limit).map((a) => ({
+      id: a.id,
+      createdAt: a.createdAt,
+      tool: a.tool,
+      stufe: a.stufe,
+      summary: schwaerze(a.summary),
+      status: a.status,
+      ...(a.gestartetAm ? { gestartetAm: a.gestartetAm } : {}),
+      ...(a.result !== undefined ? { result: schwaerze(a.result).slice(0, 300) } : {}),
+    })),
+  });
+}
+
+/** GET /api/kosten?tage=1..90 (Standard 30): Verlauf lückenlos, Schweizer Datum; Schätzung nach den Preisen in .env. */
+export function kostenJson(req: Request, res: Response): void {
+  if (notfallAktiv()) return void res.status(423).json(NOTFALL_GESPERRT);
+  res.json({ ok: true, ...verbrauchVerlauf(grenze(req.query.tage, 1, 90, 30)) });
+}
+
+// ---------- Zeitpläne und Wachen bearbeiten ----------
+//
+// Leitplanke 1: Das Dashboard ist der Nutzer selbst (Heimnetz/Tailscale + Token); sein Klick ersetzt das Tippen auf
+// «Freigeben». Ein Zeitplan löst später nur einen Agentenlauf aus – Werkzeuge mit Nebenwirkung brauchen dabei weiterhin
+// ihre eigene Freigabe. Eine Wache schickt Standbilder an die Claude-API (Leitplanke 9): Hinweis in Antwort und UI.
+
+const WACHEN_HINWEIS = "Wachen schicken regelmässig Standbilder an die Claude-API (Haiku), Sir. Nur einrichten, wo Sie das wollen.";
+
+/** ID aus dem Pfad; nur Ziffern, sonst undefined. */
+const pfadId = (req: Request): number | undefined => (/^\d{1,9}$/.test(String(req.params.id ?? "")) ? Number(req.params.id) : undefined);
+
+const zeitplanJson = (z: Zeitplan, jetzt: Date) => {
+  const n = naechsterLauf(z, jetzt, config.zeitplanNachholenMin);
+  return { id: z.id, name: z.name, zeit: z.zeit, tage: z.tage, auftrag: z.auftrag, ...(z.lastRun ? { lastRun: z.lastRun } : {}), ...(z.angelegt ? { angelegt: z.angelegt } : {}), ...(n ? { naechsterLauf: n.toISOString() } : {}) };
+};
+
+const zeitplanAudit = (z: Zeitplan) => ({ id: z.id, name: kurz(z.name, 60), zeit: z.zeit, tage: z.tage, auftrag: kurz(z.auftrag), quelle: "dashboard" });
+
+/** Nur für Tests: Uhr für Zeitpläne (Anlegen, Ändern, nächster Lauf). */
+export const _dashboardUhr = { jetzt: () => new Date() };
+
+export function zeitplaeneJson(_req: Request, res: Response): void {
+  if (notfallAktiv()) return void res.status(423).json(NOTFALL_GESPERRT);
+  const jetzt = _dashboardUhr.jetzt();
+  res.json({ ok: true, unlesbar: zeitplaeneNichtGeladen, ...(zeitplaeneNichtGeladen ? { text: ZEITPLAENE_UNLESBAR } : {}), zeitplaene: zeitplaene.map((z) => zeitplanJson(z, jetzt)) });
+}
+
+/** Gemeinsame Vorprüfung der Schreibrouten; true = Antwort ist schon gesendet. */
+function zeitplanGesperrt(res: Response): boolean {
+  if (notfallAktiv()) res.status(423).json(NOTFALL_GESPERRT);
+  else if (zeitplaeneNichtGeladen) res.status(503).json({ ok: false, error: "zeitplaene_unlesbar", text: ZEITPLAENE_UNLESBAR });
+  else return false;
+  return true;
+}
+
+export function zeitplanAnlegen(req: Request, res: Response): void {
+  if (zeitplanGesperrt(res)) return;
+  const p = pruefeZeitplan(req.body);
+  if (!p.ok) return void res.status(400).json({ ok: false, error: "pruefung", fehler: p.fehler });
+  const jetzt = _dashboardUhr.jetzt();
+  const z: Zeitplan = { id: Math.max(0, ...zeitplaene.map((x) => x.id)) + 1, ...p.wert, angelegt: jetzt.toISOString() };
+  zeitplaene.push(z);
+  saveZeitplaene(jetzt);
+  audit("zeitplan_angelegt", zeitplanAudit(z));
+  res.status(201).json({ ok: true, text: `Zeitplan #${z.id} «${z.name}» eingerichtet, Sir.`, zeitplan: zeitplanJson(z, jetzt) });
+}
+
+export function zeitplanAendern(req: Request, res: Response): void {
+  if (zeitplanGesperrt(res)) return;
+  const id = pfadId(req);
+  const z = id === undefined ? undefined : zeitplaene.find((x) => x.id === id);
+  if (!z) return void res.status(404).json({ ok: false, error: "nicht_gefunden", text: "Diesen Zeitplan gibt es nicht, Sir." });
+  const p = pruefeZeitplan(req.body);
+  if (!p.ok) return void res.status(400).json({ ok: false, error: "pruefung", fehler: p.fehler });
+  const jetzt = _dashboardUhr.jetzt();
+  const termin = p.wert.zeit !== z.zeit || p.wert.tage !== z.tage;
+  Object.assign(z, p.wert);
+  // Wie beim Anlegen: eine heute schon vergangene neue Uhrzeit wird nicht sofort nachgeholt (faelligIm: heute zu spät
+  // angelegt). lastRun bleibt, damit ein heute schon gelaufener Plan nicht ein zweites Mal läuft.
+  if (termin) z.angelegt = jetzt.toISOString();
+  saveZeitplaene(jetzt);
+  audit("zeitplan_geaendert", zeitplanAudit(z));
+  res.json({ ok: true, text: `Zeitplan #${z.id} geändert, Sir.`, zeitplan: zeitplanJson(z, jetzt) });
+}
+
+export function zeitplanLoeschen(req: Request, res: Response): void {
+  if (zeitplanGesperrt(res)) return;
+  const id = pfadId(req);
+  const i = id === undefined ? -1 : zeitplaene.findIndex((x) => x.id === id);
+  if (i < 0) return void res.status(404).json({ ok: false, error: "nicht_gefunden", text: "Diesen Zeitplan gibt es nicht, Sir." });
+  const [z] = zeitplaene.splice(i, 1);
+  saveZeitplaene(_dashboardUhr.jetzt());
+  audit("zeitplan_geloescht", zeitplanAudit(z!));
+  res.json({ ok: true, text: `Zeitplan #${z!.id} gelöscht, Sir.` });
+}
+
+const wacheJson = (w: Wache) =>
+  w.id === undefined
+    ? { kamera: w.kamera, frage: w.frage, alle_minuten: w.alle_minuten, nur_wenn: w.nur_wenn ?? "immer", ...(w.ruhe_minuten !== undefined ? { ruhe_minuten: w.ruhe_minuten } : {}), quelle: "cameras.json", bearbeitbar: false }
+    : { id: w.id, kamera: w.kamera, frage: w.frage, alle_minuten: w.alle_minuten, nur_wenn: w.nur_wenn ?? "immer", ...(w.ruhe_minuten !== undefined ? { ruhe_minuten: w.ruhe_minuten } : {}), quelle: w.quelle ?? "chat", bearbeitbar: true };
+
+const wacheAudit = (w: Wache) => ({ id: w.id, kamera: kurz(w.kamera, 60), alle_minuten: w.alle_minuten, nur_wenn: w.nur_wenn ?? "immer", frage: kurz(w.frage), quelle: "dashboard" });
+
+export function wachenJson(_req: Request, res: Response): void {
+  if (notfallAktiv()) return void res.status(423).json(NOTFALL_GESPERRT);
+  res.json({
+    ok: true,
+    hinweis: WACHEN_HINWEIS,
+    unlesbar: wachenNichtGeladen,
+    ...(wachenNichtGeladen ? { text: WACHEN_UNLESBAR } : {}),
+    kameras: Object.keys(cameras),
+    wachen: allWachen().map(wacheJson),
+  });
+}
+
+function wacheGesperrt(res: Response): boolean {
+  if (notfallAktiv()) res.status(423).json(NOTFALL_GESPERRT);
+  else if (wachenNichtGeladen) res.status(503).json({ ok: false, error: "wachen_unlesbar", text: WACHEN_UNLESBAR });
+  else return false;
+  return true;
+}
+
+const WACHE_NICHT_GEFUNDEN = { ok: false, error: "nicht_gefunden", text: "Diese Wache gibt es hier nicht, Sir. Wachen aus cameras.json ändern Sie in der Datei." } as const;
+
+export function wacheAnlegen(req: Request, res: Response): void {
+  if (wacheGesperrt(res)) return;
+  const p = pruefeWache(req.body);
+  if (!p.ok) return void res.status(400).json({ ok: false, error: "pruefung", fehler: p.fehler });
+  const w: Wache = { id: Math.max(0, ...dynamicWachen.map((x) => x.id ?? 0)) + 1, ...p.wert, quelle: "dashboard" };
+  dynamicWachen.push(w);
+  saveWachen();
+  audit("wache_angelegt", wacheAudit(w));
+  res.status(201).json({ ok: true, text: `Wache #${w.id} auf «${w.kamera}» eingerichtet, Sir.`, hinweis: WACHEN_HINWEIS, wache: wacheJson(w) });
+}
+
+export function wacheAendern(req: Request, res: Response): void {
+  if (wacheGesperrt(res)) return;
+  const id = pfadId(req);
+  const w = id === undefined ? undefined : dynamicWachen.find((x) => x.id === id);
+  if (!w) return void res.status(404).json(WACHE_NICHT_GEFUNDEN);
+  const p = pruefeWache(req.body);
+  if (!p.ok) return void res.status(400).json({ ok: false, error: "pruefung", fehler: p.fehler });
+  delete w.ruhe_minuten; // nicht mitgegeben = Standard
+  Object.assign(w, p.wert);
+  saveWachen();
+  audit("wache_geaendert", wacheAudit(w));
+  res.json({ ok: true, text: `Wache #${w.id} geändert, Sir.`, hinweis: WACHEN_HINWEIS, wache: wacheJson(w) });
+}
+
+export function wacheLoeschen(req: Request, res: Response): void {
+  if (wacheGesperrt(res)) return;
+  const id = pfadId(req);
+  const i = id === undefined ? -1 : dynamicWachen.findIndex((x) => x.id === id);
+  if (i < 0) return void res.status(404).json(WACHE_NICHT_GEFUNDEN);
+  const [w] = dynamicWachen.splice(i, 1);
+  saveWachen();
+  audit("wache_geloescht", wacheAudit(w!));
+  res.json({ ok: true, text: `Wache #${w!.id} gelöscht, Sir.` });
+}
+
+// ---------- Notaus und Notfall ----------
+
+/**
+ * POST /api/notaus {an:true} → wie /pause (ohne PIN, auch im Notfall). {an:false, pin} → wie /weiter, nur mit gültiger
+ * PIN und unter der Dashboard-Sperre; im Notfall nie (Entwarnung nur in Telegram, mit Checkliste).
+ */
+export function notaus(req: Request, res: Response): void {
+  const { an, pin } = (req.body ?? {}) as { an?: unknown; pin?: unknown };
+  if (typeof an !== "boolean") return void res.status(400).json({ ok: false, error: "an", text: "an: true oder false, Sir." });
+  if (an) {
+    notausAn("dashboard");
+    return void res.json({ ok: true, pausiert: true, text: "⛔ Notaus aktiv, Sir. Keine Werkzeuge, Zeitpläne oder Wachen, bis Sie ihn aufheben." });
+  }
+  if (notfallAktiv()) return void res.status(423).json({ ok: false, error: "notfall", text: "Erst /entwarnung in Telegram, Sir." });
+  if (!state.paused) return void res.json({ ok: true, pausiert: false, text: "Es ist kein Notaus aktiv, Sir." });
+  if (!config.pin) return void res.status(409).json({ ok: false, error: "ohne_pin", text: "Ohne JARVIS_PIN hebe ich den Notaus nur in Telegram auf, Sir." });
+  if (typeof pin !== "string" || pin === "") return void res.status(400).json({ ok: false, error: "pin", text: "Die PIN fehlt, Sir." });
+  const ergebnis = pinPruefen(pin, "notaus_aufheben");
+  if (ergebnis === "gesperrt") return void res.status(429).json({ ok: false, error: "pin_gesperrt", text: pinGesperrtText() });
+  if (ergebnis !== "ok") return void res.status(403).json({ ok: false, error: "pin_falsch", text: "Falsche PIN, Sir. Der Notaus bleibt." });
+  if (!notausAus("dashboard")) return void res.status(423).json({ ok: false, error: "notfall", text: "Erst /entwarnung in Telegram, Sir." });
+  res.json({ ok: true, pausiert: false, text: "▶️ Weiter, Sir." });
+}
+
+/** POST /api/notfall {bestaetigt:true}: Notfall auslösen. Läuft er schon, kein zweiter Alarm. */
+export async function notfallAusloesen(req: Request, res: Response): Promise<void> {
+  if ((req.body ?? {}).bestaetigt !== true) return void res.status(400).json({ ok: false, error: "bestaetigt", text: "Bitte ausdrücklich bestätigen, Sir." });
+  if (notfallAktiv()) return void res.json({ ok: true, schon: true, text: "🚨 Der Notfall läuft bereits, Sir." });
+  audit("notfall_ausgeloest", { quelle: "dashboard" });
+  // Nicht auf den Alarmversand warten (bei Telegram-Störung bis ~90 s); ausloesen setzt den Zustand vor dem ersten await.
+  const alarm = ausloesen("Über die Kommandozentrale ausgelöst.");
+  res.json({ ok: true, text: "🚨 Notfall ausgelöst. Die Checkliste kommt per Telegram, Sir." });
+  await alarm;
 }

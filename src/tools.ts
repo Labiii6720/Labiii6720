@@ -11,8 +11,8 @@ import { state } from "./state.js";
 import { clock } from "./time.js";
 import { listFiles, readFile, ROOT, runCommand, safePath, writeFile } from "./workspace.js";
 import * as browser from "./browser.js";
-import { pruefeZeitplaeneSchreibbar, saveZeitplaene, ZEITPLAENE_UNLESBAR, zeitplaene, zeitplaeneNichtGeladen } from "./zeitplaene.js";
-import { cameras, describeCameras, dynamicWachen, eventClip, formatEvents, hasCameras, look, pruefeWachenSchreibbar, recentEvents, saveWachen, allWachen, WACHEN_UNLESBAR, wachenNichtGeladen } from "./cameras.js";
+import { pruefeZeitplaeneSchreibbar, pruefeZeitplan, pruefungsText, saveZeitplaene, ZEITPLAENE_UNLESBAR, zeitplaene, zeitplaeneNichtGeladen } from "./zeitplaene.js";
+import { describeCameras, dynamicWachen, eventClip, formatEvents, hasCameras, look, pruefeWache, pruefeWachenSchreibbar, recentEvents, saveWachen, allWachen, WACHEN_UNLESBAR, wachenNichtGeladen } from "./cameras.js";
 import { addRechnung, erkenneRechnung, formatRechnung, offeneRechnungen, RECHNUNGEN_UNLESBAR, rechnungen, rechnungenNichtGeladen, setzeStatus } from "./finanzen.js";
 import { readMail as gmailRead, searchMails as gmailSearch } from "./gmail.js";
 import { beraterTools } from "./berater.js";
@@ -450,11 +450,13 @@ const plaene: Tool[] = [
     summary: (i) => `Zeitplan «${i.name}» ${i.tage} um ${i.zeit}: ${String(i.auftrag).slice(0, 200)}`,
     run: async (i) => {
       pruefeZeitplaeneSchreibbar();
-      if (!/^\d{2}:\d{2}$/.test(String(i.zeit))) throw new Error("Zeit als HH:MM angeben.");
+      // Dieselben Regeln wie in der Kommandozentrale (zeitplaene.ts)
+      const p = pruefeZeitplan(i);
+      if (!p.ok) throw new Error(pruefungsText(p.fehler));
       const id = (zeitplaene.at(-1)?.id ?? 0) + 1;
-      zeitplaene.push({ id, name: String(i.name), zeit: String(i.zeit), tage: String(i.tage), auftrag: String(i.auftrag), angelegt: new Date().toISOString() });
+      zeitplaene.push({ id, ...p.wert, angelegt: new Date().toISOString() });
       saveZeitplaene();
-      return `Zeitplan #${id} «${i.name}» eingerichtet: ${i.tage} um ${i.zeit}.`;
+      return `Zeitplan #${id} «${p.wert.name}» eingerichtet: ${p.wert.tage} um ${p.wert.zeit}.`;
     },
   },
   {
@@ -524,16 +526,28 @@ const kameras: Tool[] = [
   {
     name: "wache_erstellen",
     description: "Lässt eine Kamera regelmässig eine Frage prüfen (z. B. «Ist der 3D-Druck noch sauber?») und meldet sich bei JA.",
-    input_schema: { type: "object", properties: { kamera: str("Name aus kamera_liste"), frage: str("Ja/Nein-Frage ans Bild"), alle_minuten: num("Prüfintervall in Minuten"), nur_wenn: str("immer, abwesend oder nacht; optional") }, required: ["kamera", "frage", "alle_minuten"] },
+    input_schema: {
+      type: "object",
+      properties: {
+        kamera: str("Name aus kamera_liste"),
+        frage: str("Ja/Nein-Frage ans Bild, höchstens 300 Zeichen"),
+        alle_minuten: num("Prüfintervall in Minuten, 5 bis 1440"),
+        nur_wenn: str("immer, abwesend oder nacht; optional"),
+        ruhe_minuten: num("Ruhezeit nach einer Meldung in Minuten, 0 bis 1440; optional (Standard 30)"),
+      },
+      required: ["kamera", "frage", "alle_minuten"],
+    },
     stufe: "extern", // dauerhafte Wache braucht dein OK
     summary: (i) => `Wache auf «${i.kamera}» alle ${i.alle_minuten} min: ${String(i.frage).slice(0, 200)}`,
     run: async (i) => {
       pruefeWachenSchreibbar();
-      if (!cameras[String(i.kamera)]) throw new Error("Kamera unbekannt.");
+      // Dieselben Regeln wie in der Kommandozentrale (cameras.ts)
+      const p = pruefeWache(i);
+      if (!p.ok) throw new Error(pruefungsText(p.fehler));
       const id = (dynamicWachen.at(-1)?.id ?? 0) + 1;
-      dynamicWachen.push({ id, kamera: String(i.kamera), frage: String(i.frage), alle_minuten: Math.max(1, Number(i.alle_minuten)), nur_wenn: i.nur_wenn });
+      dynamicWachen.push({ id, ...p.wert, quelle: "chat" });
       saveWachen();
-      return `Wache #${id} auf «${i.kamera}» alle ${i.alle_minuten} Minuten eingerichtet.`;
+      return `Wache #${id} auf «${p.wert.kamera}» alle ${p.wert.alle_minuten} Minuten eingerichtet.`;
     },
   },
   {

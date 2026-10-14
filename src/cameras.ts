@@ -31,6 +31,8 @@ export interface Wache {
   alle_minuten: number;
   nur_wenn?: Bedingung;
   ruhe_minuten?: number;
+  /** Wo die dynamische Wache angelegt wurde; ältere Einträge ohne Angabe stammen aus dem Chat */
+  quelle?: "dashboard" | "chat";
 }
 
 export interface Camera {
@@ -246,4 +248,40 @@ export function saveWachen(): void {
 export function allWachen(): Wache[] {
   const fromConfig = Object.entries(cameras).flatMap(([kamera, c]) => (c.wachen ?? []).map((w) => ({ ...w, kamera })));
   return [...fromConfig, ...dynamicWachen];
+}
+
+// ---------- Prüfung (Werkzeug und Kommandozentrale, gleiche Regeln) ----------
+
+export type WacheEingabe = Pick<Wache, "kamera" | "frage" | "alle_minuten" | "nur_wenn" | "ruhe_minuten">;
+
+const BEDINGUNGEN: Bedingung[] = ["immer", "abwesend", "nacht"];
+
+/** Ganze Zahl in [min, max] (auch als Ziffernfolge im Text), sonst undefined. */
+function ganzzahl(v: unknown, min: number, max: number): number | undefined {
+  const n = typeof v === "number" ? v : typeof v === "string" && /^\s*\d+\s*$/.test(v) ? Number(v) : Number.NaN;
+  return Number.isInteger(n) && n >= min && n <= max ? n : undefined;
+}
+
+/**
+ * Prüft eine Wache, bevor sie angelegt oder geändert wird: kamera muss in cameras.json stehen, frage 1–300 Zeichen,
+ * alle_minuten 5–1440, nur_wenn immer|abwesend|nacht (Standard immer), ruhe_minuten 0–1440 (optional). Rein.
+ */
+export function pruefeWache(eingabe: unknown, bekannt: Record<string, unknown> = cameras): { ok: true; wert: WacheEingabe } | { ok: false; fehler: Record<string, string> } {
+  const e = (eingabe && typeof eingabe === "object" ? eingabe : {}) as Record<string, unknown>;
+  const fehler: Record<string, string> = {};
+  const kamera = typeof e.kamera === "string" ? e.kamera.trim() : "";
+  if (!kamera || !Object.hasOwn(bekannt, kamera)) fehler.kamera = "Diese Kamera kenne ich nicht, Sir.";
+  const frage = typeof e.frage === "string" ? e.frage.trim() : "";
+  if (frage.length < 1 || frage.length > 300) fehler.frage = "Frage: 1 bis 300 Zeichen, Sir.";
+  const alle = ganzzahl(e.alle_minuten, 5, 1440);
+  if (alle === undefined) fehler.alle_minuten = "Intervall: ganze Minuten von 5 bis 1440, Sir.";
+  const nurWenn = e.nur_wenn === undefined || e.nur_wenn === null || e.nur_wenn === "" ? "immer" : e.nur_wenn;
+  if (!BEDINGUNGEN.includes(nurWenn as Bedingung)) fehler.nur_wenn = "Bedingung: immer, abwesend oder nacht, Sir.";
+  let ruhe: number | undefined;
+  if (e.ruhe_minuten !== undefined && e.ruhe_minuten !== null && e.ruhe_minuten !== "") {
+    ruhe = ganzzahl(e.ruhe_minuten, 0, 1440);
+    if (ruhe === undefined) fehler.ruhe_minuten = "Ruhezeit: ganze Minuten von 0 bis 1440, Sir.";
+  }
+  if (Object.keys(fehler).length > 0) return { ok: false, fehler };
+  return { ok: true, wert: { kamera, frage, alle_minuten: alle!, nur_wenn: nurWenn as Bedingung, ...(ruhe !== undefined ? { ruhe_minuten: ruhe } : {}) } };
 }

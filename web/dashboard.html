@@ -2,223 +2,198 @@
 <html lang="de">
 <head>
 <meta charset="utf-8">
-<!-- CSP: nur genau dieses Skript (Hash), keine Inline-Handler, Verbindungen nur zum eigenen Ursprung. Nach jeder Änderung am Skript den Hash neu setzen (test/dashboard-html.test.ts prüft ihn). -->
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-z3qB2ymx0hrAuFw8nprPczCu9OlNBQWQ9YgPsL1KN8Y='; style-src 'unsafe-inline'; img-src 'self' blob:; connect-src 'self'; base-uri 'none'; form-action 'none'">
+<!-- CSP kommt als Header vom Server (src/dashboard.ts DASHBOARD_CSP): nur eigener Ursprung, kein Inline-Code, keine Inline-Stile. -->
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>JARVIS // COMMAND CENTER</title>
-<style>
-  :root { --bg:#06070b; --panel:#0c0f16; --panel2:#11151f; --line:#1c2230; --text:#dce0e8; --dim:#6b7484; --accent:#ff8a3d; --ok:#7ee787; --warn:#ff6b6b; --blue:#58a6ff; }
-  * { box-sizing:border-box; }
-  html,body { margin:0; height:100%; background:var(--bg); color:var(--text); font:13px/1.45 "SF Mono",Menlo,Consolas,monospace; }
-  a { color:var(--blue); }
-  .top { display:flex; align-items:center; gap:16px; padding:12px 18px; border-bottom:1px solid var(--line); position:sticky; top:0; background:var(--bg); z-index:5; flex-wrap:wrap; }
-  .top h1 { font-size:14px; letter-spacing:.18em; margin:0; }
-  .badge { font-size:11px; padding:3px 9px; border:1px solid var(--line); border-radius:999px; color:var(--dim); }
-  .badge.on { color:var(--ok); border-color:#214a2b; }
-  .badge.warn { color:var(--warn); border-color:#4a2121; }
-  .badge.alarm { color:#fff; background:var(--warn); border-color:var(--warn); }
-  .top .modes { margin-left:auto; display:flex; gap:6px; }
-  .top button { background:#141926; border:1px solid #2a3140; color:var(--text); border-radius:6px; padding:5px 10px; font:inherit; cursor:pointer; }
-  .top button.sel { border-color:var(--accent); color:var(--accent); }
-  .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(320px,1fr)); gap:14px; padding:16px; }
-  .card { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:14px; }
-  .card h2 { margin:0 0 10px; font-size:11px; letter-spacing:.14em; color:var(--dim); font-weight:600; }
-  .row { padding:8px 0; border-top:1px solid var(--line); }
-  .row:first-of-type { border-top:none; }
-  .muted { color:var(--dim); }
-  .btns { display:flex; gap:6px; margin-top:8px; flex-wrap:wrap; }
-  button.act { background:#161b27; border:1px solid #2a3140; color:var(--text); border-radius:6px; padding:6px 10px; font:inherit; cursor:pointer; }
-  button.ok { border-color:#2f6b3a; color:var(--ok); }
-  button.no { border-color:#6b2f2f; color:var(--warn); }
-  input, .chatbox textarea { background:#0a0d14; border:1px solid var(--line); color:var(--text); border-radius:6px; padding:7px 9px; font:inherit; width:100%; }
-  .cams { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
-  .cams figure { margin:0; }
-  .cams img { width:100%; border-radius:8px; border:1px solid var(--line); background:#000; aspect-ratio:4/3; object-fit:cover; }
-  .cams figcaption { font-size:11px; color:var(--dim); margin-top:3px; }
-  .chat { grid-column:1/-1; }
-  .chatlog { max-height:260px; overflow:auto; display:flex; flex-direction:column; gap:8px; margin-bottom:10px; }
-  .msg { padding:8px 10px; border-radius:8px; white-space:pre-wrap; }
-  .msg.me { background:#13202e; align-self:flex-end; max-width:80%; }
-  .msg.jv { background:var(--panel2); border:1px solid var(--line); max-width:90%; }
-  .chatbox { display:flex; gap:8px; }
-  .chatbox button { background:var(--accent); color:#111; border:none; border-radius:6px; padding:0 16px; font:inherit; font-weight:600; cursor:pointer; }
-  pre.audit { max-height:220px; overflow:auto; margin:0; color:var(--dim); font-size:11px; white-space:pre-wrap; }
-  .pill { font-size:10px; padding:2px 7px; border-radius:999px; border:1px solid var(--line); color:var(--dim); }
-  .pill.sens { color:var(--warn); border-color:#4a2121; }
-  .pill.ext { color:var(--accent); border-color:#4a3321; }
-  #gate { position:fixed; inset:0; background:var(--bg); display:flex; align-items:center; justify-content:center; z-index:10; }
-  #gate .box { width:min(360px,90%); background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:20px; }
-  .danger { background:#1a0e0e; border-color:#4a2121; }
-  .danger button { border-color:#6b2f2f; color:var(--warn); }
-</style>
+<meta name="color-scheme" content="dark light">
+<meta name="referrer" content="no-referrer">
+<title>JARVIS Kommandozentrale</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="/dashboard/app.css">
+<script src="/dashboard/app.js" defer></script>
 </head>
-<body>
-<div id="gate"><div class="box">
-  <h2 style="letter-spacing:.14em;color:var(--dim)">JARVIS // COMMAND CENTER</h2>
-  <p class="muted">Token eingeben (JARVIS_EVENT_TOKEN). Wird nur in diesem Browser gespeichert.</p>
-  <input id="token" type="password" placeholder="Token" autofocus>
-  <div class="btns"><button class="act ok" id="enter" style="flex:1">Verbinden</button></div>
-  <p class="muted" id="gateErr"></p>
-</div></div>
+<body class="abgemeldet">
+<svg class="sprite" aria-hidden="true">
+  <symbol id="i-check" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M8.3 12.3l2.5 2.5 4.9-5"/></symbol>
+  <symbol id="i-x" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M9.2 9.2l5.6 5.6M14.8 9.2l-5.6 5.6"/></symbol>
+  <symbol id="i-warn" viewBox="0 0 24 24"><path d="M12 4.2l8.6 15H3.4z"/><path d="M12 10v4"/><path d="M12 16.9v.1"/></symbol>
+  <symbol id="i-kreis" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M12 8v4l2.5 1.5"/></symbol>
+  <symbol id="i-krit" viewBox="0 0 24 24"><path d="M8.5 3.5h7l5 5v7l-5 5h-7l-5-5v-7z"/><path d="M12 8v5"/><path d="M12 16v.1"/></symbol>
+  <symbol id="i-lauf" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5" opacity=".35"/><path d="M12 3.5a8.5 8.5 0 0 1 8.5 8.5"/></symbol>
+  <symbol id="i-lock" viewBox="0 0 24 24"><rect x="5" y="10.5" width="14" height="9.5" rx="2"/><path d="M8.5 10.5V8a3.5 3.5 0 0 1 7 0v2.5"/></symbol>
+  <symbol id="i-out" viewBox="0 0 24 24"><path d="M13.5 5H19v5.5"/><path d="M19 5l-8 8"/><path d="M17 14v4a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 5 18V9a1.5 1.5 0 0 1 1.5-1.5H10"/></symbol>
+  <symbol id="i-sonne" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3.8"/><path d="M12 3v2M12 19v2M3 12h2M19 12h2M5.6 5.6L7 7M17 17l1.4 1.4M5.6 18.4L7 17M17 7l1.4-1.4"/></symbol>
+  <symbol id="i-mond" viewBox="0 0 24 24"><path d="M19 14.5A7.5 7.5 0 0 1 9.5 5a7.5 7.5 0 1 0 9.5 9.5z"/></symbol>
+  <symbol id="i-ab" viewBox="0 0 24 24"><path d="M14.5 4.5h3a1.5 1.5 0 0 1 1.5 1.5v12a1.5 1.5 0 0 1-1.5 1.5h-3"/><path d="M10 8l-4 4 4 4"/><path d="M6 12h9.5"/></symbol>
+  <symbol id="i-stift" viewBox="0 0 24 24"><path d="M5 19h3.5L18.5 9 15 5.5 5 15.5z"/><path d="M13 7.5l3.5 3.5"/></symbol>
+  <symbol id="i-weg" viewBox="0 0 24 24"><path d="M5 7h14"/><path d="M10 7V5h4v2"/><path d="M7 7l.9 12.5h8.2L17 7"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5.5v13M5.5 12h13"/></symbol>
+  <symbol id="i-pause" viewBox="0 0 24 24"><path d="M9 6.5v11M15 6.5v11"/></symbol>
+  <symbol id="i-play" viewBox="0 0 24 24"><path d="M8.5 6l10 6-10 6z"/></symbol>
+  <symbol id="i-alarm" viewBox="0 0 24 24"><path d="M6 18v-5a6 6 0 0 1 12 0v5"/><path d="M4 18h16"/><path d="M12 3v1.5M4.5 6.5l1 1M19.5 6.5l-1 1"/></symbol>
+  <symbol id="i-auge" viewBox="0 0 24 24"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z"/><circle cx="12" cy="12" r="3"/></symbol>
+  <symbol id="i-tabelle" viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="14" rx="2"/><path d="M4 10h16M4 14.5h16M10 10v9"/></symbol>
+  <symbol id="i-diag" viewBox="0 0 24 24"><path d="M4 19.5h16"/><path d="M7 16v-5M12 16V7M17 16v-8"/></symbol>
+  <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M12 11v5M12 8v.1"/></symbol>
+  <symbol id="i-marke" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><circle cx="12" cy="12" r="3.2"/><path d="M12 3.5v3M12 17.5v3M3.5 12h3M17.5 12h3"/></symbol>
+  <symbol id="i-senden" viewBox="0 0 24 24"><path d="M5 12h13M13 6.5l5.5 5.5-5.5 5.5"/></symbol>
+  <symbol id="i-leer" viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="14" rx="2.5"/><path d="M4 13h4.5l1.5 2h4l1.5-2H20"/></symbol>
+  <symbol id="i-schild" viewBox="0 0 24 24"><path d="M12 3.5l7 2.8v5.5c0 4.3-2.9 7.3-7 8.7-4.1-1.4-7-4.4-7-8.7V6.3z"/></symbol>
+  <symbol id="i-netz" viewBox="0 0 24 24"><path d="M4.5 9.5a11 11 0 0 1 15 0"/><path d="M7.5 12.8a6.5 6.5 0 0 1 9 0"/><path d="M12 16.5v.1"/><path d="M4 4l16 16"/></symbol>
+</svg>
 
-<div class="top">
-  <h1>JARVIS</h1>
-  <span class="badge" id="bModus">–</span>
-  <span class="badge" id="bState"></span>
-  <span class="muted" id="clock"></span>
-  <div class="modes">
-    <button data-m="normal">Normal</button>
-    <button data-m="fokus">Fokus</button>
-    <button data-m="nacht">Nacht</button>
+<a class="skip" href="#main">Zum Inhalt springen</a>
+
+<header class="top">
+  <div class="wrap top-in">
+    <div class="brand"><svg class="i" aria-hidden="true"><use href="#i-marke"/></svg><span class="wort">JARVIS</span></div>
+    <span class="plakette" id="zustand" role="status"><span class="dot" aria-hidden="true"></span><span id="zustandText">Verbinde …</span></span>
+    <span class="stoerung" id="stoerung" role="status" hidden><svg class="i s" aria-hidden="true"><use href="#i-netz"/></svg>Verbindung gestört</span>
+    <span class="spacer"></span>
+    <div class="seg seg-oben" role="radiogroup" aria-label="Modus">
+      <button type="button" role="radio" aria-checked="false" data-modus="normal">Normal</button>
+      <button type="button" role="radio" aria-checked="false" data-modus="fokus">Fokus</button>
+      <button type="button" role="radio" aria-checked="false" data-modus="nacht">Nacht</button>
+    </div>
+    <span class="uhr" id="uhr"></span>
+    <button class="ikon" id="thema" type="button" aria-label="Helles Thema"><svg class="i" aria-hidden="true"><use href="#i-sonne"/></svg></button>
+    <button class="knopf gefahr notaus" id="notausKnopf" type="button" data-aktion="notaus"><svg class="i s" aria-hidden="true"><use href="#i-pause"/></svg><span>Notaus</span></button>
+    <button class="ikon" id="abmelden" type="button" data-aktion="abmelden" aria-label="Abmelden"><svg class="i" aria-hidden="true"><use href="#i-ab"/></svg></button>
   </div>
-</div>
+  <nav class="wrap tabs" aria-label="Bereiche" id="tabs">
+    <a href="#uebersicht">Übersicht</a>
+    <a href="#freigaben">Freigaben <span class="zahl" id="zahlFreigaben" hidden></span></a>
+    <a href="#kosten">Kosten</a>
+    <a href="#finanzen">Finanzen <span class="zahl" id="zahlFinanzen" hidden></span></a>
+    <a href="#zeitplaene">Zeitpläne &amp; Wachen</a>
+    <a href="#kameras">Kameras</a>
+    <a href="#gespraech">Gespräch</a>
+    <a href="#protokoll">Protokoll</a>
+    <a href="#sicherheit">Sicherheit</a>
+  </nav>
+  <div class="band-notfall" id="bandNotfall" hidden><div class="wrap"><svg class="i" aria-hidden="true"><use href="#i-krit"/></svg><span><b>Notfall aktiv.</b> Ich habe isoliert, gesperrt und alarmiert. Die Entwarnung geht nur per /entwarnung in Telegram.</span></div></div>
+</header>
 
-<div class="grid" id="grid" hidden>
-  <div class="card"><h2>AUFTRÄGE <span id="qn" class="pill"></span></h2><div id="queue"></div></div>
-  <div class="card"><h2>RECHNUNGEN</h2><div id="bills"></div></div>
-  <div class="card"><h2>PROTOKOLLE</h2><div id="protos"></div></div>
-  <div class="card"><h2>ZIELE</h2><div id="goals"></div></div>
-  <div class="card"><h2>VORGÄNGE &amp; ZEITPLÄNE</h2><div id="ops"></div></div>
-  <div class="card"><h2>KAMERAS</h2><div class="cams" id="cams"></div></div>
-  <div class="card chat"><h2>GESPRÄCH</h2>
-    <div class="chatlog" id="chatlog"></div>
-    <div class="chatbox"><input id="chatin" placeholder="Sag etwas zu Jarvis …"><button id="send">Senden</button></div>
-  </div>
-  <div class="card"><h2>PROTOKOLL (AUDIT)</h2><pre class="audit" id="audit"></pre></div>
-  <div class="card danger"><h2>NOTFALL</h2>
-    <p class="muted">Löst den Angriffs-Notfall aus: alles sperren, alarmieren. Nur im Ernstfall.</p>
-    <div class="btns"><button class="act no" id="panic">🚨 Notfall auslösen</button></div>
-  </div>
-</div>
+<main id="main" class="wrap" tabindex="-1">
+  <section class="view" id="v-uebersicht" aria-labelledby="h-uebersicht"></section>
+  <section class="view" id="v-freigaben" aria-labelledby="h-freigaben" hidden></section>
+  <section class="view" id="v-kosten" aria-labelledby="h-kosten" hidden></section>
+  <section class="view fin-seite" id="v-finanzen" aria-labelledby="h-finanzen" hidden></section>
+  <section class="view" id="v-zeitplaene" aria-labelledby="h-zeitplaene" hidden></section>
+  <section class="view" id="v-kameras" aria-labelledby="h-kameras" hidden></section>
+  <section class="view" id="v-gespraech" aria-labelledby="h-gespraech" hidden></section>
+  <section class="view" id="v-protokoll" aria-labelledby="h-protokoll" hidden></section>
+  <section class="view" id="v-sicherheit" aria-labelledby="h-sicherheit" hidden></section>
+</main>
 
-<script>
-const $ = (id) => document.getElementById(id);
-let TOKEN = "";
-try { TOKEN = localStorage.getItem("jarvis.dash") || ""; } catch {}
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+<div class="sr" id="ansage" aria-live="polite"></div>
 
-async function api(path, opts = {}) {
-  const res = await fetch(path, { ...opts, headers: { Authorization: "Bearer " + TOKEN, "Content-Type": "application/json", ...(opts.headers || {}) } });
-  if (res.status === 401) throw new Error("unauthorized");
-  return res.json();
-}
+<!-- PIN (sensible Freigabe, Notaus aufheben) -->
+<dialog id="dlgPin" aria-labelledby="pinTitel" aria-describedby="pinText">
+  <form method="dialog" id="pinForm" novalidate>
+    <div class="dlg-kopf"><h2 id="pinTitel">PIN, bitte</h2><p id="pinText"></p></div>
+    <div class="dlg-rumpf">
+      <div class="feldgr" id="pinGr">
+        <label for="pinFeld" class="sr">PIN</label>
+        <input class="feld pin" id="pinFeld" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" maxlength="64" aria-describedby="pinFehler pinHilfe">
+        <div class="fehler" id="pinFehler" role="alert" hidden></div>
+        <div class="hilfe" id="pinHilfe"><span class="h-text" id="pinHilfeText"></span></div>
+      </div>
+    </div>
+    <div class="dlg-fuss">
+      <button class="knopf leise" type="button" data-schliessen>Abbrechen</button>
+      <button class="knopf prim" id="pinOk" type="submit" value="ok">Freigeben</button>
+    </div>
+  </form>
+</dialog>
 
-async function connect(token) {
-  TOKEN = token;
-  try {
-    await api("/status.json");
-    try { localStorage.setItem("jarvis.dash", token); } catch {}
-    $("gate").hidden = true; $("grid").hidden = false;
-    tick(); setInterval(tick, 5000);
-  } catch (e) {
-    $("gateErr").textContent = e.message === "unauthorized" ? "Token stimmt nicht." : e.message;
-  }
-}
-$("enter").onclick = () => connect($("token").value.trim());
-$("token").onkeydown = (e) => { if (e.key === "Enter") $("enter").click(); };
+<!-- Zeitplan (Teil der Bereiche Zeitpläne & Wachen) -->
+<dialog id="dlgPlan" aria-labelledby="planTitel">
+  <form method="dialog" id="planForm" novalidate>
+    <div class="dlg-kopf"><h2 id="planTitel">Neuer Zeitplan</h2><p>Ein Zeitplan startet nur einen Agentenlauf. Werkzeuge mit Nebenwirkung fragen dann trotzdem nach.</p></div>
+    <div class="dlg-rumpf">
+      <div class="feldgr" data-feld="name">
+        <label for="pName">Name</label>
+        <input class="feld" id="pName" maxlength="60" autocomplete="off" aria-describedby="pNameF">
+        <div class="fehler" id="pNameF" hidden></div>
+      </div>
+      <div class="feldgr" data-feld="zeit">
+        <label for="pZeit">Uhrzeit</label>
+        <input class="feld num" id="pZeit" inputmode="numeric" maxlength="5" placeholder="07:30" autocomplete="off" aria-describedby="pZeitF pZeitH">
+        <div class="fehler" id="pZeitF" hidden></div>
+        <div class="hilfe" id="pZeitH"><span class="h-text">24-Stunden-Format, HH:MM. Ist die Zeit heute schon vorbei, beginne ich morgen.</span></div>
+      </div>
+      <div class="feldgr" data-feld="tage">
+        <span class="lab" id="pTageLab">Tage</span>
+        <div class="wahlreihe" role="radiogroup" aria-labelledby="pTageLab">
+          <label class="chip"><input type="radio" name="tageArt" value="taeglich"><span>Täglich</span></label>
+          <label class="chip"><input type="radio" name="tageArt" value="werktags"><span>Werktags</span></label>
+          <label class="chip"><input type="radio" name="tageArt" value="liste"><span>Bestimmte Tage</span></label>
+        </div>
+        <div class="wahlreihe tage-kl" id="pTage" role="group" aria-label="Wochentage" aria-describedby="pTageF"></div>
+        <div class="fehler" id="pTageF" hidden></div>
+      </div>
+      <div class="feldgr" data-feld="auftrag">
+        <label for="pAuftrag">Auftrag an Jarvis</label>
+        <textarea class="feld" id="pAuftrag" rows="4" maxlength="2000" aria-describedby="pAuftragF"></textarea>
+        <div class="fehler" id="pAuftragF" hidden></div>
+        <div class="hilfe"><span class="h-text">Klar formulieren, was ich tun soll.</span><span class="num zaehler" id="pZaehler">0 / 2000</span></div>
+      </div>
+    </div>
+    <div class="dlg-fuss">
+      <button class="knopf leise" type="button" data-schliessen>Abbrechen</button>
+      <button class="knopf prim" id="planOk" type="submit" value="ok">Speichern</button>
+    </div>
+  </form>
+</dialog>
 
-// Jeder Wert vom Server ist fremd (Ziele, Betreffs, Namen stammen letztlich aus Mails und Claude): immer esc(), auch in Attributen.
-const esc = (s) => String(s ?? "").replace(/[<>&"']/g, (c) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;", '"': "&quot;", "'": "&#39;" }[c]));
+<!-- Wache (Teil der Bereiche Zeitpläne & Wachen) -->
+<dialog id="dlgWache" aria-labelledby="wacheTitel">
+  <form method="dialog" id="wacheForm" novalidate>
+    <div class="dlg-kopf"><h2 id="wacheTitel">Neue Wache</h2><p>Eine Wache schickt regelmässig Standbilder an die Claude-API (Haiku). Nur einrichten, wo Sie das wollen, Sir.</p></div>
+    <div class="dlg-rumpf">
+      <div class="feldgr" data-feld="kamera"><label for="wKamera">Kamera</label><select class="wahl" id="wKamera" aria-describedby="wKameraF"></select><div class="fehler" id="wKameraF" hidden></div></div>
+      <div class="feldgr" data-feld="frage"><label for="wFrage">Frage an das Bild</label><textarea class="feld" id="wFrage" rows="2" maxlength="300" aria-describedby="wFrageF"></textarea><div class="fehler" id="wFrageF" hidden></div></div>
+      <div class="zwei">
+        <div class="feldgr" data-feld="alle_minuten"><label for="wAlle">Alle … Minuten</label><input class="feld num" id="wAlle" type="number" min="5" max="1440" inputmode="numeric" aria-describedby="wAlleF"><div class="fehler" id="wAlleF" hidden></div></div>
+        <div class="feldgr" data-feld="ruhe_minuten"><label for="wRuhe">Ruhe nach Meldung (Min)</label><input class="feld num" id="wRuhe" type="number" min="0" max="1440" inputmode="numeric" aria-describedby="wRuheF"><div class="fehler" id="wRuheF" hidden></div></div>
+      </div>
+      <div class="feldgr" data-feld="nur_wenn"><label for="wWenn">Nur wenn</label><select class="wahl" id="wWenn" aria-describedby="wWennF"><option value="immer">immer</option><option value="abwesend">Sie abwesend sind</option><option value="nacht">es Nacht ist</option></select><div class="fehler" id="wWennF" hidden></div></div>
+    </div>
+    <div class="dlg-fuss"><button class="knopf leise" type="button" data-schliessen>Abbrechen</button><button class="knopf prim" id="wacheOk" type="submit" value="ok">Speichern</button></div>
+  </form>
+</dialog>
 
-function render(d) {
-  $("clock").textContent = new Date(d.zeit).toLocaleTimeString("de-CH");
-  $("bModus").textContent = "Modus: " + d.modus;
-  const st = $("bState");
-  st.className = "badge " + (d.notfall ? "alarm" : d.pausiert ? "warn" : "on");
-  st.textContent = d.notfall ? "NOTFALL" : d.pausiert ? "pausiert" : "bereit";
-  document.querySelectorAll(".modes button").forEach((b) => b.classList.toggle("sel", b.dataset.m === d.modus));
+<!-- Bestätigen -->
+<dialog id="dlgFrage" aria-labelledby="frageTitel" aria-describedby="frageText">
+  <form method="dialog" id="frageForm">
+    <div class="dlg-kopf"><h2 id="frageTitel"></h2><p id="frageText"></p></div>
+    <div class="dlg-fuss"><button class="knopf leise" type="button" data-schliessen>Abbrechen</button><button class="knopf prim" id="frageOk" type="submit" value="ok">OK</button></div>
+  </form>
+</dialog>
 
-  // Im Notfall liefert der Server keine Inhalte, nur die Anzahl offener Aufträge.
-  $("qn").textContent = d.offeneAuftraege ?? d.auftraege.length;
-  $("queue").innerHTML = d.auftraege.length ? d.auftraege.map((a) => `
-    <div class="row"><span class="pill ${a.stufe === "sensibel" ? "sens" : "ext"}">${esc(a.stufe)}</span> #${esc(a.id)}
-      <div>${esc(a.summary)}</div>
-      <div class="btns">
-        <button class="act ok" data-aktion="freigeben" data-id="${esc(a.id)}" data-stufe="${esc(a.stufe)}">Freigeben</button>
-        <button class="act no" data-aktion="ablehnen" data-id="${esc(a.id)}">Ablehnen</button>
-      </div></div>`).join("") : '<div class="muted">' + (d.notfall && d.offeneAuftraege ? `Notfall: ${Number(d.offeneAuftraege)} offen, Inhalte erst nach /entwarnung.` : "Keine offenen Aufträge.") + '</div>';
+<!-- Kamera gross -->
+<dialog id="dlgBild" class="gross-bild" aria-labelledby="bildTitel">
+  <form method="dialog">
+    <img id="bildGross" alt="">
+    <div class="dlg-fuss zwischen"><div><span class="bt" id="bildTitel"></span> <span class="t3" id="bildStand"></span></div><button class="knopf" type="submit" value="zu">Schliessen</button></div>
+  </form>
+</dialog>
 
-  $("bills").innerHTML = d.rechnungen.length ? d.rechnungen.map((r) => `
-    <div class="row">#${esc(r.id)} ${esc(r.empfaenger)} · ${r.betrag != null ? esc(r.betrag.toFixed(2) + " " + r.waehrung) : "Betrag unklar"}
-      <div class="muted">${r.faellig ? "fällig " + esc(r.faellig) : ""}</div></div>`).join("") : '<div class="muted">' + (d.rechnungenUnlesbar ? "data/rechnungen.json ist unlesbar: reparieren und Jarvis neu starten." : "Keine offenen Rechnungen.") + '</div>';
-
-  $("protos").innerHTML = d.protokolle.length ? d.protokolle.map((p) => `
-    <div class="row"><b>${esc(p.name)}</b> <span class="pill ${p.stufe === "sensibel" ? "sens" : p.stufe === "extern" ? "ext" : ""}">${esc(p.stufe)}</span>
-      <div class="muted">${esc(p.beschreibung)}</div>
-      <div class="btns"><button class="act" data-aktion="protokoll" data-name="${esc(p.name)}">Ausführen</button></div></div>`).join("") : '<div class="muted">Keine Protokolle.</div>';
-
-  $("goals").innerHTML = d.ziele.length ? d.ziele.map((z) => `<div class="row">#${esc(z.id)} ${esc(z.text)}${z.frist ? ` <span class="muted">(bis ${esc(z.frist)})</span>` : ""}</div>`).join("") : '<div class="muted">Noch keine Ziele.</div>';
-
-  const ops = [...d.vorgaenge.map((v) => `<div class="row">🧠 #${esc(v.id)} ${esc(v.status)} · ${esc(v.steps)} Schr. · ${esc(v.auftrag)}</div>`),
-               ...d.zeitplaene.map((z) => `<div class="row">🕒 ${esc(z.name)} · ${esc(z.tage)} ${esc(z.zeit)}</div>`),
-               ...d.wachen.map((w) => `<div class="row">👁 ${esc(w.kamera)} · alle ${esc(w.alle_minuten)} min · ${esc(w.frage)}</div>`)];
-  $("ops").innerHTML = ops.join("") || '<div class="muted">Nichts geplant.</div>';
-
-  if ($("cams").dataset.done !== "1" && d.kameras.length) {
-    $("cams").innerHTML = d.kameras.map((c) => `<figure><img alt="${esc(c.name)}" data-cam="${esc(c.name)}"><figcaption>${esc(c.beschreibung)}</figcaption></figure>`).join("");
-    $("cams").dataset.done = "1";
-    refreshCams();
-  }
-  if (!d.kameras.length) {
-    $("cams").innerHTML = '<div class="muted">' + (d.notfall ? "Im Notfall gesperrt." : "Keine Kameras.") + '</div>';
-    // Zurücksetzen, damit die Bilder nach /entwarnung wieder angelegt werden.
-    $("cams").dataset.done = "";
-  }
-}
-
-function refreshCams() {
-  document.querySelectorAll("#cams img[data-cam]").forEach((img) => {
-    fetch(`/api/kamera/${encodeURIComponent(img.dataset.cam)}`, { headers: { Authorization: "Bearer " + TOKEN } })
-      .then((r) => (r.ok ? r.blob() : null)).then((b) => { if (b) img.src = URL.createObjectURL(b); }).catch(() => {});
-  });
-}
-setInterval(() => { if (!$("grid").hidden) refreshCams(); }, 15000);
-
-async function tick() {
-  try {
-    const d = await api("/status.json"); render(d);
-    const a = await api("/api/audit"); $("audit").textContent = a.lines.join("\n");
-  } catch (e) { if (e.message === "unauthorized") location.reload(); }
-}
-
-window.freigeben = async (id, stufe) => {
-  let pin;
-  if (stufe === "sensibel") { pin = prompt("PIN für diesen sensiblen Auftrag:"); if (pin == null) return; }
-  const r = await api("/api/auftrag", { method: "POST", body: JSON.stringify({ id, aktion: "ok", pin }) });
-  if (r.text) addChat("jv", r.text); tick();
-};
-window.ablehnen = async (id) => { const r = await api("/api/auftrag", { method: "POST", body: JSON.stringify({ id, aktion: "nein" }) }); if (r.text) addChat("jv", r.text); tick(); };
-window.protokoll = async (name) => { const r = await api("/api/protokoll", { method: "POST", body: JSON.stringify({ name }) }); addChat("jv", r.text || r.error || ""); tick(); };
-
-// Schaltflächen über data-Attribute statt onclick-Strings: die CSP verbietet Inline-Handler, und Werte landen nie in Code.
-$("grid").onclick = (e) => {
-  const b = e.target && e.target.closest ? e.target.closest("button[data-aktion]") : null;
-  if (!b) return;
-  const { aktion, id, stufe, name } = b.dataset;
-  if (aktion === "freigeben") window.freigeben(Number(id), stufe);
-  else if (aktion === "ablehnen") window.ablehnen(Number(id));
-  else if (aktion === "protokoll") window.protokoll(name);
-};
-
-document.querySelectorAll(".modes button").forEach((b) => b.onclick = () => api("/api/modus", { method: "POST", body: JSON.stringify({ modus: b.dataset.m }) }).then(tick));
-
-function addChat(who, text) { const d = document.createElement("div"); d.className = "msg " + who; d.textContent = text; $("chatlog").appendChild(d); $("chatlog").scrollTop = 1e9; }
-async function send() {
-  const t = $("chatin").value.trim(); if (!t) return;
-  $("chatin").value = ""; addChat("me", t);
-  try { const r = await api("/api/chat", { method: "POST", body: JSON.stringify({ text: t }) }); addChat("jv", r.reply); tick(); }
-  catch (e) { addChat("jv", "Fehler: " + e.message); }
-}
-$("send").onclick = send;
-$("chatin").onkeydown = (e) => { if (e.key === "Enter") send(); };
-
-$("panic").onclick = async () => {
-  if (!confirm("Notfall auslösen? Jarvis sperrt alles und alarmiert dich. Nur im Ernstfall.")) return;
-  await api("/api/chat", { method: "POST", body: JSON.stringify({ text: "/notfall" }) }).catch(() => {});
-  addChat("jv", "🚨 Notfall ausgelöst. Prüfe Telegram für die Checkliste.");
-  setTimeout(tick, 500);
-};
-
-if (TOKEN) connect(TOKEN); else $("token").focus();
-</script>
+<!-- Anmelden -->
+<dialog id="dlgAnmelden" aria-labelledby="anmTitel" aria-describedby="anmText">
+  <form method="dialog" id="anmForm" novalidate>
+    <div class="dlg-kopf"><h2 id="anmTitel">Guten Tag, Sir.</h2><p id="anmText">Token der Kommandozentrale (JARVIS_EVENT_TOKEN). Er bleibt in diesem Browser.</p></div>
+    <div class="dlg-rumpf">
+      <div class="feldgr" id="anmGr">
+        <label for="anmToken">Token</label>
+        <input class="feld" id="anmToken" type="password" autocomplete="current-password" spellcheck="false" aria-describedby="anmFehler">
+        <div class="fehler" id="anmFehler" role="alert" hidden></div>
+      </div>
+      <label class="merken"><input type="checkbox" id="anmMerken"> Auf diesem Gerät merken</label>
+    </div>
+    <div class="dlg-fuss"><button class="knopf prim" id="anmOk" type="submit" value="ok">Verbinden</button></div>
+  </form>
+</dialog>
 </body>
 </html>
