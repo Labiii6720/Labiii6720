@@ -45,14 +45,26 @@ export const config = {
   rechnungVorlauf: Number(opt("RECHNUNG_VORLAUF_TAGE") ?? "3"),
   /** Wöchentlicher Zielcheck: Wochentag und Uhrzeit, z. B. «so 18:00»; off = aus */
   zielcheck: opt("ZIELCHECK") ?? "so 18:00",
+  /** Finanz-Wochenbericht (offen, überfällig, bezahlt, pro Monat): Wochentag und Uhrzeit, z. B. «mo 07:45»; off = aus */
+  finanzbericht: opt("FINANZBERICHT") ?? "mo 07:45",
+  /** Nächtliche Gedächtnis-Verdichtung (Profil und Notizen, Haiku) um HH:MM; off = aus */
+  verdichtung: opt("VERDICHTUNG") ?? "03:30",
+  /** Entscheidungen, die älter sind als so viele Tage, wandern als Monats-Chronik ins Profil (Details ins Archiv) */
+  verdichtungTage: Number(opt("VERDICHTUNG_TAGE") ?? "90"),
   /** Werkzeugrunden pro Anfrage: normal und für schwere Aufgaben */
   maxLoops: Number(opt("MAX_LOOPS") ?? "10"),
   maxLoopsStark: Number(opt("MAX_LOOPS_STARK") ?? "40"),
   alexaVoice: opt("ALEXA_VOICE"),
+  /** Alexa spricht in diesem Fenster leiser (HH:MM-HH:MM, über Mitternacht möglich); off = nur im Nachtmodus */
+  alexaNacht: opt("ALEXA_NACHT") ?? "22:00-06:30",
   /** busy = Claude sieht nur belegte Zeiten, details = auch Titel und Orte */
   outlookMode: (opt("OUTLOOK_MODE") === "details" ? "details" : "busy") as "busy" | "details",
   /** Ab dieser Uhrzeit wird das Tagesbriefing im Hintergrund vorbereitet */
   briefingPrepFrom: opt("BRIEFING_PREP_FROM") ?? "05:45",
+  /** Watchdog: nach so vielen Minuten Störung meldet Jarvis sie per Telegram; 0 = aus */
+  watchdogMinuten: Number(opt("WATCHDOG_MINUTEN") ?? "10"),
+  /** Verpasste Zeitpläne und Routinen werden bis so viele Minuten nach ihrer Uhrzeit nachgeholt; 0 = nur zur Minute */
+  zeitplanNachholenMin: Number(opt("ZEITPLAN_NACHHOLEN_MIN") ?? "60"),
 
   // ---------- interaktiver Jarvis (Telegram) ----------
   telegramToken: opt("TELEGRAM_BOT_TOKEN"),
@@ -93,7 +105,7 @@ export const config = {
   eventToken: opt("JARVIS_EVENT_TOKEN"),
   /** 127.0.0.1 = nur lokal; 0.0.0.0 = im Heimnetz erreichbar (für Home Assistant auf einem anderen Gerät) */
   listenHost: opt("LISTEN_HOST") ?? "127.0.0.1",
-  /** /events und /gesture auch über den Cloudflare Tunnel erlauben (Standard: nein, nur Heimnetz/Tailscale) */
+  /** /events und /gesture auch über den Cloudflare Tunnel erlauben (Standard: nein, nur Heimnetz/Tailscale). Dashboard, /status.json und /api/* nie über den Tunnel */
   eventsViaTunnel: opt("EVENTS_VIA_TUNNEL") === "on",
 
   // ---------- Kameras ----------
@@ -119,4 +131,10 @@ export const config = {
   openscadPath: opt("OPENSCAD_PATH"),
   /** 3D-Drucker über OctoPrint: URL und API-Key */
   octoprint: opt("OCTOPRINT_URL") && opt("OCTOPRINT_KEY") ? { url: opt("OCTOPRINT_URL")!.replace(/\/$/, ""), key: opt("OCTOPRINT_KEY")! } : undefined,
+  /** PrusaSlicer (CLI) für G-Code; leer = automatisch suchen (apt, ~/.local/bin, Flatpak zuletzt) */
+  slicerPath: opt("PRUSASLICER_PATH"),
+  /** Aus PrusaSlicer exportierte Konfiguration (.ini); ohne Profil kein Slicen, dann geht die STL an OctoPrint */
+  slicerProfil: opt("SLICER_PROFIL"),
+  /** Zeitlimit fürs Slicen in ms; der Pi ist langsam, Standard 10 Minuten */
+  slicerTimeoutMs: Number(opt("SLICER_TIMEOUT_MS") ?? "600000"),
 };

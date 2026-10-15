@@ -1,14 +1,15 @@
 import Anthropic from "@anthropic-ai/sdk";
-import { anthropic as claude, trackUsage } from "./claude.js";
+import { anthropic as claude, claudeAufruf, trackUsage } from "./claude.js";
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { audit } from "./audit.js";
 import { config } from "./config.js";
 import { state } from "./state.js";
-import { createAuftrag, offeneAuftraege, type Auftrag } from "./queue.js";
+import { createAuftrag, offeneAuftraege, type Auftrag, type Stufe } from "./queue.js";
 import { activeTools, currentMode, stufeOf, type ToolContext, type ToolOutput } from "./tools.js";
 import { ROOT } from "./workspace.js";
 import { persona } from "./persona.js";
 import { beraterPrompt } from "./berater.js";
+import { schwaerze } from "./robust.js";
 
 type Msg = Anthropic.MessageParam;
 
@@ -130,8 +131,17 @@ export function runTask(text: string, hooks: AgentHooks, opts: RunOptions = {}):
   return runLoop(text, hooks, { stark: true, ...opts, history: opts.history ?? [] });
 }
 
+/**
+ * Antwort im Notaus. Im Notfall lehnt /weiter ab, deshalb dort direkt auf /entwarnung verweisen.
+ * state.notfall direkt gelesen statt notfallAktiv(), um keinen Importzyklus über notfall.ts zu erzeugen.
+ */
+export const pausiertText = (): string =>
+  state.notfall?.aktiv
+    ? "Notfall aktiv, Sir. Aufheben nur mit /entwarnung in Telegram."
+    : "Ich bin pausiert (Notaus). In Telegram hebt /weiter das wieder auf.";
+
 async function runLoop(text: string, hooks: AgentHooks, opts: RunOptions & { history: Msg[] }): Promise<string> {
-  if (state.paused) return "Ich bin pausiert (Notaus). In Telegram hebt /weiter das wieder auf.";
+  if (state.paused) return pausiertText();
   const anthropic = claude();
   const tools = activeTools();
   const toolParams: Anthropic.Messages.ToolUnion[] = tools.map((t) => ({ name: t.name, description: t.description, input_schema: t.input_schema }));
@@ -147,23 +157,43 @@ async function runLoop(text: string, hooks: AgentHooks, opts: RunOptions & { his
   let reply = "";
   let step = 0;
   for (let loop = 0; loop < maxLoops; loop++) {
-    const msg = await anthropic.messages.create(
-      { model, max_tokens: opts.stark ? 8000 : 2500, system: systemPrompt(), tools: toolParams, messages: h },
-      { timeout: 300_000 },
+    const msg = await claudeAufruf("chat", () =>
+      anthropic.messages.create(
+        { model, max_tokens: opts.stark ? 8000 : 2500, system: systemPrompt(), tools: toolParams, messages: h },
+        { timeout: 300_000 },
+      ),
     );
     trackUsage(msg);
     h.push({ role: "assistant", content: msg.content as Anthropic.ContentBlockParam[] });
     reply = msg.content.map((b) => (b.type === "text" ? b.text : "")).join("").trim();
 
     const uses = msg.content.filter((b): b is Anthropic.ToolUseBlock => b.type === "tool_use");
-    if (msg.stop_reason !== "tool_use" || uses.length === 0) break;
+    if (msg.stop_reason !== "tool_use" || uses.length === 0) {
+      // Notaus/Notfall kam während des letzten Aufrufs: die fertige Antwort kann Daten enthalten und darf nicht
+      // mehr in einen womöglich kompromittierten Chat. Sie bleibt in der Historie, ausgegeben wird nur pausiertText().
+      if (state.paused) {
+        if (isChat) saveHistory();
+        return pausiertText();
+      }
+      break;
+    }
 
+    // Notaus während eines laufenden Aufrufs oder Werkzeugs: übrige Werkzeuge nicht mehr ausführen. Jedes tool_use
+    // bekommt trotzdem ein tool_result, damit die Historie für die API gültig bleibt.
     const results: Anthropic.ToolResultBlockParam[] = [];
     for (const use of uses) {
+      if (state.paused) {
+        results.push({ type: "tool_result", tool_use_id: use.id, content: "Nicht ausgeführt: Notaus.", is_error: true });
+        continue;
+      }
       results.push({ type: "tool_result", tool_use_id: use.id, ...(await execute(use, hooks)) });
       opts.onStep?.(++step, use.name);
     }
     h.push({ role: "user", content: results });
+    if (state.paused) {
+      if (isChat) saveHistory();
+      return pausiertText();
+    }
     if (loop === maxLoops - 1) reply = `${reply}\n\n(Limit von ${maxLoops} Werkzeugrunden erreicht, Zwischenstand.)`.trim();
   }
   if (isChat) saveHistory();
@@ -183,31 +213,73 @@ async function execute(use: Anthropic.ToolUseBlock, hooks: AgentHooks): Promise<
   const tool = activeTools().find((t) => t.name === use.name);
   if (!tool) return { content: `Unbekanntes Werkzeug ${use.name}`, is_error: true };
   const input = (use.input ?? {}) as Record<string, unknown>;
-  const stufe = stufeOf(tool, input);
-
   const brief = JSON.stringify(input).slice(0, 300);
+  let stufe: Stufe;
+  try {
+    stufe = stufeOf(tool, input);
+  } catch (e) {
+    // Etwa ein unbekanntes Protokoll: weder Auftrag noch Ausführung, Claude erfährt den Grund
+    const msg = schwaerze(e instanceof Error ? e.message : String(e));
+    audit("werkzeug", { tool: tool.name, input: brief, ok: false, fehler: msg.slice(0, 200) });
+    return { content: `Fehler: ${msg}`, is_error: true };
+  }
+
   if (stufe !== "auto") {
-    const summary = tool.summary ? tool.summary(input) : `${tool.name} ${brief}`;
-    const auftrag = createAuftrag({ tool: tool.name, input, stufe, summary });
+    // Ohne eigene Zusammenfassung die ganze Eingabe (brief ist fürs Audit gekürzt): freigegeben ist nur, was gezeigt wurde
+    const summary = tool.summary ? tool.summary(input) : `${tool.name} ${JSON.stringify(input)}`;
+    // Kopie: das Original steht in der Chat-Historie und geht so an die API zurück
+    const gespeichert = tool.festhalten ? tool.festhalten({ ...input }) : input;
+    let auftrag: Auftrag;
+    try {
+      auftrag = createAuftrag({ tool: tool.name, input: gespeichert, stufe, summary });
+    } catch (e) {
+      // Etwa data/auftraege.json beim Start unlesbar (Speichern gesperrt): Claude erfährt den Grund, der Lauf bricht nicht ab
+      const msg = schwaerze(e instanceof Error ? e.message : String(e));
+      audit("auftrag_nicht_angelegt", { tool: tool.name, stufe, fehler: msg.slice(0, 200) });
+      return { content: `Fehler: Auftrag nicht angelegt, nichts ausgeführt. ${msg}`, is_error: true };
+    }
     audit("auftrag_angelegt", { id: auftrag.id, tool: tool.name, stufe, input: brief });
     await hooks.onAuftrag(auftrag).catch((e) => console.error("Freigabe-Nachricht fehlgeschlagen:", e));
     return { content: `Auftrag #${auftrag.id} angelegt (Stufe ${stufe}). Wartet auf Freigabe des Nutzers, ist noch NICHT ausgeführt.` };
   }
   try {
-    const out = await tool.run(input, hooks);
+    // Wie in Protokoll-Schritten: den Stand von jetzt festhalten, run gleicht damit ab (es läuft ja sofort)
+    const out = await tool.run(tool.festhalten ? tool.festhalten({ ...input }) : input, hooks);
     audit("werkzeug", { tool: tool.name, input: brief, ok: true });
     return { content: toContent(out) };
   } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
+    // Fehlermeldungen tragen teils URLs mit Zugangsdaten (z. B. FRIGATE_URL): geschwärzt in Audit, Historie und API
+    const msg = schwaerze(e instanceof Error ? e.message : String(e));
     audit("werkzeug", { tool: tool.name, input: brief, ok: false, fehler: msg.slice(0, 200) });
     return { content: `Fehler: ${msg}`, is_error: true };
   }
+}
+
+/**
+ * Hinderungsgrund, wenn ein Auftrag heute strenger gälte als beim Anlegen (extern → sensibel): Ob die PIN verlangt
+ * wird, richtet sich nach der gespeicherten a.stufe, ausgeführt wird aber mit der Lage von jetzt (etwa ein inzwischen
+ * sensibles Protokoll). Dann nicht ausführen, sondern neu beantragen lassen. Wirft die Stufe, gilt sie als sensibel.
+ */
+export function stufeVerschaerft(a: Auftrag): string | undefined {
+  if (a.stufe === "sensibel") return undefined;
+  const tool = activeTools().find((t) => t.name === a.tool);
+  if (!tool) return undefined; // runAuftrag meldet das selbst
+  let jetzt: Stufe;
+  try {
+    jetzt = stufeOf(tool, { ...a.input });
+  } catch {
+    jetzt = "sensibel";
+  }
+  return jetzt === "sensibel" ? `#${a.id} gilt inzwischen als sensibel (Freigabe mit PIN), Sir. Ich führe ihn nicht aus – bitte neu beantragen.` : undefined;
 }
 
 /** Führt einen freigegebenen Auftrag aus (vom Telegram-Button aufgerufen). */
 export async function runAuftrag(a: Auftrag, ctx: ToolContext): Promise<string> {
   const tool = activeTools().find((t) => t.name === a.tool);
   if (!tool) throw new Error(`Werkzeug ${a.tool} ist nicht mehr verfügbar.`);
+  // Zweite Verteidigung; die Freigabe-Pfade (beanspruche in telegram.ts) prüfen das schon vorher
+  const strenger = stufeVerschaerft(a);
+  if (strenger) throw new Error(strenger);
   audit("auftrag_ausgefuehrt", { id: a.id, tool: a.tool, stufe: a.stufe });
   const out = await tool.run(a.input, ctx);
   return typeof out === "string" ? out : out.text;

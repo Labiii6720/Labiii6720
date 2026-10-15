@@ -1,4 +1,7 @@
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { mkdirSync, renameSync, writeFileSync } from "node:fs";
+import { gesperrtText, ladeListe, zeitplanEintrag } from "./datei.js";
+import { save, state } from "./state.js";
+import { hhmm, imFenster, minutesOfDay, todayKey } from "./time.js";
 
 /** Wiederkehrende Aufgaben, die Jarvis von selbst erledigt und per Telegram meldet. */
 export interface Zeitplan {
@@ -11,26 +14,240 @@ export interface Zeitplan {
   /** Der Auftrag in Worten, so wie du ihn Jarvis im Chat geben würdest */
   auftrag: string;
   lastRun?: string;
+  /** Anlagezeitpunkt (ISO), beim ersten Speichern gesetzt – ein Lauf vor der Anlage gilt nicht als verpasst */
+  angelegt?: string;
 }
 
 const FILE = "data/zeitplaene.json";
-export const zeitplaene: Zeitplan[] = (() => {
-  try { return JSON.parse(readFileSync(FILE, "utf8")) as Zeitplan[]; } catch { return []; }
-})();
 
-export function saveZeitplaene(): void {
+/**
+ * Einträge prüft ladeListe (zeitplanEintrag in datei.ts): Nicht-Objekte, fehlende id oder name/zeit/tage/auftrag ohne
+ * Text fallen beim Laden weg (Sicherung .defekt, Hinweis); sonst bräche schon der Import ab (z.id auf null) und mit ihm
+ * der ganze Dienst samt Telegram und Notaus. Ungültige Werte mit richtigem Typ bleiben stehen und laufen nicht (laeuft).
+ */
+const geladen = ladeListe(FILE, "Zeitpläne", zeitplanEintrag);
+export const zeitplaene: Zeitplan[] = geladen.liste;
+/** true, wenn data/zeitplaene.json vorhanden, aber unlesbar war: keine Zeitpläne, und nichts wird gespeichert. Übersprungene Einträge sperren nicht. */
+export const zeitplaeneNichtGeladen = geladen.nichtGeladen;
+export const ZEITPLAENE_UNLESBAR =
+  "⚠️ data/zeitplaene.json war beim Start unlesbar, Sir (Sicherung, sofern möglich, unter data/zeitplaene.json.defekt). Die Zeitpläne laufen nicht, und ich ändere keine, bis die Datei repariert ist und ich neu gestartet bin.";
+
+/** Vor jeder Änderung an zeitplaene aufrufen: wirft, solange die Datei beim Start unlesbar war. */
+export function pruefeZeitplaeneSchreibbar(): void {
+  if (zeitplaeneNichtGeladen) throw new Error(gesperrtText(FILE, "die Zeitpläne"));
+}
+
+/** Gültige IDs der Zeitpläne (zweite Verteidigung: die Ladeprüfung lässt nur Einträge mit gültiger id durch). */
+function zeitplanIds(): number[] {
+  return zeitplaene.flatMap((z) => (z && typeof z === "object" && Number.isSafeInteger(z.id) ? [z.id] : []));
+}
+
+/**
+ * Höchste ID im Bestand beim Start (0 ohne Bestand). Beim Import wird bewusst nichts gespeichert: zeitplaene.js laden
+ * auch `npm run check` und das Setup, und ein save() dort schriebe den beim Prozessstart gelesenen Zustand zurück – ein
+ * inzwischen vom Dienst ausgelöster Notfall oder Notaus wäre auf der Platte weg.
+ */
+const hoechsteZeitplanIdBeimStart = zeitplaeneNichtGeladen ? 0 : Math.max(0, ...zeitplanIds());
+
+/**
+ * Ein Bestand aus 0.21 hat keinen Zähler in state.json, und die Löschpfade rücken ihn nicht vor. Darum zieht jedes
+ * Speichern der Zeitpläne den Zähler zuerst auf mindestens höchste Start-ID + 1 nach und speichert ihn, bevor die Liste
+ * geschrieben wird: Nach dem Löschen des Zeitplans mit der höchsten ID bekommt kein neuer Zeitplan diese ID wieder, auch
+ * nicht nach einem Neustart. Scheitert das Speichern, bleibt der Zähler wie er war, und der Fehler geht an den Aufrufer
+ * (der die Änderung an der Liste zurücknimmt).
+ */
+function zeitplanZaehlerNachziehen(): void {
+  if (hoechsteZeitplanIdBeimStart === 0) return;
+  const mindestens = hoechsteZeitplanIdBeimStart + 1;
+  const gemerkt = state.naechsteZeitplanId;
+  if (Number.isSafeInteger(gemerkt) && gemerkt! >= mindestens) return;
+  state.naechsteZeitplanId = mindestens;
+  try {
+    save();
+  } catch (e) {
+    if (gemerkt === undefined) delete state.naechsteZeitplanId;
+    else state.naechsteZeitplanId = gemerkt;
+    throw e;
+  }
+}
+
+/** IDs, die schon gespeichert waren (Stand beim Laden bzw. beim letzten Speichern) – alles andere ist neu angelegt. */
+let gespeicherteIds = new Set(zeitplaene.map((z) => z.id));
+
+/**
+ * Speichert atomar. Neu angelegte Einträge (ID beim letzten Speichern unbekannt, noch nie gelaufen) bekommen dabei
+ * `angelegt`, damit ein Zeitplan, dessen Uhrzeit heute schon vorbei ist, nicht sofort «nachgeholt» wird.
+ */
+export function saveZeitplaene(jetzt = new Date()): void {
+  pruefeZeitplaeneSchreibbar();
+  zeitplanZaehlerNachziehen();
+  for (const z of zeitplaene) {
+    if (!gespeicherteIds.has(z.id) && z.lastRun === undefined && z.angelegt === undefined) z.angelegt = jetzt.toISOString();
+  }
   mkdirSync("data", { recursive: true, mode: 0o700 });
   writeFileSync(`${FILE}.tmp`, JSON.stringify(zeitplaene, null, 2), { mode: 0o600 });
   renameSync(`${FILE}.tmp`, FILE);
+  // Erst nach erfolgreichem Schreiben gelten die IDs als gespeichert
+  gespeicherteIds = new Set(zeitplaene.map((z) => z.id));
+}
+
+/**
+ * Neue Zeitplan-ID, die nie zuvor vergeben war (Werkzeug und Kommandozentrale): Sonst träfe eine offene Lösch-Freigabe,
+ * ein veralteter Dashboard-Tab oder der Startvermerk im Scheduler nach dem Löschen ein neues Objekt. Der Zähler wird vor
+ * der Liste gespeichert; scheitert das, wirft es, bevor etwas angelegt ist (höchstens eine Lücke).
+ */
+export function neueZeitplanId(): number {
+  const gemerkt = state.naechsteZeitplanId;
+  const vorhanden = zeitplanIds().map((x) => x + 1);
+  const id = Math.max(1, hoechsteZeitplanIdBeimStart + 1, Number.isSafeInteger(gemerkt) ? gemerkt! : 1, ...vorhanden);
+  state.naechsteZeitplanId = id + 1;
+  save();
+  return id;
 }
 
 const TAGE = ["so", "mo", "di", "mi", "do", "fr", "sa"];
 
-export function faelltAn(z: Zeitplan, now: Date): boolean {
+function tagPasst(z: Zeitplan, now: Date): boolean {
   const tag = TAGE[now.getDay()]!;
   const t = z.tage.toLowerCase().replace(/\s/g, "");
   if (t === "werktags" && (tag === "sa" || tag === "so")) return false;
-  if (t !== "taeglich" && t !== "täglich" && t !== "werktags" && !t.split(",").includes(tag)) return false;
+  return t === "taeglich" || t === "täglich" || t === "werktags" || t.split(",").includes(tag);
+}
+
+/**
+ * Uhrzeit H:MM oder HH:MM mit Stunde 0–23 und Minute 0–59 (dieselbe Regel wie naechsterLauf). Sonst liefe «07:60» im
+ * Scheduler um 08:00, während die Kommandozentrale keinen nächsten Lauf zeigt.
+ */
+function uhrzeitGueltig(zeit: string): boolean {
+  const m = /^(\d{1,2}):(\d{2})$/.exec(zeit.trim());
+  return m !== null && Number(m[1]) <= 23 && Number(m[2]) <= 59;
+}
+
+export type ZeitplanGrund = "Uhrzeit ungültig" | "Tage ungültig" | "Auftrag fehlt";
+
+/**
+ * Läuft ein Zeitplan, und wenn nicht, warum? Gemeinsame Regel für den Scheduler (faelligIm, naechsterLauf), die
+ * Kommandozentrale und zeitplaene_anzeigen (wie wacheZustand bei den Wachen). Zweite Verteidigung neben der Ladeprüfung
+ * (zeitplanEintrag): ohne zeit/tage als Text (sonst Absturz im Takt), mit ungültiger Uhrzeit («25:00», «07:60»), mit
+ * Tagen, die normaleTage nicht kennt («montags», «mo,mo»), oder ohne Auftrag (sonst ein bezahlter Claude-Lauf mit
+ * «undefined» bzw. Leertext) ist ein Zeitplan nie fällig und hat keinen nächsten Lauf. Reihenfolge: Uhrzeit, Tage, Auftrag.
+ */
+export function zeitplanZustand(z: Pick<Zeitplan, "zeit" | "tage" | "auftrag">): { laeuft: boolean; grund?: ZeitplanGrund } {
+  if (typeof z.zeit !== "string" || !uhrzeitGueltig(z.zeit)) return { laeuft: false, grund: "Uhrzeit ungültig" };
+  if (typeof z.tage !== "string" || normaleTage(z.tage) === undefined) return { laeuft: false, grund: "Tage ungültig" };
+  if (typeof z.auftrag !== "string" || z.auftrag.trim() === "") return { laeuft: false, grund: "Auftrag fehlt" };
+  return { laeuft: true };
+}
+
+const laeuft = (z: Zeitplan): boolean => zeitplanZustand(z).laeuft;
+
+/** Genau zur Minute (Fenster 1 Minute) – bleibt für Kompatibilität. */
+export function faelltAn(z: Zeitplan, now: Date): boolean {
+  if (!laeuft(z)) return false;
+  if (!tagPasst(z, now)) return false;
   const hhmm = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
   return hhmm === z.zeit;
+}
+
+/** Erst nach der heutigen Uhrzeit angelegt? Dann wurde heute nichts verpasst – der erste Lauf kommt am nächsten passenden Tag. */
+function heuteZuSpaetAngelegt(z: Zeitplan, now: Date): boolean {
+  if (!z.angelegt) return false;
+  const angelegt = new Date(z.angelegt);
+  if (Number.isNaN(angelegt.getTime())) return false;
+  return todayKey(angelegt) === todayKey(now) && minutesOfDay(angelegt) > hhmm(z.zeit.trim());
+}
+
+/**
+ * Fällig im Nachholfenster: passender Tag, zeit ≤ jetzt < zeit + fensterMin (Tagesende als Grenze) und heute noch nicht gelaufen.
+ * fensterMin 0 = nur zur Minute (kein Nachholen). Ein heute erst nach der Uhrzeit angelegter Zeitplan ist heute nicht fällig.
+ */
+export function faelligIm(z: Zeitplan, now: Date, fensterMin: number): boolean {
+  if (!laeuft(z)) return false;
+  if (z.lastRun === todayKey(now)) return false;
+  if (!tagPasst(z, now)) return false;
+  if (heuteZuSpaetAngelegt(z, now)) return false;
+  return imFenster(z.zeit, now, fensterMin);
+}
+
+// ---------- Prüfung (Werkzeug und Kommandozentrale, gleiche Regeln) ----------
+
+export type ZeitplanEingabe = Pick<Zeitplan, "name" | "zeit" | "tage" | "auftrag">;
+export type Pruefung<T> = { ok: true; wert: T } | { ok: false; fehler: Record<string, string> };
+
+const WOCHE = ["mo", "di", "mi", "do", "fr", "sa", "so"];
+
+/** Normalisiert «Mo, Mi» → «mo,mi» (Wochenreihenfolge); undefined, wenn die Angabe nicht gilt. */
+export function normaleTage(roh: string): string | undefined {
+  const t = roh.toLowerCase().replace(/\s/g, "");
+  if (t === "taeglich" || t === "täglich") return "taeglich";
+  if (t === "werktags") return "werktags";
+  const teile = t.split(",");
+  if (teile.length === 0 || teile.some((x) => !WOCHE.includes(x))) return undefined;
+  if (new Set(teile).size !== teile.length) return undefined;
+  return WOCHE.filter((x) => teile.includes(x)).join(",");
+}
+
+/**
+ * Prüft einen Zeitplan, bevor er angelegt oder geändert wird: name 1–60, zeit HH:MM (00:00–23:59), tage taeglich |
+ * werktags | Liste aus mo,di,mi,do,fr,sa,so ohne Doppel, auftrag 1–2000 Zeichen. Rein; Fehler je Feld auf Deutsch.
+ */
+export function pruefeZeitplan(eingabe: unknown): Pruefung<ZeitplanEingabe> {
+  const e = (eingabe && typeof eingabe === "object" ? eingabe : {}) as Record<string, unknown>;
+  const text = (v: unknown) => (typeof v === "string" ? v.trim() : "");
+  const fehler: Record<string, string> = {};
+  const name = text(e.name);
+  if (name.length < 1 || name.length > 60) fehler.name = "Name: 1 bis 60 Zeichen, Sir.";
+  const zeit = text(e.zeit);
+  if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(zeit)) fehler.zeit = "Uhrzeit als HH:MM zwischen 00:00 und 23:59, Sir.";
+  const tage = normaleTage(text(e.tage));
+  if (!tage) fehler.tage = "Tage: taeglich, werktags oder Wochentage wie mo,mi,fr (ohne Doppel), Sir.";
+  const auftrag = text(e.auftrag);
+  if (auftrag.length < 1 || auftrag.length > 2000) fehler.auftrag = "Auftrag: 1 bis 2000 Zeichen, Sir.";
+  if (Object.keys(fehler).length > 0) return { ok: false, fehler };
+  return { ok: true, wert: { name, zeit, tage: tage!, auftrag } };
+}
+
+/** Alle Fehlermeldungen in einem Satz (für Werkzeug-Antworten). */
+export const pruefungsText = (fehler: Record<string, string>): string => Object.values(fehler).join(" ");
+
+/**
+ * Nächster Lauf nach derselben Tageslogik wie faelligIm: passender Tag, heute schon gelaufen, heute zu spät angelegt.
+ * Liegt ein Lauf im Nachholfenster noch offen, ist er «jetzt» fällig (der Scheduler holt ihn im nächsten Takt nach).
+ * Lokale Zeit wie der Scheduler (TZ Europe/Zurich, config.ts). undefined bei ungültiger Uhrzeit oder Tagesangabe und
+ * ohne Auftrag (laeuft).
+ */
+export function naechsterLauf(z: Zeitplan, now: Date, fensterMin = 0): Date | undefined {
+  if (!laeuft(z)) return undefined;
+  const zeit = z.zeit.trim();
+  if (!/^\d{1,2}:\d{2}$/.test(zeit)) return undefined;
+  const [h, m] = zeit.split(":").map(Number);
+  if (h > 23 || m > 59) return undefined;
+  if (faelligIm(z, now, fensterMin)) return now;
+  const heuteOffen = z.lastRun !== todayKey(now) && !heuteZuSpaetAngelegt(z, now);
+  for (let tag = heuteOffen ? 0 : 1; tag <= 7; tag++) {
+    const kandidat = lokalerLauf(now.getFullYear(), now.getMonth(), now.getDate() + tag, h * 60 + m, fensterMin, tag === 0 ? now : undefined);
+    if (kandidat && tagPasst(z, kandidat)) return kandidat;
+  }
+  return undefined;
+}
+
+/**
+ * Lauf an einem Kalendertag, so wie ihn der Scheduler sieht (imFenster vergleicht nur die Wanduhr-Minute). Fällt die
+ * Uhrzeit in die Lücke der Sommerzeit-Umstellung (z. B. 02:30), startet er in der ersten danach existierenden Minute,
+ * sofern sie noch im Nachholfenster liegt; sonst läuft an diesem Tag nichts (undefined). Mit `ab` (heute) zählt der
+ * früheste Zeitpunkt ab dann, dessen Wanduhr-Minute im Fenster liegt: Bei der Rückstellung auf Winterzeit gibt es
+ * 02:00–02:59 zweimal (new Date liefert immer das erste Vorkommen), und der Scheduler läuft auch im zweiten Durchgang.
+ */
+function lokalerLauf(jahr: number, monat: number, tag: number, ziel: number, fensterMin: number, ab?: Date): Date | undefined {
+  const ende = Math.min(ziel + Math.max(1, Math.floor(fensterMin) || 0), 24 * 60);
+  let bester: Date | undefined;
+  for (let min = ziel; min < ende; min++) {
+    const d = new Date(jahr, monat, tag, 0, min, 0, 0);
+    if (minutesOfDay(d) !== min) continue;
+    if (!ab) return d;
+    const spaeter = new Date(d.getTime() + 3_600_000);
+    const lauf = d >= ab ? d : minutesOfDay(spaeter) === min && spaeter >= ab ? spaeter : undefined;
+    if (lauf && (!bester || lauf < bester)) bester = lauf;
+  }
+  return bester;
 }

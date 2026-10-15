@@ -11,6 +11,8 @@ Wants=network-online.target
 User=jarvis
 Group=jarvis
 WorkingDirectory=/home/jarvis/jarvis
+# Nur für den Dienst-Prozess; npm install/ci im Projekt läuft ohne, denn npm start braucht tsx (devDependency)
+Environment=NODE_ENV=production
 ExecStart=/usr/bin/npm start
 Restart=on-failure
 RestartSec=10
