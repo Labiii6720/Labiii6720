@@ -1,5 +1,5 @@
 import mqtt from "mqtt";
-import { allWachen, cameraByFrigateName, cameras, dynamicWachen, eventSnapshot, look, snapshot, type Bedingung, type Wache } from "./cameras.js";
+import { allWachen, bedingungWert, cameraByFrigateName, dynamicWachen, eventSnapshot, look, ruheMinuten, snapshot, wacheZustand, type Wache } from "./cameras.js";
 import { config } from "./config.js";
 import { isHome } from "./homeassistant.js";
 import { notfallAktiv } from "./notfall.js";
@@ -17,14 +17,24 @@ const log = (e: unknown) => console.error(schwaerze(e instanceof Error ? e.messa
  */
 const gestoppt = () => Boolean(state.paused) || notfallAktiv();
 
-/** Gilt die Bedingung gerade? */
-export async function bedingung(b: Bedingung = "immer"): Promise<boolean> {
-  if (b === "immer") return true;
-  if (b === "nacht") {
+/** Gilt die Bedingung gerade? Ungültige Werte gelten nie (nie stillschweigend wie «abwesend»). */
+export async function bedingung(b: unknown = "immer"): Promise<boolean> {
+  const g = bedingungWert(b);
+  if (g === undefined) return false;
+  if (g === "immer") return true;
+  if (g === "nacht") {
     const m = minutesOfDay();
     return state.mode === "nacht" || m >= 22 * 60 || m < 6 * 60;
   }
   return !(await isHome()); // abwesend
+}
+
+/** Einmal pro Schlüssel laut melden (nie Frage-Text oder Rohwert), danach still: sonst eine Logzeile pro Takt oder Ereignis. */
+const ungueltigGemeldet = new Set<string>();
+function einmalMelden(schluessel: string, text: string): void {
+  if (ungueltigGemeldet.has(schluessel)) return;
+  ungueltigGemeldet.add(schluessel);
+  console.error(text);
 }
 
 // ---------- Ereignisse (melden) ----------
@@ -50,11 +60,16 @@ export async function onCameraEvent(ev: CameraEvent): Promise<boolean> {
   if (!rule || !rule.labels.includes(ev.label)) return false;
   if (rule.zonen?.length && !ev.zones?.some((z) => rule.zonen!.includes(z))) return false;
   if (ev.id && seenEvents.has(ev.id)) return false;
+  if (bedingungWert(rule.nur_wenn) === undefined) {
+    einmalMelden(`melden|${name}`, `cameras.json: «melden.nur_wenn» bei Kamera «${name}» ungültig (erlaubt: immer, abwesend, nacht) – ihre Meldungen bleiben aus, bis der Eintrag repariert ist.`);
+    return false;
+  }
   if (!(await bedingung(rule.nur_wenn))) return false;
   if (gestoppt()) return false;
 
   const key = `${name}:${ev.label}`;
-  const ruhe = (rule.ruhe_minuten ?? 10) * 60_000;
+  // Text oder Objekt in cameras.json ergäben sonst NaN, und jedes neue Ereignis ginge hinaus: Standard 10 Minuten
+  const ruhe = ruheMinuten(rule.ruhe_minuten, 10) * 60_000;
   if (Date.now() - (lastAlert.get(key) ?? 0) < ruhe) return false;
   lastAlert.set(key, Date.now());
   if (ev.id) seenEvents.add(ev.id);
@@ -148,6 +163,9 @@ export function startMqtt(): void {
 const lastRun = new Map<string, number>();
 const lastHit = new Map<string, number>();
 
+/** Regel für die Ruhezeit nach einer Meldung; liegt in cameras.ts (gemeinsam mit der Kommandozentrale), hier weiter erreichbar. */
+export { ruheMinuten };
+
 export async function wachenTick(now = Date.now()): Promise<void> {
   if (!config.frigateUrl || gestoppt()) return;
   /**
@@ -164,8 +182,25 @@ export async function wachenTick(now = Date.now()): Promise<void> {
     if (gestoppt()) return;
     if (geloescht(w)) continue;
     const key = `${w.kamera}|${w.frage}`;
-    if (!cameras[w.kamera]) continue;
-    if (now - (lastRun.get(key) ?? 0) < Math.max(1, w.alle_minuten) * 60_000) continue;
+    // Gemeinsame Regel (wacheZustand): Kamera fehlt oder verworfen → still überspringen, ohne Intervall → einmal melden
+    const { takt, grund } = wacheZustand(w);
+    if (grund === "Kamera fehlt" || grund === "Kamera und Intervall fehlen") continue;
+    if (takt === undefined) {
+      // Einmal laut melden (ohne Frage-Text), dann still überspringen – kein Bild an die API
+      einmalMelden(key, `Wache bei Kamera «${w.kamera}» ohne gültiges «alle_minuten» – sie schaut nicht hin, bis der Eintrag repariert ist.`);
+      continue;
+    }
+    if (bedingungWert(w.nur_wenn) === undefined) {
+      // Ungültiges «nur_wenn» (null, «Nacht» …): nie stillschweigend wie «abwesend» – einmal melden, dann still überspringen
+      einmalMelden(`${key}|nur_wenn`, `Wache bei Kamera «${w.kamera}» mit ungültigem «nur_wenn» (erlaubt: immer, abwesend, nacht) – sie schaut nicht hin, bis der Eintrag repariert ist.`);
+      continue;
+    }
+    if (grund === "Frage fehlt") {
+      // Ohne Frage ginge «undefined» mit dem Standbild an die API – einmal melden (ohne Frage-Inhalt), dann still überspringen
+      einmalMelden(`${w.kamera}|frage|${String(w.alle_minuten)}`, `Wache bei Kamera «${w.kamera}» ohne «frage» – sie schaut nicht hin, bis der Eintrag repariert ist.`);
+      continue;
+    }
+    if (now - (lastRun.get(key) ?? 0) < takt * 60_000) continue;
     lastRun.set(key, now);
     if (!(await bedingung(w.nur_wenn))) continue;
     if (gestoppt()) return;
@@ -182,7 +217,7 @@ export async function wachenTick(now = Date.now()): Promise<void> {
       if (gestoppt()) return;
       // Während look() gelöscht: keine Meldung mehr für eine Wache, die der Nutzer nicht mehr will
       if (!ja || geloescht(w)) continue;
-      const ruhe = (w.ruhe_minuten ?? 30) * 60_000;
+      const ruhe = ruheMinuten(w.ruhe_minuten) * 60_000;
       if (now - (lastHit.get(key) ?? 0) < ruhe) continue;
       lastHit.set(key, now);
       const text = `👁 ${w.kamera}: ${w.frage}\n${r.text.replace(/^\s*ja\b[.:,\s-]*/i, "").trim()}`;

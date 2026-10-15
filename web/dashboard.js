@@ -423,6 +423,8 @@
     if (fokus) fokus.focus();
   }
   document.querySelectorAll("dialog").forEach((d) => d.addEventListener("close", () => {
+    // Ein Toast, der für diesen Dialog nach oben ausgewichen ist, verdeckte sonst die Leiste samt Notaus: Lage neu bestimmen
+    toastLage();
     const v = d._vorher;
     const ersatz = d._ersatz || [];
     d._vorher = null; d._ersatz = null;
@@ -983,11 +985,12 @@
     if (zq && zq.daten && zq.daten.unlesbar) zeilen.push(h("li", null, h("div", { class: "haupt" }, h("span", { text: "data/zeitplaene.json ist unlesbar." }))));
     else if (zq && zq.daten) {
       const plaene = zq.daten.zeitplaene.filter((z) => z.naechsterLauf).sort((a, b) => String(a.naechsterLauf).localeCompare(String(b.naechsterLauf))).slice(0, 3);
-      for (const z of plaene) zeilen.push(h("li", null, h("span", { class: "uhrz", text: zeit(z.naechsterLauf) }), h("div", { class: "haupt" }, h("b", { text: z.name })), h("span", { class: "wann", text: wannTag(z.naechsterLauf) })));
+      for (const z of plaene) zeilen.push(h("li", null, h("span", { class: "uhrz", text: zeit(z.naechsterLauf) }), h("div", { class: "haupt" }, h("b", { text: planName(z) })), h("span", { class: "wann", text: wannTag(z.naechsterLauf) })));
     } else if (!zq) zeilen.push(h("li", null, h("div", { class: "haupt" }, h("span", { text: "Ich hole die Zeitpläne …" }))));
     if (wq && wq.daten && Array.isArray(wq.daten.wachen) && wq.daten.wachen.length) {
-      const w = wq.daten.wachen; const kams = [...new Set(w.map((x) => x.kamera))];
-      zeilen.push(h("li", { class: "wachen" }, h("span", { class: "uhrz" }, ikon("auge")), h("div", { class: "haupt" }, h("b", { text: w.length === 1 ? "Eine Wache aktiv" : w.length + " Wachen aktiv" }), h("span", { text: kams.join(", ") }))));
+      // Nur Wachen, die wirklich laufen: ohne gültiges Intervall oder Kamera (laeuft false) schaut keine hin
+      const w = wq.daten.wachen.filter((x) => x.laeuft !== false); const kams = [...new Set(w.map((x) => x.kamera))];
+      if (w.length) zeilen.push(h("li", { class: "wachen" }, h("span", { class: "uhrz" }, ikon("auge")), h("div", { class: "haupt" }, h("b", { text: w.length === 1 ? "Eine Wache aktiv" : w.length + " Wachen aktiv" }), h("span", { text: kams.join(", ") }))));
     }
     if (!zeilen.length) k.append(h("p", { class: "ruhig", text: "Nichts geplant, Sir. Ich warte, bis Sie mich brauchen." }));
     else k.append(h("ul", { class: "liste" }, zeilen));
@@ -1315,12 +1318,25 @@
     return d - jetzt() < MIN ? "jetzt" : wannTag(d) + " " + zeit(d);
   }
   const kamerasListe = () => (Q.status && Array.isArray(Q.status.kameras) ? Q.status.kameras.map((k) => String(k.name)) : []);
+  /**
+   * Anzeigename eines Zeitplans: von Hand bearbeitete Einträge ohne «name» liefert der Server mit name "" (textAnzeige).
+   * Dann «Zeitplan #2» statt einer leeren Stelle in Liste, «Als Nächstes», Knöpfen und Löschfrage; ohne brauchbare ID
+   * «Zeitplan ohne Namen». Der Bearbeiten-Dialog nimmt weiter den echten Wert (leeres Feld, die Prüfung verlangt einen).
+   */
+  function planName(z) {
+    if (z && typeof z.name === "string" && z.name.trim()) return z.name.trim();
+    const id = z ? z.id : undefined;
+    return istZahl(id) || (typeof id === "string" && id.trim()) ? "Zeitplan #" + String(id).trim() : "Zeitplan ohne Namen";
+  }
   function knoepfe(art, id, name) {
     const wort = art === "plan" ? "Zeitplan " : "Wache ";
+    // Rückfallnamen wie «Zeitplan #2» tragen das Wort schon: nicht «Zeitplan Zeitplan #2 bearbeiten»
+    const n = String(name ?? "");
+    const ziel = n.startsWith(wort) ? n : wort + n;
     const belegt = inArbeit.has(art + ":" + id);
     return h("div", { class: "akt" },
-      besetzt(h("button", { class: "knopf leise", type: "button", "data-aktion": art + "-edit", "data-id": id, "aria-label": wort + name + " bearbeiten" }, ikon("stift", true), h("span", { text: "Bearbeiten" })), belegt),
-      besetzt(h("button", { class: "knopf leise", type: "button", "data-aktion": art + "-weg", "data-id": id, "aria-label": wort + name + " löschen" }, ikon("weg", true), h("span", { text: "Löschen" })), belegt));
+      besetzt(h("button", { class: "knopf leise", type: "button", "data-aktion": art + "-edit", "data-id": id, "aria-label": ziel + " bearbeiten" }, ikon("stift", true), h("span", { text: "Bearbeiten" })), belegt),
+      besetzt(h("button", { class: "knopf leise", type: "button", "data-aktion": art + "-weg", "data-id": id, "aria-label": ziel + " löschen" }, ikon("weg", true), h("span", { text: "Löschen" })), belegt));
   }
   function renderZeitplaene(v) {
     v.append(kopf("zeitplaene", "Zeitpläne & Wachen", "Was ich regelmässig tue – und wo ich hinschaue."));
@@ -1339,10 +1355,11 @@
     else if (!plaene.length) zInhalt = leer("leer", "Keine Zeitpläne, Sir.", "Ich warte, bis Sie mich brauchen.");
     else zInhalt = h("div", null, plaene.map((z) => h("div", { class: "plan" },
       h("div", { class: "zeit" }, String(z.zeit), h("small", { text: tageText(z.tage) })),
-      h("div", { class: "name", text: z.name }),
+      h("div", { class: "name", text: planName(z) }),
       h("div", { class: "det", text: z.auftrag }),
-      h("div", { class: "lauf" }, h("span", null, "nächster ", h("b", { text: naechsterText(z) })), h("span", { text: zuletzt(z.lastRun) })),
-      knoepfe("plan", z.id, z.name))));
+      // Ohne Auftrag (von Hand bearbeitet) läuft er nie: den Grund des Servers nennen statt «nächster –»
+      h("div", { class: "lauf" }, typeof z.grund === "string" && z.grund ? h("span", null, "läuft nicht: ", h("b", { text: z.grund })) : h("span", null, "nächster ", h("b", { text: naechsterText(z) })), h("span", { text: zuletzt(z.lastRun) })),
+      knoepfe("plan", z.id, planName(z)))));
     v.append(h("div", { class: "karte" }, h("div", { class: "diag-kopf" }, h("div", null, h("h2", { text: "Zeitpläne" }), h("p", { text: zUnter })), neuP), zInhalt));
 
     /* Wachen */
@@ -1355,11 +1372,19 @@
     else if (!wd) wInhalt = leer("warn", "Die Wachen sind gerade nicht verfügbar.", fehlerText({ status: wq.fehler, daten: { text: wq.text } }));
     else if (wd.unlesbar) wInhalt = leer("warn", "data/wachen.json ist unlesbar.", ohneSymbol(wd.text || "Ich ändere nichts, bis die Datei repariert ist, Sir."));
     else if (!wachen.length) wInhalt = leer("auge", "Keine Wachen, Sir.", ohneKamera ? "Ohne Kamera in cameras.json gibt es nichts zu bewachen." : "Ich schaue nur hin, wenn Sie es wollen.");
-    else wInhalt = h("div", null, wachen.map((w) => h("div", { class: "plan wache" },
-      h("div", { class: "zeit" }, String(w.alle_minuten), h("small", { text: "Minuten" })),
+    else wInhalt = h("div", null, wachen.map((w) => {
+      // Ohne gültiges Intervall (von Hand bearbeitet) läuft die Wache nicht: «?» statt «undefined Minuten». Fehlt nur die
+      // Kamera, bleibt das eingetragene Intervall stehen; den Grund nennt der Server (grund), sonst «Intervall fehlt»
+      const mitTakt = istZahl(w.alle_minuten) && w.alle_minuten > 0;
+      const laeuft = w.laeuft !== false && mitTakt;
+      const grund = typeof w.grund === "string" && w.grund ? w.grund : "Intervall fehlt";
+      return h("div", { class: "plan wache" },
+      h("div", { class: "zeit" }, mitTakt ? String(w.alle_minuten) : "?", h("small", { text: "Minuten" })),
       h("div", { class: "name" }, h("span", { class: "mono", text: w.kamera }), " · ", w.frage),
-      h("div", { class: "det", text: `${NUR_WENN[w.nur_wenn] || w.nur_wenn} · Ruhe ${istZahl(w.ruhe_minuten) ? w.ruhe_minuten : 30} Min nach einer Meldung` + (w.bearbeitbar ? " · " + (HERKUNFT[w.quelle] || "angelegt im Chat") : "") }),
-      w.bearbeitbar && w.id != null ? knoepfe("wache", w.id, w.kamera) : h("div", { class: "akt" }, h("span", { class: "vermerk" }, ikon("lock", true), "cameras.json · nur lesend")))));
+      // Ungültige Bedingung (nur_wenn null): nie «immer» oder «null» zeigen; der Grund steht schon vorne
+      h("div", { class: "det", text: (laeuft ? "" : "läuft nicht: " + grund + " · ") + (Object.hasOwn(NUR_WENN, w.nur_wenn) ? NUR_WENN[w.nur_wenn] + " · " : grund === "Bedingung ungültig" ? "" : "Bedingung ungültig · ") + `Ruhe ${istZahl(w.ruhe_minuten) ? w.ruhe_minuten : 30} Min nach einer Meldung` + (w.bearbeitbar ? " · " + (HERKUNFT[w.quelle] || "angelegt im Chat") : "") }),
+      w.bearbeitbar && w.id != null ? knoepfe("wache", w.id, w.kamera) : h("div", { class: "akt" }, h("span", { class: "vermerk" }, ikon("lock", true), "cameras.json · nur lesend")));
+    }));
     const wUnter = !wd ? "Kamera-Fragen in festen Abständen" : (wachen.length === 1 ? "1 Wache" : wachen.length + " Wachen") + " · Kamera-Fragen in festen Abständen" + (pausiert ? " · während des Notaus ruhen sie" : "");
     v.append(h("div", { class: "karte mt" }, h("div", { class: "diag-kopf" }, h("div", null, h("h2", { text: "Wachen" }), h("p", { text: wUnter })), neuW),
       h("div", { class: "hinweis wachen-hinweis" }, ikon("info"), wd && wd.hinweis ? ohneSymbol(wd.hinweis) : "Wachen schicken regelmässig Standbilder an die Claude-API (Haiku). Nur dort, wo Sie das wollen."),
@@ -1408,7 +1433,8 @@
     if (z === undefined) { toast("Diesen Zeitplan gibt es nicht mehr, Sir."); return; }
     planId = z ? z.id : null;
     $("planTitel").textContent = z ? "Zeitplan ändern" : "Neuer Zeitplan";
-    $("pName").value = z ? z.name : "";
+    // Zweite Absicherung (der Server liefert Texte): ältere Antworten ohne name/auftrag nie als «undefined» ins Feld
+    $("pName").value = z ? (z.name ?? "") : "";
     $("pZeit").value = z ? z.zeit : "07:00";
     // Unbekannte Schreibweisen: so viele Tage wie erkennbar ankreuzen, die Prüfung meldet den Rest
     const tage = z ? normTage(z.tage) ?? String(z.tage ?? "").toLowerCase().replace(/\s/g, "") : "werktags";
@@ -1416,7 +1442,7 @@
     document.querySelectorAll('input[name="tageArt"]').forEach((r) => { r.checked = r.value === art; });
     tageArtSync();
     if (art === "liste") tageBox.querySelectorAll("input").forEach((i) => { i.checked = tage.split(",").includes(i.value); });
-    $("pAuftrag").value = z ? z.auftrag : "";
+    $("pAuftrag").value = z ? (z.auftrag ?? "") : "";
     zaehler();
     fehlerZeigen($("planForm"), {});
     zeigeDialog($("dlgPlan"), $("pName"));
@@ -1467,9 +1493,11 @@
     if (w && !namen.includes(w.kamera)) namen.push(w.kamera);
     $("wKamera").replaceChildren(...namen.map((k) => h("option", { value: k, selected: w ? w.kamera === k : null }, k)));
     $("wFrage").value = w ? w.frage : "";
-    $("wAlle").value = String(w ? w.alle_minuten : 30);
+    // Ohne gültiges Intervall (alle_minuten null) bleibt das Feld leer: die Prüfung verlangt dann einen Wert
+    $("wAlle").value = w ? (istZahl(w.alle_minuten) ? String(w.alle_minuten) : "") : "30";
     $("wRuhe").value = String(w && istZahl(w.ruhe_minuten) ? w.ruhe_minuten : 30);
-    $("wWenn").value = w ? w.nur_wenn || "immer" : "abwesend";
+    // Ungültige Bedingung (nur_wenn null): keine Auswahl statt stillschweigend «immer» – die Prüfung verlangt eine Wahl
+    $("wWenn").value = w ? (Object.hasOwn(NUR_WENN, w.nur_wenn) ? w.nur_wenn : "") : "abwesend";
     fehlerZeigen($("wacheForm"), {});
     zeigeDialog($("dlgWache"), $("wKamera"));
   }
@@ -1497,7 +1525,7 @@
     const x = plan ? findePlan(id) : findeWache(id);
     if (!x) { toast(plan ? "Diesen Zeitplan gibt es nicht mehr, Sir." : "Diese Wache gibt es hier nicht mehr, Sir."); return; }
     const ok = plan
-      ? await frage("Zeitplan löschen?", `«${x.name}» läuft danach nicht mehr. Das lässt sich nicht rückgängig machen.`, "Löschen", true)
+      ? await frage("Zeitplan löschen?", `«${planName(x)}» läuft danach nicht mehr. Das lässt sich nicht rückgängig machen.`, "Löschen", true)
       : await frage("Wache löschen?", `Ich schaue dann nicht mehr auf «${x.kamera}». Das lässt sich nicht rückgängig machen.`, "Löschen", true);
     if (!ok) return;
     const key = art + ":" + id;
@@ -1622,20 +1650,21 @@
     rendern();
     const r = await api("/api/chat", { methode: "POST", body: { text }, frist: 75000 }); // der Server wartet bis 60 s
     if (!angemeldet || gen !== g.gen) return; // abgemeldet oder Notfall: nichts mehr anhängen
+    // Ansage über ansageAktiv: das Gespräch wartet bis 60 s, ein Dialog (Notaus, Weiter mit PIN) macht #ansage inert
     g.laeuft = false;
     if (r.status === 200 && r.daten && r.daten.ok) {
       if (r.daten.queued) {
         g.verlauf.push({ wer: "jv", text: "Das braucht länger, Sir.", zeit: jetzt().toISOString(), hinweis: "Die Antwort kommt per Telegram." });
-        ansage("Jarvis: Das braucht länger. Die Antwort kommt per Telegram.");
+        ansageAktiv("Jarvis: Das braucht länger. Die Antwort kommt per Telegram.");
       } else {
         const antwort = typeof r.daten.reply === "string" && r.daten.reply ? r.daten.reply : "…";
         g.verlauf.push({ wer: "jv", text: antwort, zeit: jetzt().toISOString() });
-        ansage("Jarvis: " + antwort);
+        ansageAktiv("Jarvis: " + antwort);
       }
     } else {
       const t = fehlerText(r, "Das kam nicht an");
       g.verlauf.push({ wer: "jv", text: t, zeit: jetzt().toISOString(), fehler: true });
-      ansage(t);
+      ansageAktiv(t);
     }
     rendern();
   }

@@ -153,7 +153,15 @@ export async function selbsttest(nur?: string[], beiBefund?: (b: Befund) => void
     const k = await import("./cameras.js");
     if (k.wachenNichtGeladen) throw new Error("data/wachen.json unlesbar (Sicherung .defekt), Wachen aus – bitte reparieren und neu starten");
     if (k.camerasNichtGeladen) throw new Error("cameras.json unlesbar, Kameras, Meldungen und Wachen aus der Datei sind aus");
-    return `${k.allWachen().length} Wache(n) aktiv`;
+    // Wie der Takt in watch.ts (wacheZustand): ohne gültiges «alle_minuten», auf fehlender bzw. verworfener Kamera oder
+    // mit ungültigem «nur_wenn» schaut eine Wache nicht hin, zählt also nicht als aktiv. Fehlt beides, zählt sie bei beiden Gründen.
+    const zustaende = k.allWachen().map(k.wacheZustand);
+    const aktiv = zustaende.filter((z) => z.laeuft).length;
+    const ohneTakt = zustaende.filter((z) => z.takt === undefined).length;
+    const ohneKamera = zustaende.filter((z) => z.grund === "Kamera fehlt" || z.grund === "Kamera und Intervall fehlen").length;
+    const ohneBedingung = zustaende.filter((z) => z.grund === "Bedingung ungültig").length;
+    const ohneFrage = zustaende.filter((z) => z.grund === "Frage fehlt").length;
+    return `${aktiv} Wache(n) aktiv${ohneTakt ? `, ${ohneTakt} ohne gültiges Intervall (laufen nicht)` : ""}${ohneKamera ? `, ${ohneKamera} auf fehlender Kamera (laufen nicht)` : ""}${ohneBedingung ? `, ${ohneBedingung} mit ungültiger Bedingung «nur_wenn» (laufen nicht)` : ""}${ohneFrage ? `, ${ohneFrage} ohne Frage (laufen nicht)` : ""}`;
   });
   await lauf("Protokolle", true, async () => `${Object.keys((await import("./protokolle.js")).protokolle).length} Protokoll(e)`);
   await lauf("Sicherheit", true, async () => {

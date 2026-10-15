@@ -577,7 +577,7 @@ describe("Wachen über das Dashboard", () => {
     assert.match(r.body.hinweis, /Standbilder an die Claude-API/);
     assert.deepEqual(r.body.kameras, Object.keys(cameras));
     const ausDatei = r.body.wachen.find((w: { quelle: string }) => w.quelle === "cameras.json");
-    assert.deepEqual(ausDatei, { kamera: "einfahrt", frage: "Tor offen?", alle_minuten: 15, nur_wenn: "immer", quelle: "cameras.json", bearbeitbar: false });
+    assert.deepEqual(ausDatei, { kamera: "einfahrt", frage: "Tor offen?", alle_minuten: 15, laeuft: true, nur_wenn: "immer", ruhe_minuten: 30, quelle: "cameras.json", bearbeitbar: false });
   });
 
   it("anlegen, ändern, löschen nur für dynamische Wachen, mit Audit", async () => {
@@ -588,7 +588,7 @@ describe("Wachen über das Dashboard", () => {
     // Auch die per Werkzeug angelegte (und wieder entfernte) Wache hat ihre ID verbraucht: gemeinsamer Zähler
     const id = neu.body.wache.id as number;
     assert.ok(Number.isSafeInteger(id) && id >= 1);
-    assert.deepEqual(neu.body.wache, { id, kamera: "garten", frage: "Person im Garten?", alle_minuten: 30, nur_wenn: "nacht", ruhe_minuten: 60, quelle: "dashboard", bearbeitbar: true });
+    assert.deepEqual(neu.body.wache, { id, kamera: "garten", frage: "Person im Garten?", alle_minuten: 30, laeuft: true, nur_wenn: "nacht", ruhe_minuten: 60, quelle: "dashboard", bearbeitbar: true });
     const geaendert = await rufe(dashboard.wacheAendern, { params: { id: String(id) }, body: { kamera: "einfahrt", frage: "Tor offen?", alle_minuten: 5 } });
     assert.equal(geaendert.statusCode, 200);
     assert.deepEqual(dynamicWachen[0], { id, kamera: "einfahrt", frage: "Tor offen?", alle_minuten: 5, nur_wenn: "immer", quelle: "dashboard" });
@@ -837,6 +837,15 @@ describe("server.ts: Routen der Kommandozentrale über HTTP", () => {
   writeFileSync(attrappe, 'globalThis.fetch = async () => { throw new Error("kein Netz im Test"); };\n');
   mkdirSync(join(temp2, "data"), { recursive: true });
   writeFileSync(join(temp2, "cameras.json"), JSON.stringify({ garten: { frigate: "garten", beschreibung: "Garten" } }));
+  // Von Hand bearbeitet: ruhe_minuten als Text bzw. negativ (laufen nie durch pruefeWache)
+  writeFileSync(
+    join(temp2, "data", "wachen.json"),
+    JSON.stringify([
+      { id: 1, kamera: "garten", frage: "Tor offen?", alle_minuten: 10, ruhe_minuten: "oft" },
+      { id: 2, kamera: "garten", frage: "Licht an?", alle_minuten: 10, ruhe_minuten: -5 },
+      { id: 3, kamera: "garten", frage: "Person da?", alle_minuten: 10 },
+    ]),
+  );
   let kind: ChildProcess | undefined;
   let port = 0;
   let ausgabe = "";
@@ -943,6 +952,13 @@ describe("server.ts: Routen der Kommandozentrale über HTTP", () => {
     // Aus dem Heimnetz antwortet der Router wie bisher (keine Daten, nur die Methoden)
     assert.equal((await http("OPTIONS", "/api/zeitplaene")).status, 200);
     assert.equal((await http("OPTIONS", "/gesture")).status, 200);
+  });
+
+  it("GET /api/wachen liefert die wirksame Ruhezeit wie der Takt: Text → 30, negativ → 0, fehlend → 30", async () => {
+    const r = await http("GET", "/api/wachen", mitToken);
+    assert.equal(r.status, 200);
+    const wachen = (JSON.parse(r.text) as { wachen: { id: number; ruhe_minuten: unknown }[] }).wachen;
+    assert.deepEqual(wachen.map((w) => [w.id, w.ruhe_minuten]), [[1, 30], [2, 0], [3, 30]]);
   });
 
   it("Ablauf: anlegen über HTTP, Prüfung 400, dann Notfall → 423 überall, Ausnahmen offen", async () => {

@@ -278,8 +278,9 @@ describe("Löschen von Zeitplänen und Wachen braucht Freigabe", () => {
     assert.equal(t.summary!({ id: 41 }), "Wache #41 löschen: ohne Kamera – Licht an?");
     const liste = String(await werkzeug("wachen_anzeigen").run({}, ctx));
     assert.doesNotMatch(liste, /undefined/);
-    assert.match(liste, /#40 balkon · alle 60 min · ohne Frage/);
-    assert.match(liste, /#41 ohne Kamera · alle 60 min · Licht an\?/);
+    assert.match(liste, /#40 balkon · alle 60 min \(läuft nicht: Frage fehlt\) · ohne Frage/);
+    // Ohne Kamera schaut die Wache nicht hin: die Liste sagt es (gemeinsame Regel wacheZustand)
+    assert.match(liste, /#41 ohne Kamera · alle 60 min \(läuft nicht: Kamera fehlt\) · Licht an\?/);
     assert.equal(await t.run(ohneFrage, ctx), "Gelöscht.");
     assert.equal(await t.run(ohneKamera, ctx), "Gelöscht.");
     assert.equal(dynamicWachen.length, 0);

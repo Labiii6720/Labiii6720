@@ -126,6 +126,15 @@ describe("zeitplanTick", () => {
     assert.equal(prompts.length, 1); // heute nicht nochmals
   });
 
+  it("von Hand bearbeitet ohne Namen: Auftrag läuft, Titel «ohne Namen» statt «undefined»", async () => {
+    zeitplaene.push({ id: 901, zeit: "08:30", tage: "taeglich", auftrag: "Sag mir das Wetter" } as never);
+    antworten = ["Sonnig, 18 Grad."];
+    await zeitplanTick(am(10, 8, 30));
+    assert.equal(prompts[0], "[Zeitplan «ohne Namen», läuft automatisch] Sag mir das Wetter");
+    assert.ok(gesendet[0]?.startsWith("🕒 ohne Namen"), gesendet[0]);
+    assert.ok([...prompts, ...gesendet].every((t) => !t.includes("undefined")));
+  });
+
   it("verpasst → im Nachholfenster nachgeholt, danach nicht mehr", async () => {
     plan(2, "08:30");
     await zeitplanTick(am(10, 9, 31));

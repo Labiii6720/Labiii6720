@@ -11,6 +11,8 @@ Kurz und nur das Wichtigste. Details stehen im README.
 - Kommandozentrale: eigener Token-Schlüssel, kollidiert nicht mehr mit der Gesten-Konsole; einmal neu anmelden. Finanzen zählen Rechnungen pro Monat zusätzlich je Währung (`anzahlJe`).
 - Protokoll-Knöpfe sind im Notaus gesperrt (mit Grund); eine Ablehnung meldet Notaus und `/weiter`, nicht Notfall. Von Hand bearbeitete Zeitpläne ohne `zeit` oder `tage` werfen im Scheduler nicht mehr, sie laufen nie.
 - «Verbindung gestört» und «wieder da» werden angesagt, auch bei offenem Dialog. Wachen aus `cameras.json` bleiben nur lesend, auch mit kopiertem `id`.
+- Von Hand verdorbene `cameras.json`: Kamera-Einträge ohne Objekt-Form fallen beim Laden weg (gemeldet, die übrigen laufen). Wachen ohne gültiges `alle_minuten` oder auf fehlender Kamera schicken kein Bild und erscheinen im Dashboard, in `wachen_anzeigen` und im Selbsttest als «läuft nicht» mit Grund (gemeinsame Regel `wacheZustand`). Unbrauchbare `ruhe_minuten` (auch bei `melden`) gelten als Standard statt «keine Ruhezeit». Ungültiges `nur_wenn` (null, «Nacht», «nachts» …) fällt nicht mehr auf «abwesend» durch: Wache bzw. Meldung bleibt aus, wird beim Laden gemeldet und erscheint überall als «Bedingung ungültig» statt «immer».
+- Wachen ohne `frage` schicken kein Standbild mehr an die API («läuft nicht: Frage fehlt» in Dashboard, `wachen_anzeigen` und Selbsttest). Zeitpläne ohne Auftrag zeigen in der Kommandozentrale «läuft nicht: Auftrag fehlt»; ohne Namen heissen sie in Titel und Meldung «ohne Namen» statt «undefined».
 - Schicht 2 ist abgeschlossen.
 
 ## 0.21.2

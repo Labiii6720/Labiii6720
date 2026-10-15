@@ -1,5 +1,5 @@
 import { mkdirSync, renameSync, writeFileSync } from "node:fs";
-import { gesperrtText, ladeListe } from "./datei.js";
+import { gesperrtText, ladeListe, sichereDefekt } from "./datei.js";
 import { save, state } from "./state.js";
 import { hhmm, imFenster, minutesOfDay, todayKey } from "./time.js";
 
@@ -19,7 +19,22 @@ export interface Zeitplan {
 }
 
 const FILE = "data/zeitplaene.json";
-const geladen = ladeListe<Zeitplan>(FILE, "Zeitpläne");
+/** Nur Objekte gelten als Eintrag; null, Zahlen, Texte oder Listen (Handeingriff) machen die Datei unlesbar. */
+const istZeitplanEintrag = (z: unknown): boolean => z !== null && typeof z === "object" && !Array.isArray(z);
+
+/**
+ * ladeListe prüft nur, ob es eine Liste ist. Ein Nicht-Objekt im Bestand liesse schon den Import abstürzen (z.id), also
+ * den ganzen Dienst samt Telegram und Notaus: Die Datei gilt dann wie unlesbares JSON als defekt (Sicherung, Sperre).
+ */
+const geladen = ((): { liste: Zeitplan[]; nichtGeladen: boolean } => {
+  const roh = ladeListe<unknown>(FILE, "Zeitpläne");
+  if (roh.nichtGeladen || roh.liste.every(istZeitplanEintrag)) return roh as { liste: Zeitplan[]; nichtGeladen: boolean };
+  const kopie = sichereDefekt(FILE);
+  console.error(
+    `Zeitpläne unlesbar (ungültiger Eintrag) – ${kopie ? `Kopie unter ${kopie}` : "Sicherung fehlgeschlagen"}. Jarvis startet ohne ${FILE} und speichert die Datei nicht, bis sie repariert ist und Jarvis neu startet.`,
+  );
+  return { liste: [], nichtGeladen: true };
+})();
 export const zeitplaene: Zeitplan[] = geladen.liste;
 /** true, wenn data/zeitplaene.json vorhanden, aber unlesbar war: keine Zeitpläne, und nichts wird gespeichert. */
 export const zeitplaeneNichtGeladen = geladen.nichtGeladen;
@@ -108,10 +123,17 @@ function tagPasst(z: Zeitplan, now: Date): boolean {
   return t === "taeglich" || t === "täglich" || t === "werktags" || t.split(",").includes(tag);
 }
 
+/**
+ * Kann der Eintrag überhaupt laufen? Von Hand bearbeitete Einträge ohne zeit/tage (sonst Absturz im Scheduler-Takt) oder
+ * ohne Auftrag (sonst ein bezahlter Claude-Lauf mit dem Auftrag «undefined») sind nie fällig und haben keinen nächsten Lauf.
+ */
+function laeuft(z: Zeitplan): boolean {
+  return typeof z.zeit === "string" && typeof z.tage === "string" && typeof z.auftrag === "string" && z.auftrag.trim() !== "";
+}
+
 /** Genau zur Minute (Fenster 1 Minute) – bleibt für Kompatibilität. */
 export function faelltAn(z: Zeitplan, now: Date): boolean {
-  // Von Hand bearbeitete Einträge ohne zeit/tage: nie fällig statt Absturz im Scheduler-Takt
-  if (typeof z.zeit !== "string" || typeof z.tage !== "string") return false;
+  if (!laeuft(z)) return false;
   if (!tagPasst(z, now)) return false;
   const hhmm = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
   return hhmm === z.zeit;
@@ -130,7 +152,7 @@ function heuteZuSpaetAngelegt(z: Zeitplan, now: Date): boolean {
  * fensterMin 0 = nur zur Minute (kein Nachholen). Ein heute erst nach der Uhrzeit angelegter Zeitplan ist heute nicht fällig.
  */
 export function faelligIm(z: Zeitplan, now: Date, fensterMin: number): boolean {
-  if (typeof z.zeit !== "string" || typeof z.tage !== "string") return false;
+  if (!laeuft(z)) return false;
   if (z.lastRun === todayKey(now)) return false;
   if (!tagPasst(z, now)) return false;
   if (heuteZuSpaetAngelegt(z, now)) return false;
@@ -181,10 +203,11 @@ export const pruefungsText = (fehler: Record<string, string>): string => Object.
 /**
  * Nächster Lauf nach derselben Tageslogik wie faelligIm: passender Tag, heute schon gelaufen, heute zu spät angelegt.
  * Liegt ein Lauf im Nachholfenster noch offen, ist er «jetzt» fällig (der Scheduler holt ihn im nächsten Takt nach).
- * Lokale Zeit wie der Scheduler (TZ Europe/Zurich, config.ts). undefined bei ungültiger Uhrzeit oder Tagesangabe.
+ * Lokale Zeit wie der Scheduler (TZ Europe/Zurich, config.ts). undefined bei ungültiger Uhrzeit oder Tagesangabe und
+ * ohne Auftrag (laeuft).
  */
 export function naechsterLauf(z: Zeitplan, now: Date, fensterMin = 0): Date | undefined {
-  if (typeof z.zeit !== "string" || typeof z.tage !== "string") return undefined;
+  if (!laeuft(z)) return undefined;
   const zeit = z.zeit.trim();
   if (!/^\d{1,2}:\d{2}$/.test(zeit)) return undefined;
   const [h, m] = zeit.split(":").map(Number);

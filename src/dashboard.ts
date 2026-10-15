@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import type { NextFunction, Request, Response } from "express";
 import { askWithBudget } from "./agent.js";
 import { audit } from "./audit.js";
-import { allWachen, cameras, camerasNichtGeladen, dynamicWachen, neueWacheId, pruefeWache, saveWachen, snapshot, WACHEN_UNLESBAR, wachenNichtGeladen, type Wache } from "./cameras.js";
+import { allWachen, bedingungWert, cameras, camerasNichtGeladen, dynamicWachen, neueWacheId, pruefeWache, ruheMinuten, saveWachen, snapshot, WACHEN_UNLESBAR, wacheZustand, wachenNichtGeladen, type Wache } from "./cameras.js";
 import { verbrauchVerlauf } from "./claude.js";
 import { config } from "./config.js";
 import { finanzUebersicht, offeneRechnungen, RECHNUNGEN_UNLESBAR, rechnungenNichtGeladen, type Rechnung } from "./finanzen.js";
@@ -60,6 +60,23 @@ const tageAnzeige = (tage: unknown): string => (typeof tage === "string" ? (norm
 const zeitAnzeige = (zeit: unknown): string => (typeof zeit === "string" ? zeit : "");
 /** Dasselbe für von Hand bearbeitete Wachen (data/wachen.json, cameras.json): fehlt «frage», kein 500. */
 const frageAnzeige = (frage: unknown): string => (typeof frage === "string" ? frage : "");
+/**
+ * Und für «name» und «auftrag» eines von Hand bearbeiteten Zeitplans: fehlen sie, kein undefined in der Antwort. Sonst
+ * füllte der Bearbeiten-Dialog die Felder mit dem Text «undefined», und ein Speichern übernähme ihn als Name bzw. Auftrag.
+ * Ebenso «kamera» einer von Hand bearbeiteten Wache (data/wachen.json): fehlt sie, "" statt eines fehlenden Felds.
+ */
+const textAnzeige = (text: unknown): string => (typeof text === "string" ? text : "");
+/**
+ * Intervall einer Wache für die Anzeige, nach derselben Regel wie der Takt (wacheZustand in cameras.ts): ohne gültiges
+ * «alle_minuten» (von Hand bearbeitet) läuft sie nicht – dann alle_minuten null und laeuft false statt «undefined
+ * Minuten». Ebenso wenig läuft eine Wache auf einer Kamera, die nicht (mehr) in cameras.json steht oder beim Laden
+ * verworfen wurde (z. B. «garten»: null); dann bleibt das eingetragene Intervall stehen. Läuft sie nicht, nennt «grund»
+ * die Ursache.
+ */
+const taktAnzeige = (w: Wache): { alle_minuten: number | null; laeuft: boolean; grund?: string } => {
+  const { takt, laeuft, grund } = wacheZustand(w);
+  return { alle_minuten: takt ?? null, laeuft, ...(grund ? { grund } : {}) };
+};
 const naechsterLaufSicher = (z: Zeitplan, jetzt: Date): Date | undefined =>
   typeof z.zeit === "string" && typeof z.tage === "string" ? naechsterLauf(z, jetzt, config.zeitplanNachholenMin) : undefined;
 
@@ -103,9 +120,9 @@ export function statusJson(_req: Request, res: Response): void {
     zeitplaeneUnlesbar: zeitplaeneNichtGeladen,
     vorgaengeUnlesbar: vorgaengeNichtGeladen,
     vorgaenge: vorgaenge.slice(-8).map((v) => ({ id: v.id, status: v.status, steps: v.steps, auftrag: v.auftrag.slice(0, 90) })),
-    zeitplaene: zeitplaene.map((z) => ({ id: z.id, name: z.name, zeit: zeitAnzeige(z.zeit), tage: tageAnzeige(z.tage) })),
-    wachen: allWachen().map((w) => ({ kamera: w.kamera, frage: frageAnzeige(w.frage).slice(0, 80), alle_minuten: w.alle_minuten })),
-    kameras: Object.entries(cameras).map(([k, c]) => ({ name: k, beschreibung: c.beschreibung })),
+    zeitplaene: zeitplaene.map((z) => ({ id: z.id, name: textAnzeige(z.name), zeit: zeitAnzeige(z.zeit), tage: tageAnzeige(z.tage) })),
+    wachen: allWachen().map((w) => ({ kamera: textAnzeige(w.kamera), frage: frageAnzeige(w.frage).slice(0, 80), ...taktAnzeige(w) })),
+    kameras: Object.entries(cameras).map(([k, c]) => ({ name: k, beschreibung: c?.beschreibung })),
     protokolle: Object.entries(protokolle).map(([k, p]) => ({ name: k, beschreibung: p.beschreibung, stufe: p.stufe })),
     ziele: profil.ziele.filter((z) => z.status === "offen").map((z) => ({ id: z.id, text: z.text, frist: z.frist })),
     werte: profil.werte,
@@ -317,9 +334,11 @@ function zuruecksetzen<T extends object>(ziel: T, alt: T): void {
 /** ID aus dem Pfad; nur Ziffern, sonst undefined. */
 const pfadId = (req: Request): number | undefined => (/^\d{1,9}$/.test(String(req.params.id ?? "")) ? Number(req.params.id) : undefined);
 
+/** Ohne Auftrag (von Hand bearbeitet: fehlend, leer, kein Text) läuft ein Zeitplan nie (zeitplaene.ts, laeuft): die Anzeige nennt den Grund. */
+const auftragFehlt = (auftrag: unknown): boolean => typeof auftrag !== "string" || auftrag.trim() === "";
 const zeitplanJson = (z: Zeitplan, jetzt: Date) => {
   const n = naechsterLaufSicher(z, jetzt);
-  return { id: z.id, name: z.name, zeit: zeitAnzeige(z.zeit), tage: tageAnzeige(z.tage), auftrag: z.auftrag, ...(z.lastRun ? { lastRun: z.lastRun } : {}), ...(z.angelegt ? { angelegt: z.angelegt } : {}), ...(n ? { naechsterLauf: n.toISOString() } : {}) };
+  return { id: z.id, name: textAnzeige(z.name), zeit: zeitAnzeige(z.zeit), tage: tageAnzeige(z.tage), auftrag: textAnzeige(z.auftrag), ...(z.lastRun ? { lastRun: z.lastRun } : {}), ...(z.angelegt ? { angelegt: z.angelegt } : {}), ...(n ? { naechsterLauf: n.toISOString() } : {}), ...(auftragFehlt(z.auftrag) ? { laeuft: false, grund: "Auftrag fehlt" } : {}) };
 };
 
 const zeitplanAudit = (z: Zeitplan) => ({ id: z.id, name: kurz(z.name, 60), zeit: z.zeit, tage: z.tage, auftrag: kurz(z.auftrag), quelle: "dashboard" });
@@ -401,12 +420,14 @@ export function zeitplanLoeschen(req: Request, res: Response): void {
   res.json({ ok: true, text: `Zeitplan #${z!.id} gelöscht, Sir.` });
 }
 
+// ruhe_minuten: immer der wirksame Wert wie im Takt (ruheMinuten), also auch der Standard 30 statt eines fehlenden Felds.
+// nur_wenn: die wirksame Bedingung (bedingungWert); ungültig (null, «Nacht» …) → null, laeuft false, grund «Bedingung ungültig»
 const wacheJson = (w: Wache) =>
   w.id === undefined
-    ? { kamera: w.kamera, frage: frageAnzeige(w.frage), alle_minuten: w.alle_minuten, nur_wenn: w.nur_wenn ?? "immer", ...(w.ruhe_minuten !== undefined ? { ruhe_minuten: w.ruhe_minuten } : {}), quelle: "cameras.json", bearbeitbar: false }
-    : { id: w.id, kamera: w.kamera, frage: frageAnzeige(w.frage), alle_minuten: w.alle_minuten, nur_wenn: w.nur_wenn ?? "immer", ...(w.ruhe_minuten !== undefined ? { ruhe_minuten: w.ruhe_minuten } : {}), quelle: w.quelle ?? "chat", bearbeitbar: true };
+    ? { kamera: textAnzeige(w.kamera), frage: frageAnzeige(w.frage), ...taktAnzeige(w), nur_wenn: bedingungWert(w.nur_wenn) ?? null, ruhe_minuten: ruheMinuten(w.ruhe_minuten), quelle: "cameras.json", bearbeitbar: false }
+    : { id: w.id, kamera: textAnzeige(w.kamera), frage: frageAnzeige(w.frage), ...taktAnzeige(w), nur_wenn: bedingungWert(w.nur_wenn) ?? null, ruhe_minuten: ruheMinuten(w.ruhe_minuten), quelle: w.quelle ?? "chat", bearbeitbar: true };
 
-const wacheAudit = (w: Wache) => ({ id: w.id, kamera: kurz(w.kamera, 60), alle_minuten: w.alle_minuten, nur_wenn: w.nur_wenn ?? "immer", frage: kurz(w.frage), quelle: "dashboard" });
+const wacheAudit = (w: Wache) => ({ id: w.id, kamera: kurz(w.kamera, 60), alle_minuten: w.alle_minuten, nur_wenn: bedingungWert(w.nur_wenn) ?? null, frage: kurz(w.frage), quelle: "dashboard" });
 
 export function wachenJson(_req: Request, res: Response): void {
   if (notfallAktiv()) return void res.status(423).json(NOTFALL_GESPERRT);

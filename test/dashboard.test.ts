@@ -298,6 +298,43 @@ describe("Dashboard mit von Hand bearbeiteter data/zeitplaene.json", () => {
     }
   });
 
+  it("Einträge ohne name oder auftrag liefern leere Texte statt undefined (sonst stünde «undefined» im Bearbeiten-Dialog)", () => {
+    const vorher = zeitplaene.splice(0);
+    try {
+      // Wie nach einer Handbearbeitung: name bzw. auftrag fehlen oder sind keine Texte
+      zeitplaene.push(
+        { id: 11, zeit: "07:00", tage: "werktags" } as never,
+        { id: 12, name: "ohne Auftrag", zeit: "07:00", tage: "werktags" } as never,
+        { id: 13, name: 42, zeit: "07:00", tage: "werktags", auftrag: null } as never,
+        { id: 14, name: "gültig", zeit: "07:00", tage: "werktags", auftrag: "Briefing" },
+      );
+      const li = antwort();
+      zeitplaeneJson(req(), li as unknown as Res);
+      assert.equal(li.statusCode, 200);
+      const lb = li.body as { zeitplaene: { id: number; name: unknown; auftrag: unknown }[] };
+      assert.deepEqual(lb.zeitplaene.map((z) => [z.id, z.name, z.auftrag]), [[11, "", ""], [12, "ohne Auftrag", ""], [13, "", ""], [14, "gültig", "Briefing"]]);
+      // Ohne Auftrag läuft er nie (zeitplaene.ts): kein nächster Lauf, der Grund steht dabei; mit Auftrag kein Grund
+      const roh = li.body as { zeitplaene: { id: number; naechsterLauf?: string; laeuft?: boolean; grund?: string }[] };
+      assert.deepEqual(roh.zeitplaene.map((z) => [z.id, z.laeuft, z.grund, typeof z.naechsterLauf]), [
+        [11, false, "Auftrag fehlt", "undefined"], [12, false, "Auftrag fehlt", "undefined"], [13, false, "Auftrag fehlt", "undefined"], [14, undefined, undefined, "string"],
+      ]);
+      // Über HTTP liesse res.json undefined-Schlüssel weg: beide Felder müssen als Text dastehen
+      for (const z of JSON.parse(JSON.stringify(lb)).zeitplaene as Record<string, unknown>[]) {
+        assert.equal(typeof z.name, "string", `#${z.id} name`);
+        assert.equal(typeof z.auftrag, "string", `#${z.id} auftrag`);
+      }
+
+      const st = antwort();
+      statusJson(req(), st as unknown as Res);
+      assert.equal(st.statusCode, 200);
+      const sb = JSON.parse(JSON.stringify(st.body)) as { zeitplaene: { id: number; name: unknown }[] };
+      assert.deepEqual(sb.zeitplaene.map((z) => [z.id, z.name]), [[11, ""], [12, "ohne Auftrag"], [13, ""], [14, "gültig"]]);
+      assert.ok(!JSON.stringify(sb.zeitplaene).includes("undefined"));
+    } finally {
+      zeitplaene.splice(0, zeitplaene.length, ...vorher);
+    }
+  });
+
   it("ein Eintrag ohne tage lässt sich über das Dashboard reparieren", () => {
     const vorher = zeitplaene.splice(0);
     try {
@@ -323,7 +360,7 @@ describe("Dashboard mit von Hand bearbeiteten Wachen", () => {
       assert.equal(st.statusCode, 200);
       const sb = st.body as { ok: boolean; wachen: { kamera: string; frage: string; alle_minuten: number }[] };
       assert.equal(sb.ok, true);
-      assert.deepEqual(sb.wachen.find((w) => w.alle_minuten === 30), { kamera: "einfahrt", frage: "", alle_minuten: 30 });
+      assert.deepEqual(sb.wachen.find((w) => w.alle_minuten === 30), { kamera: "einfahrt", frage: "", alle_minuten: 30, laeuft: false, grund: "Frage fehlt" });
 
       const li = antwort();
       wachenJson(req(), li as unknown as Res);

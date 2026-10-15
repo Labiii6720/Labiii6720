@@ -462,8 +462,9 @@ dialog form { display: flex; flex-direction: column; max-height: calc(100dvh - 3
 .feldgr input.feld, .feldgr select.wahl { width: 100%; }
 .feldgr .fehler { color: var(--krit-text); font-size: 12.5px; margin-top: 6px; display: flex; align-items: center; gap: 6px; }
 .feldgr .fehler[hidden] { display: none; }
-.feldgr.ungueltig input.feld, .feldgr.ungueltig textarea.feld { box-shadow: inset 0 0 0 1.5px var(--krit-text); }
-.feldgr.ungueltig .feld:focus { outline: none; box-shadow: inset 0 0 0 2px var(--krit-text); }
+.feldgr.ungueltig input.feld, .feldgr.ungueltig textarea.feld, .feldgr.ungueltig select.wahl { box-shadow: inset 0 0 0 1.5px var(--krit-text); }
+/* Fokus im Fehlerfall: 2 px krit statt Bernsteinring (DESIGN §5) – auch für Auswahlfelder (Wache: Kamera, Bedingung) */
+.feldgr.ungueltig .feld:focus, .feldgr.ungueltig .wahl:focus { outline: none; box-shadow: inset 0 0 0 2px var(--krit-text); }
 .feldgr.ungueltig .hilfe .h-text { display: none; }
 /* PIN: der Sperr-Hinweis bleibt auch neben der Fehlermeldung stehen */
 #pinGr.ungueltig .hilfe .h-text { display: inline; }

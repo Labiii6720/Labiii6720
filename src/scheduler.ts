@@ -169,7 +169,7 @@ async function unterbrocheneAbarbeiten(now: Date): Promise<void> {
       titel = schluessel === "rueckblick" ? "Der Rückblick" : "Der Zielcheck";
       merkeRoutine(schluessel, tag);
     } else if (z) {
-      titel = `Zeitplan «${z.name}»`;
+      titel = `Zeitplan «${zeitplanName(z)}»`;
       z.lastRun = tag;
       try {
         saveZeitplaene();
@@ -325,6 +325,9 @@ async function ausfuehrenOhneVermerk(
 }
 
 /** Prüft jede Minute, ob ein Zeitplan dran ist (auch im Nachholfenster), und lässt Jarvis den Auftrag erledigen. */
+/** Name für Titel und Meldungen: ein von Hand bearbeiteter Eintrag ohne (oder mit leerem) Namen ergäbe sonst «undefined». */
+const zeitplanName = (z: { name?: unknown }): string => (typeof z.name === "string" && z.name.trim() !== "" ? z.name : "ohne Namen");
+
 export async function zeitplanTick(now = new Date()): Promise<void> {
   offlineNachfuehren();
   await nachNeustartPruefen(now);
@@ -340,22 +343,23 @@ export async function zeitplanTick(now = new Date()): Promise<void> {
     if (!faelligIm(z, now, config.zeitplanNachholenMin)) continue;
     const schluessel = `zeitplan:${z.id}`;
     if (!bereit(schluessel, now)) continue;
+    const name = zeitplanName(z);
     const abhaken = () => {
       z.lastRun = today;
       saveZeitplaene();
     };
-    if (await nachNeustartAbhaken(schluessel, `Zeitplan «${z.name}»`, today, abhaken)) continue;
-    if (wartetWeilOffline(`Zeitplan «${z.name}»`)) return;
+    if (await nachNeustartAbhaken(schluessel, `Zeitplan «${name}»`, today, abhaken)) continue;
+    if (wartetWeilOffline(`Zeitplan «${name}»`)) return;
     const fertig = await ausfuehren(
       schluessel,
-      `Zeitplan «${z.name}»`,
+      `Zeitplan «${name}»`,
       now,
       async (zaehle) => {
-        const reply = await abhaengigkeiten.handleMessage(`[Zeitplan «${z.name}», läuft automatisch] ${z.auftrag}`, hooks, { onStep: zaehle });
+        const reply = await abhaengigkeiten.handleMessage(`[Zeitplan «${name}», läuft automatisch] ${z.auftrag}`, hooks, { onStep: zaehle });
         // Notaus während des Laufs: die Antwort wäre nur «Ich bin pausiert …» – nicht senden, nicht abhaken.
         if (state.paused) return false;
         // Die Antwort kann Daten enthalten (Mails, Termine): kommt der Notfall dazwischen, weder senden noch ablegen
-        await abhaengigkeiten.sendeSpaeter(`🕒 ${z.name}\n\n${reply}`, { imNotfallZurueckhalten: true });
+        await abhaengigkeiten.sendeSpaeter(`🕒 ${name}\n\n${reply}`, { imNotfallZurueckhalten: true });
       },
       true,
     );

@@ -46,11 +46,171 @@ export interface Camera {
 /** true, wenn cameras.json vorhanden, aber unlesbar war: dann laufen keine Meldungen und keine Wachen aus der Datei. */
 export let camerasNichtGeladen = false;
 
+/**
+ * Ein Wachen-Eintrag (data/wachen.json oder «wachen» in cameras.json) muss ein Objekt sein; null, Zahl, Text oder
+ * Liste (Handeingriff) machen data/wachen.json unlesbar und werden in cameras.json übersprungen.
+ */
+const istWachenEintrag = (w: unknown): boolean => w !== null && typeof w === "object" && !Array.isArray(w);
+
+/** Wachen einer Kamera aus cameras.json, die ein Objekt sind; null, fehlende Kamera oder «wachen» ohne Liste ergeben keine. */
+function wachenAusDatei(c: unknown): Record<string, unknown>[] {
+  const liste = c !== null && typeof c === "object" ? (c as { wachen?: unknown }).wachen : undefined;
+  return Array.isArray(liste) ? (liste.filter(istWachenEintrag) as Record<string, unknown>[]) : [];
+}
+
+/** Ungültige Wachen-Einträge in cameras.json laut melden (nur Kamera und Anzahl, nie Inhalt): sie laufen nicht. */
+function meldeUngueltigeWachen(roh: Record<string, Camera>): void {
+  for (const [kamera, c] of Object.entries(roh)) {
+    const liste = c !== null && typeof c === "object" ? (c as { wachen?: unknown }).wachen : undefined;
+    if (liste === undefined) continue;
+    const ungueltig = Array.isArray(liste) ? liste.length - wachenAusDatei(c).length : 1;
+    if (ungueltig > 0) console.error(`cameras.json: ${ungueltig} ungültige(r) Wachen-Eintrag/Einträge bei Kamera «${kamera}» übersprungen (kein Objekt bzw. «wachen» keine Liste).`);
+  }
+}
+
+/**
+ * Takt einer Wache in Minuten, oder undefined, wenn «alle_minuten» fehlt oder unbrauchbar ist. Wachen aus cameras.json
+ * und von Hand bearbeitete Einträge in data/wachen.json laufen nie durch pruefeWache: Ohne diese Prüfung ergäbe ein
+ * Tippfehler («alle_minuen»), null oder Text NaN, die Wache würde nie übersprungen und schickte jede Minute ein
+ * Standbild an die API. Zahl oder Ziffernfolge > 0 wie bisher (mindestens 1 Minute), alles andere läuft nicht.
+ * Dieselbe Regel gilt für den Takt (watch.ts), die Ladeprüfung und die Anzeige in der Kommandozentrale.
+ */
+export function taktMinuten(v: unknown): number | undefined {
+  const n = typeof v === "number" ? v : typeof v === "string" && /^\s*\d+(\.\d+)?\s*$/.test(v) ? Number(v) : Number.NaN;
+  return Number.isFinite(n) && n > 0 ? Math.max(1, n) : undefined;
+}
+
+/**
+ * Ruhezeit in Minuten nach einer Meldung (Wache: Standard 30, Kamera-Meldung «melden»: Standard 10). Einträge in
+ * cameras.json und von Hand bearbeitete in data/wachen.json laufen nie durch pruefeWache: «ruhe_minuten» als Text
+ * ("oft"), Objekt oder null ergäbe sonst NaN bzw. 0 – keine Ruhezeit, jedes Ereignis ginge mit Bild an Telegram.
+ * Endliche Zahl gilt (negativ heisst keine Ruhezeit, also 0), alles andere ergibt den Standard. Dieselbe Regel gilt
+ * für den Takt (watch.ts) und die Anzeige in der Kommandozentrale.
+ */
+export function ruheMinuten(v: unknown, standard = 30): number {
+  return typeof v === "number" && Number.isFinite(v) ? Math.max(0, v) : standard;
+}
+
+/** Steht die Kamera als gültiger Eintrag in cameras.json? Nur eigene Schlüssel, nie «toString» & Co. aus dem Prototyp. */
+export function kameraBekannt(name: unknown): boolean {
+  return Object.hasOwn(cameras, String(name)) && Boolean(cameras[String(name)]);
+}
+
+export const BEDINGUNGEN: readonly Bedingung[] = ["immer", "abwesend", "nacht"];
+
+/**
+ * Gültige Bedingung oder undefined. Wachen und «melden» aus cameras.json sowie von Hand bearbeitete (oder unter 0.21
+ * ungeprüft gespeicherte) Einträge in data/wachen.json laufen nie durch pruefeWache: null, «Nacht» oder «nachts» fielen
+ * sonst auf «abwesend» durch – ohne Präsenz-Entität (isHome() = true) schaute die Wache nie hin, mit ihr stillschweigend
+ * nur bei Abwesenheit. Fehlt das Feld, gilt «immer»; alles andere ist ungültig und läuft nicht. Gemeinsame Regel für
+ * den Takt (watch.ts), die Ladeprüfung, den Selbsttest, die Kommandozentrale und wachen_anzeigen.
+ */
+export function bedingungWert(v: unknown): Bedingung | undefined {
+  if (v === undefined) return "immer";
+  return typeof v === "string" && (BEDINGUNGEN as readonly string[]).includes(v) ? (v as Bedingung) : undefined;
+}
+
+export type WacheGrund = "Intervall fehlt" | "Kamera fehlt" | "Kamera und Intervall fehlen" | "Bedingung ungültig" | "Frage fehlt";
+
+/**
+ * Hat die Wache eine Frage? Wachen aus cameras.json und von Hand bearbeitete Einträge in data/wachen.json laufen nie
+ * durch pruefeWache: Ohne diese Prüfung ginge bei fehlender (oder leerer, nicht-textlicher) «frage» alle paar Minuten
+ * ein Standbild mit der Frage «undefined» an die API (Leitplanke 9).
+ */
+const frageDa = (v: unknown): boolean => typeof v === "string" && v.trim().length > 0;
+
+/**
+ * Läuft eine Wache, und wenn nicht, warum? Gemeinsame Regel für den Takt (watch.ts), den Selbsttest (check.ts), die
+ * Kommandozentrale und das Werkzeug wachen_anzeigen: Sie braucht eine Kamera, die in cameras.json steht und beim Laden
+ * nicht verworfen wurde, ein gültiges «alle_minuten» (taktMinuten), ein gültiges «nur_wenn» (bedingungWert) und eine
+ * nicht leere «frage». Reihenfolge wie im Takt: Kamera und Intervall gehen vor der Bedingung, die Bedingung vor der Frage.
+ */
+export function wacheZustand(w: Pick<Wache, "kamera" | "alle_minuten" | "nur_wenn" | "frage">): { takt: number | undefined; laeuft: boolean; grund?: WacheGrund } {
+  const takt = taktMinuten(w.alle_minuten);
+  const kameraDa = kameraBekannt(w.kamera);
+  if (!kameraDa || takt === undefined) return { takt, laeuft: false, grund: kameraDa ? "Intervall fehlt" : takt === undefined ? "Kamera und Intervall fehlen" : "Kamera fehlt" };
+  if (bedingungWert(w.nur_wenn) === undefined) return { takt, laeuft: false, grund: "Bedingung ungültig" };
+  if (!frageDa(w.frage)) return { takt, laeuft: false, grund: "Frage fehlt" };
+  return { takt, laeuft: true };
+}
+
+/** true, wenn die Wache wirklich hinschaut (siehe wacheZustand). */
+export const wacheLaeuft = (w: Pick<Wache, "kamera" | "alle_minuten" | "nur_wenn" | "frage">): boolean => wacheZustand(w).laeuft;
+
+/** Wachen ohne gültiges «alle_minuten» beim Laden melden (nur Herkunft, Kamera und Anzahl, nie die Frage): sie laufen nicht, bleiben aber stehen. */
+function meldeOhneTakt(herkunft: string, wachen: { kamera: unknown; w: Record<string, unknown> }[]): void {
+  const jeKamera = new Map<string, number>();
+  for (const { kamera, w } of wachen) {
+    if (taktMinuten(w.alle_minuten) !== undefined) continue;
+    const k = typeof kamera === "string" ? kamera : "?";
+    jeKamera.set(k, (jeKamera.get(k) ?? 0) + 1);
+  }
+  for (const [k, n] of jeKamera) console.error(`${herkunft}: ${n} Wache(n) bei Kamera «${k}» ohne gültiges «alle_minuten» – sie schauen nicht hin, bis der Eintrag repariert ist.`);
+}
+
+/** Wachen mit ungültigem «nur_wenn» beim Laden melden (nur Herkunft, Kamera und Anzahl, nie Frage oder Rohwert): sie schauen nicht hin. */
+function meldeUngueltigeBedingung(herkunft: string, wachen: { kamera: unknown; w: Record<string, unknown> }[]): void {
+  const jeKamera = new Map<string, number>();
+  for (const { kamera, w } of wachen) {
+    if (bedingungWert(w.nur_wenn) !== undefined) continue;
+    const k = typeof kamera === "string" ? kamera : "?";
+    jeKamera.set(k, (jeKamera.get(k) ?? 0) + 1);
+  }
+  for (const [k, n] of jeKamera) console.error(`${herkunft}: ${n} Wache(n) bei Kamera «${k}» mit ungültigem «nur_wenn» (erlaubt: immer, abwesend, nacht) – sie schauen nicht hin, bis der Eintrag repariert ist.`);
+}
+
+/** Wachen ohne «frage» (fehlend, leer oder kein Text) beim Laden melden (nur Herkunft, Kamera und Anzahl): sie schauen nicht hin. */
+function meldeOhneFrage(herkunft: string, wachen: { kamera: unknown; w: Record<string, unknown> }[]): void {
+  const jeKamera = new Map<string, number>();
+  for (const { kamera, w } of wachen) {
+    if (frageDa(w.frage)) continue;
+    const k = typeof kamera === "string" ? kamera : "?";
+    jeKamera.set(k, (jeKamera.get(k) ?? 0) + 1);
+  }
+  for (const [k, n] of jeKamera) console.error(`${herkunft}: ${n} Wache(n) bei Kamera «${k}» ohne «frage» – sie schauen nicht hin, bis der Eintrag repariert ist.`);
+}
+
+/** «melden» einer Kamera mit ungültigem «nur_wenn» beim Laden melden (nur der Name, nie der Rohwert): ihre Meldungen bleiben aus. */
+function meldeUngueltigesMelden(kameras: Record<string, Camera>): void {
+  for (const [name, c] of Object.entries(kameras)) {
+    const m = (c as { melden?: unknown }).melden;
+    if (m === null || typeof m !== "object") continue;
+    if (bedingungWert((m as { nur_wenn?: unknown }).nur_wenn) === undefined) console.error(`cameras.json: «melden.nur_wenn» bei Kamera «${name}» ungültig (erlaubt: immer, abwesend, nacht) – ihre Meldungen bleiben aus, bis der Eintrag repariert ist.`);
+  }
+}
+
+/** Ein Kamera-Eintrag in cameras.json muss ein Objekt sein; null, Zahl, Text oder Liste (Handeingriff) fallen weg. */
+const istKameraEintrag = (c: unknown): boolean => c !== null && typeof c === "object" && !Array.isArray(c);
+
+/**
+ * Kamera-Einträge ohne Objekt-Form verwerfen und laut melden (nur der Name, nie Inhalt). camerasNichtGeladen bleibt
+ * dabei aus: Die übrigen Kameras samt Meldungen und Wachen laufen weiter, wie bei ungültigen Wachen-Einträgen. Ohne
+ * diese Prüfung würfen cameraByFrigateName (jedes Frigate-Ereignis), describeCameras und /status.json bei {"garten": null}.
+ * Object.fromEntries legt jeden Namen als eigene Eigenschaft an, auch «__proto__» (wie JSON.parse): Eine Zuweisung
+ * `gueltig[name] = c` riefe dort den Prototyp-Setter auf – die Kamera verschwände still, und cameras erbte ihre Felder.
+ */
+function nurGueltigeKameras(roh: Record<string, unknown>): Record<string, Camera> {
+  return Object.fromEntries(
+    Object.entries(roh).filter(([name, c]) => {
+      if (istKameraEintrag(c)) return true;
+      console.error(`cameras.json: Kamera «${name}» übersprungen (Eintrag ist kein Objekt) – für sie laufen weder Meldungen noch Wachen.`);
+      return false;
+    }),
+  ) as Record<string, Camera>;
+}
+
 function ladeKameras(): Record<string, Camera> {
   try {
     const roh = JSON.parse(readFileSync("cameras.json", "utf8")) as unknown;
     if (!roh || typeof roh !== "object" || Array.isArray(roh)) throw new Error("kein Objekt");
-    return roh as Record<string, Camera>;
+    const kameras = nurGueltigeKameras(roh as Record<string, unknown>);
+    meldeUngueltigeWachen(kameras);
+    const ausDatei = Object.entries(kameras).flatMap(([kamera, c]) => wachenAusDatei(c).map((w) => ({ kamera, w })));
+    meldeOhneTakt("cameras.json", ausDatei);
+    meldeUngueltigeBedingung("cameras.json", ausDatei);
+    meldeOhneFrage("cameras.json", ausDatei);
+    meldeUngueltigesMelden(kameras);
+    return kameras;
   } catch (e) {
     // Fehlende Datei heisst «keine Kameras»; alles andere laut melden (Inhalt nie ins Log)
     if ((e as NodeJS.ErrnoException).code === "ENOENT") return {};
@@ -72,8 +232,10 @@ export function describeCameras(): string {
     Object.entries(cameras)
       .map(([k, c]) => {
         const f = ["schauen"];
-        if (c.melden) f.push(`melden (${c.melden.labels.join(", ")}${c.melden.zonen ? ", Zonen " + c.melden.zonen.join("/") : ""}, ${c.melden.nur_wenn ?? "immer"})`);
-        if (c.wachen?.length) f.push(`${c.wachen.length} Wache(n)`);
+        if (c.melden) f.push(`melden (${c.melden.labels.join(", ")}${c.melden.zonen ? ", Zonen " + c.melden.zonen.join("/") : ""}, ${bedingungWert(c.melden.nur_wenn) ?? "Bedingung ungültig"})`);
+        // Nur gültige Einträge zählen (wie allWachen); übersprungene Nicht-Objekte laufen nicht
+        const wachen = wachenAusDatei(c).length;
+        if (wachen) f.push(`${wachen} Wache(n)`);
         return `${k}: ${c.beschreibung} · ${f.join(" · ")}`;
       })
       .join("\n") || "Keine Kameras eingerichtet."
@@ -206,9 +368,6 @@ export let wachenNichtGeladen = false;
 export const WACHEN_UNLESBAR =
   "⚠️ data/wachen.json war beim Start unlesbar, Sir (Sicherung, sofern möglich, unter data/wachen.json.defekt). Die dort angelegten Wachen laufen nicht, und ich ändere keine, bis die Datei repariert ist und ich neu gestartet bin.";
 
-/** Ein Eintrag in data/wachen.json muss ein Objekt sein; null, Zahl, Text oder Liste (Handeingriff) machen die Datei unlesbar. */
-const istWachenEintrag = (w: unknown): boolean => w !== null && typeof w === "object" && !Array.isArray(w);
-
 export const dynamicWachen: Wache[] = (() => {
   let text: string;
   try {
@@ -227,6 +386,11 @@ export const dynamicWachen: Wache[] = (() => {
     if (!Array.isArray(roh)) throw new Error("keine Liste");
     // Sonst bräche schon der erste Zugriff auf w.id oder w.kamera ab (Start, Ticks, Anzeigen)
     if (!roh.every(istWachenEintrag)) throw new Error("ungültiger Eintrag");
+    // Ohne gültiges Intervall läuft eine Wache nicht (watch.ts); melden, aber nichts löschen
+    const eintraege = (roh as Record<string, unknown>[]).map((w) => ({ kamera: w.kamera, w }));
+    meldeOhneTakt(WACHEN_FILE, eintraege);
+    meldeUngueltigeBedingung(WACHEN_FILE, eintraege);
+    meldeOhneFrage(WACHEN_FILE, eintraege);
     return roh as Wache[];
   } catch {
     wachenNichtGeladen = true;
@@ -298,12 +462,15 @@ export function neueWacheId(): number {
 /**
  * Alle Wachen: aus cameras.json (ohne ID) und die per Werkzeug angelegten (mit ID). Ein «id» in cameras.json (etwa aus
  * data/wachen.json kopiert) fällt weg: sonst gälte die Wache in Kommandozentrale und Werkzeugen als bearbeitbar.
+ * Einträge in cameras.json, die kein Objekt sind, fallen weg (beim Laden gemeldet).
  */
 export function allWachen(): Wache[] {
+  // Nur Objekt-Einträge: ein null (Handeingriff) liesse sonst die Destrukturierung werfen, und damit stünden alle
+  // Wachen still (wachenTick), /status.json und /api/wachen antworteten mit 500
   const fromConfig = Object.entries(cameras).flatMap(([kamera, c]) =>
-    (c.wachen ?? []).map((w) => {
-      const { id: _id, ...rest } = w as typeof w & { id?: unknown };
-      return { ...rest, kamera };
+    wachenAusDatei(c).map((w) => {
+      const { id: _id, ...rest } = w;
+      return { ...rest, kamera } as Wache;
     }),
   );
   return [...fromConfig, ...dynamicWachen];
@@ -312,8 +479,6 @@ export function allWachen(): Wache[] {
 // ---------- Prüfung (Werkzeug und Kommandozentrale, gleiche Regeln) ----------
 
 export type WacheEingabe = Pick<Wache, "kamera" | "frage" | "alle_minuten" | "nur_wenn" | "ruhe_minuten">;
-
-const BEDINGUNGEN: Bedingung[] = ["immer", "abwesend", "nacht"];
 
 /** Ganze Zahl in [min, max] (auch als Ziffernfolge im Text), sonst undefined. */
 function ganzzahl(v: unknown, min: number, max: number): number | undefined {

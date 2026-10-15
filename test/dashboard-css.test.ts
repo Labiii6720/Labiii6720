@@ -181,6 +181,58 @@ describe("Kommandozentrale: Layout aus dashboard.css", { skip: chrome ? false : 
     }
   });
 
+  it("Ungültige Auswahlfelder (Wache: Kamera, Bedingung) zeigen die rote Fehlerlinie, im Fokus 2 px ohne Bernsteinring", async () => {
+    for (const breite of [390, 1440]) {
+      for (const thema of ["light", "dark"]) {
+        const p = await seite(breite);
+        try {
+          const m = await p.evaluate((thema) => {
+            document.documentElement.dataset.theme = thema;
+            (document.getElementById("dlgWache") as HTMLDialogElement).showModal();
+            // wie feldFehler in dashboard.js: .ungueltig an der .feldgr, aria-invalid am Feld; #wWenn ohne Auswahl
+            for (const id of ["wKamera", "wWenn", "wAlle"]) {
+              const f = document.getElementById(id)!;
+              f.closest(".feldgr")!.classList.add("ungueltig");
+              f.setAttribute("aria-invalid", "true");
+            }
+            (document.getElementById("wWenn") as HTMLSelectElement).selectedIndex = -1;
+            (document.activeElement as HTMLElement | null)?.blur(); // showModal fokussiert #wKamera – Ruhezustand ohne Fokus messen
+            const probe = document.createElement("span"); probe.style.color = "var(--krit-text)"; document.body.append(probe);
+            const krit = getComputedStyle(probe).color; probe.remove();
+            const ruhe = Object.fromEntries(["wKamera", "wWenn", "wAlle"].map((id) => [id, getComputedStyle(document.getElementById(id)!).boxShadow]));
+            const fokus: Record<string, { schatten: string; outline: string }> = {};
+            for (const id of ["wKamera", "wWenn", "wAlle"]) {
+              const f = document.getElementById(id)!;
+              f.focus();
+              const s = getComputedStyle(f);
+              fokus[id] = { schatten: s.boxShadow, outline: s.outlineStyle };
+            }
+            return { krit, ruhe, fokus };
+          }, thema);
+          const art = `${breite} px, ${thema}`;
+          for (const id of ["wKamera", "wWenn", "wAlle"]) {
+            assert.ok(m.ruhe[id]!.startsWith(m.krit) && /inset$/.test(m.ruhe[id]!) && m.ruhe[id]!.includes(" 1.5px "), `${art}: #${id} ungültig mit 1.5-px-Linie in --krit-text (${m.ruhe[id]})`);
+            assert.equal(m.fokus[id]!.outline, "none", `${art}: #${id} im Fokus ohne Bernsteinring`);
+            assert.ok(m.fokus[id]!.schatten.startsWith(m.krit) && m.fokus[id]!.schatten.includes(" 2px "), `${art}: #${id} im Fokus 2-px-Linie in --krit-text (${m.fokus[id]!.schatten})`);
+          }
+          // Hover auf dem ungültigen Auswahlfeld behält die Fehlerlinie
+          await p.evaluate(() => (document.activeElement as HTMLElement).blur());
+          await p.hover("#wWenn");
+          const hover = await p.evaluate(() => getComputedStyle(document.getElementById("wWenn")!).boxShadow);
+          assert.ok(hover.startsWith(m.krit) && hover.includes(" 1.5px "), `${art}: #wWenn behält beim Hover die Fehlerlinie (${hover})`);
+          // Ohne .ungueltig wieder die normale Linie (Gegenprobe)
+          const normal = await p.evaluate(() => {
+            document.getElementById("wWenn")!.closest(".feldgr")!.classList.remove("ungueltig");
+            const w = document.getElementById("wWenn")!; w.focus();
+            const s = getComputedStyle(w); return { schatten: s.boxShadow, outline: s.outlineStyle };
+          });
+          assert.ok(!normal.schatten.startsWith(m.krit), `${art}: gültiges #wWenn ohne rote Linie (${normal.schatten})`);
+          assert.equal(normal.outline, "solid", `${art}: gültiges #wWenn im Fokus mit Bernsteinring`);
+        } finally { await p.context().close(); }
+      }
+    }
+  });
+
   it("Toast nutzt die Fensterbreite (nicht nur die rechte Hälfte) und bleibt unten in der Mitte", async () => {
     const lang = "Abgemeldet, Sir. Der Token ist aus diesem Browser gelöscht.";
     for (const breite of [360, 390, 1280]) {

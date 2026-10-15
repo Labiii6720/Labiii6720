@@ -12,7 +12,7 @@ import { clock } from "./time.js";
 import { listFiles, readFile, ROOT, runCommand, safePath, writeFile } from "./workspace.js";
 import * as browser from "./browser.js";
 import { neueZeitplanId, normaleTage, pruefeZeitplaeneSchreibbar, pruefeZeitplan, pruefungsText, saveZeitplaene, ZEITPLAENE_UNLESBAR, zeitplaene, zeitplaeneNichtGeladen } from "./zeitplaene.js";
-import { describeCameras, dynamicWachen, neueWacheId, eventClip, formatEvents, hasCameras, look, pruefeWache, pruefeWachenSchreibbar, recentEvents, saveWachen, allWachen, WACHEN_UNLESBAR, wachenNichtGeladen } from "./cameras.js";
+import { describeCameras, dynamicWachen, neueWacheId, eventClip, formatEvents, hasCameras, look, pruefeWache, pruefeWachenSchreibbar, recentEvents, saveWachen, allWachen, bedingungWert, wacheZustand, WACHEN_UNLESBAR, wachenNichtGeladen } from "./cameras.js";
 import { addRechnung, erkenneRechnung, formatRechnung, offeneRechnungen, RECHNUNGEN_UNLESBAR, rechnungen, rechnungenNichtGeladen, setzeStatus } from "./finanzen.js";
 import { readMail as gmailRead, searchMails as gmailSearch } from "./gmail.js";
 import { beraterTools } from "./berater.js";
@@ -614,7 +614,13 @@ const kameras: Tool[] = [
     input_schema: { type: "object", properties: {} },
     stufe: "auto",
     run: async () => {
-      const liste = allWachen().map((w) => `${w.id ? "#" + w.id : "(cameras.json)"} ${feldOder(w.kamera, "ohne Kamera")} · alle ${feldOder(w.alle_minuten, "?")} min · ${feldOder(w.frage, "ohne Frage")} · ${w.nur_wenn ?? "immer"}`).join("\n");
+      // Gemeinsame Regel wie Takt, Selbsttest und Kommandozentrale (wacheZustand): ohne Intervall, Kamera oder gültige Bedingung läuft sie nicht
+      const takt = (w: Parameters<typeof wacheZustand>[0]): string => {
+        const z = wacheZustand(w);
+        const alle = z.takt !== undefined ? `alle ${feldOder(w.alle_minuten, "?")} min` : "alle ? min";
+        return z.laeuft ? alle : `${alle} (läuft nicht: ${z.grund})`;
+      };
+      const liste = allWachen().map((w) => `${w.id ? "#" + w.id : "(cameras.json)"} ${feldOder(w.kamera, "ohne Kamera")} · ${takt(w)} · ${feldOder(w.frage, "ohne Frage")} · ${bedingungWert(w.nur_wenn) ?? "Bedingung ungültig – schaut nicht hin"}`).join("\n");
       // Unlesbare Datei: eine kurze Liste hiesse sonst fälschlich «das sind alle Wachen»
       return wachenNichtGeladen ? `${WACHEN_UNLESBAR}\n${liste}`.trimEnd() : liste || "Keine Wachen.";
     },

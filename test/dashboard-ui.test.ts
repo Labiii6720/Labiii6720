@@ -1167,6 +1167,68 @@ describe("Kommandozentrale im Browser", { skip: chrome ? false : "kein Chromium 
     }
   });
 
+  it("Gespräch: kommt die Antwort bei offenem Dialog (Notaus-Frage), sagt sie der Dialog an – nicht das inerte #ansage", async () => {
+    // Antwort, Antwort per Telegram und Fehler: jede Anfrage wartet, bis der Dialog offen ist
+    const faelle = [
+      { art: "antwort", antwort: { json: { ok: true, reply: "Die Garage ist zu, Sir." } }, erwartet: /^Jarvis: Die Garage ist zu, Sir\.$/ },
+      { art: "telegram", antwort: { json: { ok: true, reply: "", queued: true } }, erwartet: /^Jarvis: Das braucht länger\. Die Antwort kommt per Telegram\.$/ },
+      { art: "fehler", antwort: { status: 500, json: { ok: false, error: "intern" } }, erwartet: /^Das kam nicht an \(HTTP 500\), Sir\.$/ },
+    ];
+    const tore: (() => void)[] = [];
+    let jetzt = 0;
+    await page.route("**/api/chat", async (r) => {
+      const fall = faelle[jetzt]!;
+      await new Promise<void>((ok) => { tore.push(ok); });
+      await r.fulfill(fall.antwort).catch(() => undefined);
+    });
+    const lese = () => page.evaluate(() => ({ dialog: document.querySelector("#dlgFrage .dlg-ansage")?.textContent ?? "", seite: document.getElementById("ansage")?.textContent ?? "" }));
+    try {
+      await page.evaluate(() => { location.hash = "gespraech"; });
+      await page.waitForSelector("#v-gespraech:not([hidden]) #chatIn");
+      assert.equal(await page.getAttribute("#notausKnopf", "data-aktion"), "notaus", "Vorbedingung: Notaus bedienbar");
+      for (const [i, fall] of faelle.entries()) {
+        jetzt = i;
+        await page.evaluate(() => { document.getElementById("ansage")!.textContent = ""; });
+        await page.fill("#chatIn", "Ist die Garage zu? " + fall.art);
+        await page.keyboard.press("Enter");
+        await page.waitForSelector("#v-gespraech .msg.laeuft");
+        for (let k = 0; k < 100 && !tore.length; k++) await page.waitForTimeout(20);
+        // Während das Gespräch wartet: Notaus in der Leiste öffnet die Rückfrage (Modal, der Rest der Seite ist inert)
+        await page.click("#notausKnopf");
+        await page.waitForSelector("#dlgFrage[open]");
+        tore.shift()!();
+        await page.waitForFunction(() => (document.querySelector("#dlgFrage .dlg-ansage")?.textContent ?? "") !== "", null, { timeout: 3000 });
+        const a = await lese();
+        assert.match(a.dialog, fall.erwartet, `${fall.art}: ${JSON.stringify(a)}`);
+        assert.equal(a.seite, "", `${fall.art}: nicht ins inerte #ansage`);
+        // Im Barrierefreiheitsbaum erreichbar, also für den Screenreader hörbar
+        const cdp = await ctx.newCDPSession(page);
+        try {
+          const { nodes } = (await cdp.send("Accessibility.getFullAXTree")) as { nodes: { ignored: boolean; name?: { value: string } }[] };
+          const kern = a.dialog.slice(0, 20);
+          assert.ok(nodes.some((n) => !n.ignored && (n.name?.value ?? "").includes(kern)), `${fall.art}: Ansage im Barrierefreiheitsbaum`);
+        } finally {
+          await cdp.detach();
+        }
+        // Abbrechen: kein Notaus; die Ansage im Dialog wird beim Schliessen geleert
+        await page.keyboard.press("Escape");
+        await page.waitForSelector("#dlgFrage", { state: "hidden" });
+        await page.waitForFunction(() => document.querySelector("#dlgFrage .dlg-ansage")?.textContent === "", null, { timeout: 1000 });
+        assert.equal(await page.textContent("#zustandText"), "Bereit", "nichts angehalten");
+      }
+      // Ohne Dialog bleibt es bei #ansage
+      jetzt = 0;
+      await page.fill("#chatIn", "Und jetzt?");
+      await page.keyboard.press("Enter");
+      for (let k = 0; k < 100 && !tore.length; k++) await page.waitForTimeout(20);
+      tore.shift()!();
+      await page.waitForFunction(() => document.getElementById("ansage")?.textContent === "Jarvis: Die Garage ist zu, Sir.", null, { timeout: 3000 });
+    } finally {
+      for (const t of tore) t();
+      await page.unroute("**/api/chat");
+    }
+  });
+
   it("Weiter mit PIN im Bereich Sicherheit per Tastatur: Fokus danach auf «Notaus», nie auf <body>", async () => {
     await page.evaluate(() => { location.hash = "sicherheit"; });
     await page.waitForSelector('#v-sicherheit:not([hidden]) button[data-merk="s-notaus"]:not([disabled])');
@@ -1295,6 +1357,20 @@ describe("Kommandozentrale im Browser", { skip: chrome ? false : "kein Chromium 
       assert.equal(lage.imBild, true);
       await page.click("#dlgPlan [data-schliessen]");
       await page.waitForSelector("#dlgPlan", { state: "hidden" });
+      await page.waitForTimeout(100); // close-Ereignis (spätere Task) abwarten
+      // Dialog zu, Toast noch sichtbar: er gehört wieder nach unten und verdeckt weder Notaus noch Zustand noch Thema
+      const danach = await page.evaluate(() => {
+        const el = document.getElementById("toast")!;
+        const t = el.getBoundingClientRect();
+        const gedeckt = ["notausKnopf", "zustand", "thema"].filter((id) => {
+          const k = document.getElementById(id)!.getBoundingClientRect();
+          return k.width > 0 && t.left < k.right && t.right > k.left && t.top < k.bottom && t.bottom > k.top;
+        });
+        return { an: el.classList.contains("an"), toast: [t.left, t.top, t.right, t.bottom], gedeckt, unten: t.top > innerHeight / 2 };
+      });
+      assert.equal(danach.an, true, "Vorbedingung: der Toast steht noch");
+      assert.deepEqual(danach.gedeckt, [], `Toast über der Leiste: ${JSON.stringify(danach)}`);
+      assert.equal(danach.unten, true, `Toast wieder unten: ${JSON.stringify(danach)}`);
     } finally {
       await page.unroute("**/api/zeitplaene");
       await page.setViewportSize({ width: 1280, height: 860 });
@@ -1453,6 +1529,186 @@ describe("Kommandozentrale im Browser", { skip: chrome ? false : "kein Chromium 
       await page.evaluate(() => { document.getElementById("main")!.style.paddingBottom = ""; });
       await page.setViewportSize({ width: 1280, height: 860 });
     }
+  });
+
+  it("Wache ohne gültiges Intervall: «?» statt «undefined Minuten», Hinweis, zählt nicht als aktiv, Dialog ohne «null»", async () => {
+    // Von Hand bearbeitete Wachen: der Server liefert dann alle_minuten null und laeuft false (taktAnzeige)
+    await page.route("**/api/wachen", async (r) => {
+      if (r.request().method() !== "GET") return r.fallback();
+      const echt = await r.fetch();
+      const d = await echt.json();
+      await r.fulfill({ response: echt, json: { ...d, wachen: [
+        { id: 77, kamera: "werkstatt", frage: "Ohne Takt?", alle_minuten: null, laeuft: false, nur_wenn: "immer", quelle: "chat", bearbeitbar: true },
+        { kamera: "eingang", frage: "Fest aus der Datei?", alle_minuten: null, laeuft: false, nur_wenn: "immer", quelle: "cameras.json", bearbeitbar: false },
+      ] } });
+    });
+    try {
+      await page.evaluate(() => { location.hash = "zeitplaene"; });
+      await sofort(page);
+      const w = page.locator("#v-zeitplaene .wache", { hasText: "Ohne Takt?" });
+      await w.waitFor({ timeout: 3000 });
+      const text = (await page.textContent("#v-zeitplaene")) ?? "";
+      assert.doesNotMatch(text, /undefined|null|NaN/);
+      assert.equal(((await w.locator(".zeit").textContent()) ?? "").replace("Minuten", "").trim(), "?");
+      assert.match((await w.textContent()) ?? "", /läuft nicht: Intervall fehlt/);
+      assert.match((await page.locator("#v-zeitplaene .wache", { hasText: "Fest aus der Datei?" }).textContent()) ?? "", /läuft nicht: Intervall fehlt/);
+      await w.locator('button[data-aktion="wache-edit"]').click();
+      await page.waitForSelector("#dlgWache[open]");
+      assert.equal(await page.inputValue("#wAlle"), "", "kein «null» im Feld");
+      await page.keyboard.press("Escape");
+      await page.waitForSelector("#dlgWache", { state: "hidden" });
+      // Übersicht: Wachen, die nicht laufen, gelten nicht als aktiv
+      const geholt = page.waitForResponse("**/api/wachen");
+      await page.evaluate(() => { location.hash = "uebersicht"; });
+      await sofort(page);
+      await geholt;
+      await page.waitForSelector("#v-uebersicht .naechst");
+      await page.waitForTimeout(100);
+      assert.doesNotMatch((await page.textContent("#v-uebersicht .naechst")) ?? "", /Wache(n)? aktiv/);
+    } finally {
+      await page.unroute("**/api/wachen");
+    }
+    await sofort(page);
+  });
+
+  it("Wache auf fehlender Kamera: Grund vom Server («Kamera fehlt»), eingetragenes Intervall statt «?», zählt nicht als aktiv", async () => {
+    // Kamera «garten» steht nicht (mehr) in cameras.json: der Server liefert laeuft false und den Grund (wacheZustand)
+    await page.route("**/api/wachen", async (r) => {
+      if (r.request().method() !== "GET") return r.fallback();
+      const echt = await r.fetch();
+      const d = await echt.json();
+      await r.fulfill({ response: echt, json: { ...d, wachen: [
+        { id: 78, kamera: "garten", frage: "Person im Garten?", alle_minuten: 10, laeuft: false, grund: "Kamera fehlt", nur_wenn: "immer", ruhe_minuten: 30, quelle: "chat", bearbeitbar: true },
+        { id: 79, kamera: "garten", frage: "Ganz kaputt?", alle_minuten: null, laeuft: false, grund: "Kamera und Intervall fehlen", nur_wenn: "immer", ruhe_minuten: 30, quelle: "chat", bearbeitbar: true },
+      ] } });
+    });
+    try {
+      await page.evaluate(() => { location.hash = "zeitplaene"; });
+      await sofort(page);
+      const w = page.locator("#v-zeitplaene .wache", { hasText: "Person im Garten?" });
+      await w.waitFor({ timeout: 3000 });
+      assert.equal(((await w.locator(".zeit").textContent()) ?? "").replace("Minuten", "").trim(), "10", "Intervall statt «?»");
+      const det = (await w.locator(".det").textContent()) ?? "";
+      assert.match(det, /läuft nicht: Kamera fehlt/);
+      assert.doesNotMatch(det, /Intervall fehlt/);
+      const kaputt = page.locator("#v-zeitplaene .wache", { hasText: "Ganz kaputt?" });
+      assert.equal(((await kaputt.locator(".zeit").textContent()) ?? "").replace("Minuten", "").trim(), "?");
+      assert.match((await kaputt.locator(".det").textContent()) ?? "", /läuft nicht: Kamera und Intervall fehlen/);
+      assert.doesNotMatch((await page.textContent("#v-zeitplaene")) ?? "", /undefined|null|NaN/);
+      // Übersicht: keine der beiden gilt als aktiv
+      const geholt = page.waitForResponse("**/api/wachen");
+      await page.evaluate(() => { location.hash = "uebersicht"; });
+      await sofort(page);
+      await geholt;
+      await page.waitForSelector("#v-uebersicht .naechst");
+      await page.waitForTimeout(100);
+      assert.doesNotMatch((await page.textContent("#v-uebersicht .naechst")) ?? "", /Wache(n)? aktiv/);
+    } finally {
+      await page.unroute("**/api/wachen");
+    }
+    await sofort(page);
+  });
+
+  it("Wache mit ungültiger Bedingung: Grund statt «immer» oder «null», Dialog ohne stillschweigendes «immer»", async () => {
+    // Von Hand eingetragenes «nur_wenn» wie «Nacht» oder null: der Server liefert nur_wenn null, laeuft false, grund (wacheZustand)
+    await page.route("**/api/wachen", async (r) => {
+      if (r.request().method() !== "GET") return r.fallback();
+      const echt = await r.fetch();
+      const d = await echt.json();
+      await r.fulfill({ response: echt, json: { ...d, wachen: [
+        { id: 80, kamera: "werkstatt", frage: "Bedingung kaputt?", alle_minuten: 10, laeuft: false, grund: "Bedingung ungültig", nur_wenn: null, ruhe_minuten: 30, quelle: "chat", bearbeitbar: true },
+      ] } });
+    });
+    try {
+      await page.evaluate(() => { location.hash = "zeitplaene"; });
+      await sofort(page);
+      const w = page.locator("#v-zeitplaene .wache", { hasText: "Bedingung kaputt?" });
+      await w.waitFor({ timeout: 3000 });
+      const det = (await w.locator(".det").textContent()) ?? "";
+      assert.match(det, /läuft nicht: Bedingung ungültig/);
+      assert.doesNotMatch(det, /immer|null|undefined/);
+      await w.locator('button[data-aktion="wache-edit"]').click();
+      await page.waitForSelector("#dlgWache[open]");
+      assert.equal(await page.inputValue("#wWenn"), "", "keine stillschweigende Auswahl «immer»");
+      await page.keyboard.press("Escape");
+      await page.waitForSelector("#dlgWache", { state: "hidden" });
+    } finally {
+      await page.unroute("**/api/wachen");
+    }
+    await sofort(page);
+  });
+
+  it("Zeitplan ohne name/auftrag (ältere Antwort): Bearbeiten-Dialog mit leeren Feldern statt «undefined»", async () => {
+    await page.route("**/api/zeitplaene", async (r) => {
+      if (r.request().method() !== "GET") return r.fallback();
+      const echt = await r.fetch();
+      const d = await echt.json();
+      await r.fulfill({ response: echt, json: { ...d, zeitplaene: [{ id: 91, zeit: "07:30", tage: "werktags" }] } }).catch(() => undefined);
+    });
+    try {
+      await page.evaluate(() => { location.hash = "zeitplaene"; });
+      await sofort(page);
+      const knopf = page.locator('#v-zeitplaene button[data-aktion="plan-edit"][data-id="91"]');
+      await knopf.waitFor({ timeout: 3000 });
+      await knopf.click();
+      await page.waitForSelector("#dlgPlan[open]");
+      assert.equal(await page.inputValue("#pName"), "");
+      assert.equal(await page.inputValue("#pAuftrag"), "");
+      await page.keyboard.press("Escape");
+      await page.waitForSelector("#dlgPlan", { state: "hidden" });
+    } finally {
+      await page.unroute("**/api/zeitplaene");
+    }
+    await sofort(page);
+  });
+
+  it("Zeitplan ohne Namen: «Zeitplan #2» in Liste, «Als Nächstes», Knöpfen und Löschfrage statt einer leeren Stelle", async () => {
+    // Von Hand bearbeitete data/zeitplaene.json ohne name: der Server liefert name "" (textAnzeige); ältere Antworten gar keinen
+    const bald = new Date(Date.now() + 30 * 60000).toISOString();
+    await page.route("**/api/zeitplaene", async (r) => {
+      if (r.request().method() !== "GET") return r.fallback();
+      const echt = await r.fetch();
+      const d = await echt.json();
+      await r.fulfill({ response: echt, json: { ...d, zeitplaene: [
+        { id: 2, name: "", zeit: "08:30", tage: "sa,so", auftrag: "", naechsterLauf: bald },
+        { id: 3, zeit: "09:00", tage: "werktags", auftrag: "", laeuft: false, grund: "Auftrag fehlt" },
+        { id: 4, name: "   ", zeit: "10:00", tage: "taeglich", auftrag: "Probe." },
+        { id: 5, name: "Morgenrunde", zeit: "06:00", tage: "taeglich", auftrag: "Probe." },
+      ] } }).catch(() => undefined);
+    });
+    const label = (aktion: string, id: number) => page.getAttribute(`#v-zeitplaene button[data-aktion="${aktion}"][data-id="${id}"]`, "aria-label");
+    try {
+      await page.evaluate(() => { location.hash = "zeitplaene"; });
+      await sofort(page);
+      // Auf die Attrappe warten, nicht auf #2: den gibt es auch in den echten Demo-Daten (sonst Wettlauf mit dem ersten Abruf)
+      await page.waitForFunction(() => [...document.querySelectorAll("#v-zeitplaene .plan:not(.wache) .name")].some((e) => e.textContent === "Morgenrunde"), null, { timeout: 3000 });
+      const namen = await page.$$eval("#v-zeitplaene .plan:not(.wache) .name", (e) => e.map((x) => x.textContent));
+      assert.deepEqual(namen, ["Morgenrunde", "Zeitplan #2", "Zeitplan #3", "Zeitplan #4"]);
+      assert.equal(await label("plan-edit", 2), "Zeitplan #2 bearbeiten");
+      assert.equal(await label("plan-weg", 2), "Zeitplan #2 löschen");
+      assert.equal(await label("plan-edit", 3), "Zeitplan #3 bearbeiten");
+      assert.equal(await label("plan-weg", 4), "Zeitplan #4 löschen");
+      assert.equal(await label("plan-edit", 5), "Zeitplan Morgenrunde bearbeiten", "benannte Zeitpläne wie bisher");
+      assert.doesNotMatch((await page.textContent("#v-zeitplaene")) ?? "", /undefined|null/);
+      // Ohne Auftrag nennt die Zeile den Grund des Servers statt «nächster –»; die übrigen bleiben beim nächsten Lauf
+      const laeufe = await page.$$eval("#v-zeitplaene .plan:not(.wache) .lauf span:first-child", (e) => e.map((x) => x.textContent));
+      assert.deepEqual(laeufe.map((t) => (t ?? "").startsWith("läuft nicht")), [false, false, true, false]);
+      assert.equal(laeufe[2], "läuft nicht: Auftrag fehlt");
+      // Löschfrage nennt den Zeitplan; Abbrechen löscht nichts
+      await page.click('#v-zeitplaene button[data-aktion="plan-weg"][data-id="2"]');
+      await page.waitForSelector("#dlgFrage[open]");
+      assert.equal(await page.textContent("#frageText"), "«Zeitplan #2» läuft danach nicht mehr. Das lässt sich nicht rückgängig machen.");
+      await page.keyboard.press("Escape");
+      await page.waitForSelector("#dlgFrage", { state: "hidden" });
+      // «Als Nächstes» in der Übersicht: der Name neben der Uhrzeit ist nicht leer
+      await page.evaluate(() => { location.hash = "uebersicht"; });
+      await sofort(page);
+      await page.waitForFunction(() => [...document.querySelectorAll("#v-uebersicht .naechst li .haupt b")].some((b) => b.textContent === "Zeitplan #2"), null, { timeout: 3000 });
+      assert.equal(await page.locator("#v-uebersicht .naechst li .haupt b:empty").count(), 0);
+    } finally {
+      await page.unroute("**/api/zeitplaene");
+    }
+    await sofort(page);
   });
 
   it("über alle Abläufe: keine Skriptfehler und keine CSP-Verletzung", async () => {
