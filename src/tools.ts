@@ -226,7 +226,13 @@ const mails: Tool[] = [
     stufe: "extern",
     // Der ganze Text, genau wie er gesendet wird: freigegeben ist nur, was gezeigt wurde (sendAuftrag teilt lange Texte auf)
     summary: (i) => `Mail an ${i.an}\nBetreff: ${i.betreff}\n\n${String(i.text)}`,
-    run: (i) => sendMail({ to: i.an, subject: i.betreff, text: i.text, replyToId: i.antwort_auf }),
+    // Marke: dieser Auftrag zeigte den ganzen Text. Ältere Aufträge (vor 0.22.1) zeigten nur die ersten 700 Zeichen.
+    festhalten: (i) => ({ ...i, volltext: true }),
+    run: async (i) => {
+      // Altbestand in data/auftraege.json (gekürzt gezeigt, ungekürzt gespeichert): nichts senden, was niemand sah
+      if (i.volltext !== true) throw new Error("Die Mail-Freigabe stammt aus einer älteren Version (Text gekürzt gezeigt), Sir. Ich sende nichts – bitte neu beantragen.");
+      return sendMail({ to: i.an, subject: i.betreff, text: i.text, replyToId: i.antwort_auf });
+    },
   },
 ];
 
@@ -380,6 +386,32 @@ const eingabenHinweis = (): string =>
 /** Seite und Eingaben als Text: daran erkennt die Klick-Freigabe, ob der Browser noch dort steht, wo sie angelegt wurde. */
 const browserStand = (): { url: string | null; eingaben: string } => ({ url: browser.aktuelleUrl() ?? null, eingaben: JSON.stringify(browserEingaben) });
 
+/**
+ * Ein Browser-Schritt nach dem anderen: Zeitplan-Läufe, Vorgänge, Chat und Freigaben (Telegram, Dashboard) laufen
+ * nebeneinander. Ohne Sperre prüfte ein freigegebener Klick den Stand, während ein anderer Schritt mitten im goto
+ * (page.url() noch alt) oder nach fill() hing – und klickte dann auf der neuen Seite oder mit der ungezeigten Eingabe.
+ * Wer länger als BROWSER_WARTEN_MS warten müsste (hängende Seite), bricht ab, statt alle Browser-Schritte zu blockieren.
+ */
+const BROWSER_WARTEN_MS = 60_000;
+let browserKette: Promise<void> = Promise.resolve();
+async function exklusiv<T>(schritt: () => Promise<T>): Promise<T> {
+  const vorher = browserKette;
+  let frei!: () => void;
+  browserKette = vorher.then(() => new Promise<void>((r) => { frei = r; }));
+  let uhr: NodeJS.Timeout | undefined;
+  try {
+    const zuLange = new Promise<"zu lange">((r) => { uhr = setTimeout(() => r("zu lange"), BROWSER_WARTEN_MS); uhr.unref?.(); });
+    if ((await Promise.race([vorher.then(() => "frei" as const), zuLange])) === "zu lange") {
+      throw new Error("Der Browser ist noch mit einem anderen Schritt beschäftigt, Sir. Ich habe nichts getan – bitte gleich nochmals versuchen.");
+    }
+    return await schritt();
+  } finally {
+    clearTimeout(uhr);
+    // frei ist gesetzt, sobald vorher erfüllt ist; wer abbricht, gibt seinen Platz in der Kette trotzdem frei
+    void vorher.then(() => frei());
+  }
+}
+
 const web: Tool[] = [
   {
     name: "seite_lesen",
@@ -396,18 +428,19 @@ const web: Tool[] = [
     input_schema: { type: "object", properties: { url: str("Adresse der Seite") }, required: ["url"] },
     stufe: (i) => urlStufe(String(i.url)),
     summary: (i) => `Seite im Browser öffnen (ungewöhnlich lange Adresse): ${String(i.url)}`,
-    run: async (i) => {
-      const seite = await browser.open(String(i.url));
-      browserEingaben.length = 0;
-      return seite;
-    },
+    run: (i) =>
+      exklusiv(async () => {
+        const seite = await browser.open(String(i.url));
+        browserEingaben.length = 0;
+        return seite;
+      }),
   },
   {
     name: "browser_lesen",
     description: "Liest die aktuell geöffnete Seite ausführlicher.",
     input_schema: { type: "object", properties: {} },
     stufe: "auto",
-    run: () => browser.read(),
+    run: () => exklusiv(() => browser.read()),
   },
   {
     name: "browser_klicken",
@@ -430,10 +463,13 @@ const web: Tool[] = [
       if (!Object.hasOwn(i, "erwartet_url") || typeof i.erwartet_eingaben !== "string") {
         throw new Error("Die Klick-Freigabe stammt aus einer älteren Version, Sir. Ich klicke nichts – bitte neu beantragen.");
       }
-      const stand = browserStand();
-      if (stand.url !== i.erwartet_url) throw new Error("Der Browser steht inzwischen auf einer anderen Seite, Sir. Ich klicke nichts – bitte neu beantragen.");
-      if (stand.eingaben !== i.erwartet_eingaben) throw new Error("Die Eingaben im Browser haben sich seit der Freigabe geändert, Sir. Ich klicke nichts – bitte neu beantragen.");
-      return browser.click(String(i.text));
+      // Prüfen und Klicken unter derselben Sperre: kein anderer Browser-Schritt läuft dazwischen oder noch nebenher
+      return exklusiv(async () => {
+        const stand = browserStand();
+        if (stand.url !== i.erwartet_url) throw new Error("Der Browser steht inzwischen auf einer anderen Seite, Sir. Ich klicke nichts – bitte neu beantragen.");
+        if (stand.eingaben !== i.erwartet_eingaben) throw new Error("Die Eingaben im Browser haben sich seit der Freigabe geändert, Sir. Ich klicke nichts – bitte neu beantragen.");
+        return browser.click(String(i.text));
+      });
     },
   },
   {
@@ -443,22 +479,23 @@ const web: Tool[] = [
     stufe: (i) => tippenStufe(i),
     // Text und Feld ungekürzt: getippt (und abgesendet) wird genau das
     summary: (i) => `Im Browser tippen${i.enter ? " und absenden" : ""}: «${String(i.text)}» in ${String(i.feld)}`,
-    run: async (i) => {
-      const seite = await browser.type(String(i.feld), String(i.text), Boolean(i.enter));
-      if (i.enter) browserEingaben.length = 0;
-      else {
+    run: (i) =>
+      exklusiv(async () => {
+        // Vor fill() vermerken und bei einem Fehler stehen lassen: das Feld kann schon gefüllt sein (etwa wenn danach
+        // describePage wirft), und ein späterer Klick darf es nicht ungezeigt absenden
         browserEingaben.push({ feld: String(i.feld), text: String(i.text) });
         browserEingaben.splice(0, Math.max(0, browserEingaben.length - 5));
-      }
-      return seite;
-    },
+        const seite = await browser.type(String(i.feld), String(i.text), Boolean(i.enter));
+        if (i.enter) browserEingaben.length = 0;
+        return seite;
+      }),
   },
   {
     name: "browser_zurueck",
     description: "Eine Seite zurück.",
     input_schema: { type: "object", properties: {} },
     stufe: "auto",
-    run: () => browser.back(),
+    run: () => exklusiv(() => browser.back()),
   },
   {
     name: "browser_screenshot",
@@ -466,7 +503,7 @@ const web: Tool[] = [
     input_schema: { type: "object", properties: { an_handy: { type: "boolean", description: "Screenshot auch an den Nutzer schicken" } } },
     stufe: "auto",
     run: async (i, ctx) => {
-      const img = await browser.screenshot();
+      const img = await exklusiv(() => browser.screenshot());
       if (i.an_handy) await ctx.sendPhoto(img, "So sieht die Seite gerade aus.");
       return { text: "Screenshot aufgenommen.", image: { data: img.toString("base64"), mediaType: "image/jpeg" } };
     },

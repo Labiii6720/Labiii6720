@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
@@ -19,6 +19,15 @@ process.env.GOOGLE_OAUTH_CLIENT_ID = "attrappe-client-id";
 process.env.GOOGLE_OAUTH_CLIENT_SECRET = "attrappe-client-secret";
 process.env.HA_URL = "http://ha.test:8123/";
 process.env.HA_TOKEN = "ha-token-attrappe";
+
+// Altbestand vor dem Import (wie nach dem Update): Auftrag aus einer Version, die den Mailtext in der Freigabe auf 700
+// Zeichen kürzte. Gesendet würde der ganze Text samt dem Teil, den nie jemand sah.
+const ALT_TEXT = `${"Sehr geehrte Damen und Herren. ".repeat(23)}`.padEnd(700, ".") + " GEHEIMER-ANHANG: IBAN CH9300762011623852957";
+mkdirSync("data");
+writeFileSync("data/auftraege.json", JSON.stringify([
+  { id: 7, createdAt: "2026-10-10T08:00:00.000Z", tool: "mail_senden", input: { an: "bank@beispiel.test", betreff: "Unterlagen", text: ALT_TEXT },
+    stufe: "extern", summary: `Mail an bank@beispiel.test: «Unterlagen» – ${ALT_TEXT.slice(0, 700)}`, status: "offen", messageId: 77 },
+]));
 
 let naechsteNachricht = 500;
 const gesendet: { text: string; knoepfe: boolean }[] = [];
@@ -68,10 +77,32 @@ describe("Freigabe zeigt den ganzen Inhalt, nie still gekürzt", () => {
     const a = queue.offeneAuftraege().at(-1)!;
     assert.equal(a.tool, "mail_senden");
     assert.equal(a.summary, `Mail an bank@beispiel.test\nBetreff: Unterlagen\n\n${MAILTEXT}`);
+    assert.equal(a.input.volltext, true);
     assert.equal(gesendet.length, 1, "passt in eine Nachricht");
     assert.ok(gesendet[0]!.text.endsWith("Tresorcode 4711. ENDE-Z"), gesendet[0]!.text.slice(-80));
     assert.equal(gesendet[0]!.knoepfe, true);
     queue.setStatus(a, "abgelehnt");
+  });
+
+  it("mail_senden: neuer Auftrag trägt die Marke volltext und kommt an der Prüfung vorbei", async () => {
+    const a = queue.createAuftrag({ tool: "mail_senden", input: werkzeug("mail_senden").festhalten!({ an: "x@beispiel.test", betreff: "B", text: "Kurz" }), stufe: "extern", summary: "Mail an x@beispiel.test\nBetreff: B\n\nKurz" });
+    assert.equal(a.input.volltext, true);
+    // Ohne Gmail-Verbindung scheitert erst der Versand, nicht die Prüfung
+    const text = await telegram.approveAuftrag(a);
+    assert.match(text, /nicht verbunden/);
+    assert.doesNotMatch(text, /neu beantragen/);
+  });
+
+  it("mail_senden-Altbestand mit gekürzter Zusammenfassung: Freigabe sendet nichts, neu beantragen", async () => {
+    const alt = queue.getAuftrag(7)!;
+    assert.equal(alt.status, "offen");
+    assert.ok(!alt.summary.includes("GEHEIMER-ANHANG"));
+    const text = await telegram.approveAuftrag(alt);
+    assert.match(text, /älteren Version.*neu beantragen/);
+    assert.doesNotMatch(text, /GEHEIMER-ANHANG/);
+    assert.equal(queue.getAuftrag(7)!.status, "fehler");
+    // Direkt aufgerufen ebenso: ohne Marke kein Versand (Gmail wird nie erreicht)
+    await assert.rejects(Promise.resolve().then(() => werkzeug("mail_senden").run({ an: "bank@beispiel.test", betreff: "U", text: ALT_TEXT }, telegram.hooks)), /älteren Version/);
   });
 
   it("geraet_schalten: daten ungekürzt in der Freigabe", () => {

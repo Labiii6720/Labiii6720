@@ -231,6 +231,107 @@ describe("browser_klicken: geklickt wird nur auf der Seite und mit den Eingaben,
   });
 });
 
+describe("browser_klicken: gleichzeitig laufende Browser-Schritte (Zeitplan, Vorgang, Chat) überholen die Freigabe nicht", () => {
+  // Wie Playwright: page.url() nennt bis zum Commit des goto die alte Seite, der Klick braucht einen Protokoll-Roundtrip.
+  // Früher prüfte der Klick den Stand, während ein anderer Schritt mitten im goto oder nach fill() im describePage hing.
+  const protokoll: string[] = [];
+  let url = "about:blank";
+  let felder: Record<string, string> = {};
+  /** Hängt goto bzw. evaluate, bis freigeben() kommt – spätestens, wenn geklickt wird, oder nach 200 ms */
+  let haengt: { goto: boolean; evaluate: boolean; wirft: boolean } = { goto: false, evaluate: false, wirft: false };
+  let freigeben: () => void = () => {};
+  let wartet: Promise<void> = Promise.resolve();
+  const sperre = () => {
+    wartet = new Promise<void>((r) => { freigeben = r; });
+    setTimeout(() => freigeben(), 200);
+  };
+  const feld = (name: string) => ({ first: () => ({ fill: async (v: string) => { felder[name] = v; protokoll.push(`fill ${v}`); }, press: async () => {}, count: async () => 1 }) });
+  const klick = (n: string) => ({ first: () => ({ click: async () => {
+    freigeben();
+    await new Promise((r) => setTimeout(r, 5));
+    protokoll.push(`click ${n} auf ${url} mit ${JSON.stringify(felder)}`);
+  } }) });
+  const starten = () => {
+    url = "about:blank";
+    felder = {};
+    protokoll.length = 0;
+    haengt = { goto: false, evaluate: false, wirft: false };
+    browser.setLauncher(async () => ({
+      goto: async (u: string) => { if (haengt.goto) await wartet; url = u; felder = {}; },
+      title: async () => "T", url: () => url,
+      evaluate: async <T,>() => {
+        if (haengt.evaluate) await wartet;
+        if (haengt.wirft) throw new Error("Seite antwortet nicht");
+        return { text: "x", links: [] } as T;
+      },
+      getByText: (t: string) => klick(t), getByRole: (_r: string, o: { name: string }) => klick(o.name), getByLabel: (n: string) => feld(n), getByPlaceholder: (n: string) => feld(n), locator: () => feld("?"),
+      screenshot: async () => Buffer.alloc(0), goBack: async () => undefined, waitForLoadState: async () => undefined,
+    }));
+  };
+  const klicks = () => protokoll.filter((z) => z.startsWith("click"));
+
+  it("Fall A: browser_oeffnen hat goto abgeschickt (URL noch alt), dann Freigabe → kein Klick auf der neuen Seite", async () => {
+    starten();
+    await werkzeug("browser_oeffnen").run({ url: "https://harmlos.test/" }, telegram.hooks);
+    await claudeRuft("browser_klicken", { text: "Weiter" });
+    const a = neuester();
+    assert.equal(a.summary, "Im Browser klicken: «Weiter» auf https://harmlos.test/");
+    haengt.goto = true;
+    sperre();
+    const oeffnen = werkzeug("browser_oeffnen").run({ url: "https://bank.test/zahlung" }, telegram.hooks);
+    const text = await telegram.approveAuftrag(a);
+    await oeffnen;
+    assert.deepEqual(klicks(), [], protokoll.join(" | "));
+    assert.match(text, /anderen Seite.*neu beantragen/);
+    assert.equal(queue.getAuftrag(a.id)!.status, "fehler");
+  });
+
+  it("Fall B: browser_tippen hat fill() ausgeführt, describePage hängt noch, dann Freigabe → kein Klick mit der IBAN", async () => {
+    starten();
+    await werkzeug("browser_oeffnen").run({ url: "https://harmlos.test/" }, telegram.hooks);
+    await claudeRuft("browser_klicken", { text: "Senden" });
+    const a = neuester();
+    assert.equal(a.summary, "Im Browser klicken: «Senden» auf https://harmlos.test/");
+    haengt.evaluate = true;
+    sperre();
+    const tippen = werkzeug("browser_tippen").run({ feld: "IBAN", text: "CH9300762011623852957" }, telegram.hooks);
+    const text = await telegram.approveAuftrag(a);
+    await tippen;
+    assert.deepEqual(klicks(), [], protokoll.join(" | "));
+    assert.match(text, /Eingaben.*geändert/);
+  });
+
+  it("fill() ausgeführt, describePage wirft danach: die Eingabe bleibt vermerkt, kein Klick", async () => {
+    starten();
+    await werkzeug("browser_oeffnen").run({ url: "https://harmlos.test/" }, telegram.hooks);
+    await claudeRuft("browser_klicken", { text: "Senden" });
+    const a = neuester();
+    haengt.wirft = true;
+    await assert.rejects(werkzeug("browser_tippen").run({ feld: "IBAN", text: "CH9300762011623852957" }, telegram.hooks), /antwortet nicht/);
+    haengt.wirft = false;
+    assert.deepEqual(felder, { IBAN: "CH9300762011623852957" });
+    assert.match(werkzeug("browser_klicken").summary!({ text: "Senden" }), /Kann ein Formular mit diesen Eingaben absenden: IBAN: «CH9300762011623852957»/);
+    const text = await telegram.approveAuftrag(a);
+    assert.match(text, /Eingaben.*geändert/);
+    assert.deepEqual(klicks(), []);
+  });
+
+  it("Gegenprobe: ohne Überschneidung läuft der freigegebene Klick; ein Schritt, der hängt, blockiert danach nicht", async () => {
+    starten();
+    await werkzeug("browser_oeffnen").run({ url: "https://harmlos.test/" }, telegram.hooks);
+    await werkzeug("browser_tippen").run({ feld: "Suche", text: "Muttenz" }, telegram.hooks);
+    await claudeRuft("browser_klicken", { text: "Weiter" });
+    const a = neuester();
+    assert.match(await telegram.approveAuftrag(a), /erledigt/);
+    assert.deepEqual(klicks(), ['click Weiter auf https://harmlos.test/ mit {"Suche":"Muttenz"}']);
+    // Ein gescheiterter Schritt gibt den Browser wieder frei
+    haengt.wirft = true;
+    await assert.rejects(werkzeug("browser_lesen").run({}, telegram.hooks), /antwortet nicht/);
+    haengt.wirft = false;
+    assert.match(String(await werkzeug("browser_lesen").run({}, telegram.hooks)), /URL: https:\/\/harmlos\.test\//);
+  });
+});
+
 describe("Notfall während einer Freigabe-Nachricht: keine weiteren Teile mit Inhalt", () => {
   const notfall = () => {
     state.notfall = { aktiv: true, seit: new Date().toISOString(), grund: "Test" };

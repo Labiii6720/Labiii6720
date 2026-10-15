@@ -2,6 +2,11 @@
 
 Kurz und nur das Wichtigste. Details stehen im README.
 
+## 0.22.1
+- Browser-Schritte laufen nacheinander (eine Sperre für Öffnen, Tippen, Klicken, Lesen, Zurück, Screenshot): Ein freigegebener Klick prüft Seite und Eingaben erst, wenn kein anderer Schritt (Zeitplan, Vorgang, Chat) mehr läuft, und klickt unter derselben Sperre. Getippte Eingaben stehen schon vor dem Ausfüllen im Vermerk und bleiben bei einem Fehler stehen.
+- `mail_senden`: offene Aufträge aus älteren Versionen (Text in der Freigabe auf 700 Zeichen gekürzt) senden nichts mehr, sondern verlangen einen neuen Antrag.
+- Rechnungen über 300: weg fallen die abgeschlossenen mit dem ältesten Abschluss (`bezahltAm`, sonst Erfassung), nicht die vordersten; bezahlte aus den Monaten der Übersicht bleiben. Eine eben bezahlte Rechnung zählt so weiter in Wochenbericht und Monatssumme.
+
 ## 0.22
 - Kommandozentrale neu (`web/dashboard.{html,css,js}`): Übersicht, Freigabe-Historie, Kosten, Finanzen, Zeitpläne & Wachen, Kameras, Gespräch, Protokoll und Sicherheit als Reiter; hell und dunkel, Handy und Desktop, offline ohne CDN. Diagramme als SVG mit Tabellenansicht.
 - Neue API (Heimnetz/Tailscale + Token): `GET /api/auftraege` (nie `input`, Ergebnis geschwärzt), `GET /api/kosten` (Schätzung aus `data/usage.json`), Zeitpläne und Wachen anlegen, ändern, löschen (`/api/zeitplaene`, `/api/wachen`), `POST /api/notaus`, `POST /api/notfall`; `/api/audit` nur noch mit lesbaren, geschwärzten Einträgen (keine Rohzeilen). Gleiche Prüfregeln wie die Werkzeuge (`pruefeZeitplan`, `pruefeWache`), kein sofortiges Nachholen, nächster Lauf je Zeitplan.

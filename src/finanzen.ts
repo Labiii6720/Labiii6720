@@ -57,21 +57,25 @@ function pruefeSchreibbar(): void {
 export const RECHNUNGEN_MAX = 300;
 
 /**
- * Was gespeichert wird: über der Höchstzahl fallen nur abgeschlossene Rechnungen (bezahlt, ignoriert) weg, die ältesten
- * zuerst. Offene bleiben immer, sonst wäre eine ältere offene Rechnung nach dem Neustart samt Frist verschwunden. Die
- * Rechnung mit der höchsten Nummer bleibt ebenfalls, damit nach einem Neustart keine Nummer neu vergeben wird.
+ * Was gespeichert wird: über der Höchstzahl fallen nur abgeschlossene Rechnungen (bezahlt, ignoriert) weg, und zwar
+ * die mit dem ältesten Abschluss zuerst (bezahltAm, sonst erkanntAm) – nicht die vordersten im Array: eine früh erfasste,
+ * gestern bezahlte Rechnung fiel sonst sofort aus Wochenbericht und Monatssumme. Nie weg fallen: offene (sonst wäre eine
+ * ältere offene Rechnung nach dem Neustart samt Frist verschwunden), bezahlte, die in einem der Monate der Übersicht
+ * zählen (finanzUebersicht, letzte 6), und die Rechnung mit der höchsten Nummer (sonst würde nach einem Neustart eine
+ * Nummer neu vergeben). Die Höchstzahl kann dadurch überschritten werden.
  */
-function zuSpeichern(): Rechnung[] {
-  let weg = rechnungen.length - RECHNUNGEN_MAX;
+function zuSpeichern(heute = todayKey()): Rechnung[] {
+  const weg = rechnungen.length - RECHNUNGEN_MAX;
   if (weg <= 0) return rechnungen;
   const hoechste = Math.max(...rechnungen.map((r) => r.id));
-  return rechnungen.filter((r) => {
-    if (weg > 0 && r.status !== "offen" && r.id !== hoechste) {
-      weg--;
-      return false;
-    }
-    return true;
-  });
+  const ersterMonat = plusMonate(heute, -5);
+  const kandidaten = rechnungen
+    .filter((r) => r.status !== "offen" && r.id !== hoechste)
+    .filter((r) => r.status !== "bezahlt" || (monatsTag(r) ?? "").slice(0, 7) < ersterMonat)
+    .map((r) => ({ r, abschluss: tagVon(r.bezahltAm) ?? tagVon(r.erkanntAm) ?? "" }))
+    .sort((a, b) => a.abschluss.localeCompare(b.abschluss) || a.r.id - b.r.id);
+  const streichen = new Set(kandidaten.slice(0, weg).map((k) => k.r));
+  return streichen.size ? rechnungen.filter((r) => !streichen.has(r)) : rechnungen;
 }
 
 export function saveRechnungen(): void {
@@ -255,6 +259,16 @@ class Summierer {
   }
 }
 
+/**
+ * Tag, unter dem eine Rechnung in der Monatsübersicht zählt: bezahlt → bezahltAm (sonst faellig, sonst erkanntAm),
+ * offen → faellig (sonst erkanntAm); ignoriert zählt nirgends. Dieselbe Regel schützt in zuSpeichern() vor dem Kürzen.
+ */
+function monatsTag(r: Rechnung): string | undefined {
+  if (r.status === "bezahlt") return tagVon(r.bezahltAm) ?? tagVon(r.faellig) ?? tagVon(r.erkanntAm);
+  if (r.status === "offen") return tagVon(r.faellig) ?? tagVon(r.erkanntAm);
+  return undefined;
+}
+
 const nachFaelligkeit = (a: Rechnung, b: Rechnung) => (tagVon(a.faellig) ?? "9999").localeCompare(tagVon(b.faellig) ?? "9999") || a.id - b.id;
 
 /**
@@ -279,9 +293,7 @@ export function finanzUebersicht(now: Date = new Date(), liste: Rechnung[] = rec
     jeOffen: {} as Summe,
   }));
   for (const r of liste) {
-    let tag: string | undefined;
-    if (r.status === "bezahlt") tag = tagVon(r.bezahltAm) ?? tagVon(r.faellig) ?? tagVon(r.erkanntAm);
-    else if (r.status === "offen") tag = tagVon(r.faellig) ?? tagVon(r.erkanntAm);
+    const tag = monatsTag(r);
     const i = tag ? monate.indexOf(tag.slice(0, 7)) : -1;
     if (i < 0) continue;
     const zeile = proMonat[i]!;
