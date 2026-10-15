@@ -24,10 +24,12 @@ writeFileSync(
     },
   }),
 );
-// Wächter: läuft ein Test erst nach den Root-after-Hooks (echtes fetch, Projekt als Arbeitsverzeichnis), scheitert er laut,
-// statt echte Dienste anzufragen oder data/postausgang.json im Projekt zu schreiben
+// Wächter: läuft ein Test erst nach den Root-after-Hooks (echtes fetch), scheitert er laut, statt echte Dienste anzufragen.
+// Zurück ins Projekt geht es nie: was danach noch schreibt (etwa ein Postausgang-Eintrag), landet im Temp-Ordner, der erst
+// beim Prozessende verschwindet.
 let wurzelBeendet = false;
-after(() => { wurzelBeendet = true; process.chdir(projekt); rmSync(temp, { recursive: true, force: true }); });
+after(() => { wurzelBeendet = true; });
+process.once("exit", () => rmSync(temp, { recursive: true, force: true }));
 
 // ---------- fetch-Attrappe: Frigate liefert Bilder, Telegram je nach Test ok oder Netzfehler ----------
 
@@ -66,7 +68,7 @@ const { onCameraEvent, wachenTick, bedingung } = await import("../src/watch.js")
 const { state } = await import("../src/state.js");
 const { config } = await import("../src/config.js");
 // Ab hier kein Top-Level-await mehr: Suiten nach einem await würden erst registriert, wenn node:test die Root-Ebene
-// womöglich schon abgeschlossen hat (Root-after-Hooks gelaufen, echtes fetch, Projekt als Arbeitsverzeichnis)
+// womöglich schon abgeschlossen hat (Root-after-Hooks gelaufen, echtes fetch)
 
 // Claude schaut hin: Antwort fest vorgegeben, keine echte API
 let claudeAntwort = "JA\nEine Person steht beim Tor.";

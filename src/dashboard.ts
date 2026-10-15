@@ -11,12 +11,12 @@ import { haStates } from "./homeassistant.js";
 import { ausloesen, notfallAktiv } from "./notfall.js";
 import { profil } from "./profil.js";
 import { protokolle, protokollGesperrt, runProtokoll } from "./protokolle.js";
-import { auftraege, createAuftrag, getAuftrag, offeneAuftraege, type Status } from "./queue.js";
+import { AUFTRAEGE_UNLESBAR, auftraege, auftraegeNichtGeladen, createAuftrag, getAuftrag, offeneAuftraege, type Auftrag, type Status } from "./queue.js";
 import { gesundheit, schwaerze } from "./robust.js";
 import { save, state, type Mode } from "./state.js";
 import { approveAuftrag, denyAuftrag, hooks, notausAn, notausAus, pinGesperrtText, pinPruefen, pinSperreRest, sendText } from "./telegram.js";
 import { vorgaenge, vorgaengeNichtGeladen } from "./vorgaenge.js";
-import { naechsterLauf, neueZeitplanId, normaleTage, pruefeZeitplan, saveZeitplaene, ZEITPLAENE_UNLESBAR, zeitplaene, zeitplaeneNichtGeladen, type Zeitplan } from "./zeitplaene.js";
+import { naechsterLauf, neueZeitplanId, normaleTage, pruefeZeitplan, saveZeitplaene, ZEITPLAENE_UNLESBAR, zeitplaene, zeitplaeneNichtGeladen, zeitplanZustand, type Zeitplan } from "./zeitplaene.js";
 
 /**
  * Kommandozentrale («der Kern»): Lesen und Handeln über das Dashboard. Nur Heimnetz/Tailscale (lanOnly im Server)
@@ -116,6 +116,7 @@ export function statusJson(_req: Request, res: Response): void {
     rechnungen: offeneRechnungen().slice(0, 10).map((r) => ({ id: r.id, empfaenger: r.empfaenger, betrag: r.betrag, waehrung: r.waehrung, faellig: r.faellig })),
     // Leere Liste heisst dann nicht «keine offenen Rechnungen»
     rechnungenUnlesbar: rechnungenNichtGeladen,
+    auftraegeUnlesbar: auftraegeNichtGeladen,
     wachenUnlesbar: wachenNichtGeladen,
     camerasUnlesbar: camerasNichtGeladen,
     zeitplaeneUnlesbar: zeitplaeneNichtGeladen,
@@ -240,7 +241,16 @@ export async function protokollAction(req: Request, res: Response): Promise<void
     if (notfallAktiv()) return void res.status(423).json(NOTFALL_GESPERRT);
     return void res.json({ ok: true, text: out });
   }
-  const a = createAuftrag({ tool: "protokoll_ausfuehren", input: { name }, stufe: p.stufe, summary: `Protokoll «${name}»: ${p.beschreibung}` });
+  // Neue Aufträge erst nach Reparatur und Neustart: Grund statt allgemeinem 500
+  if (auftraegeNichtGeladen) return void res.status(503).json({ ok: false, error: "auftraege_unlesbar", text: AUFTRAEGE_UNLESBAR });
+  let a: Auftrag;
+  try {
+    a = createAuftrag({ tool: "protokoll_ausfuehren", input: { name }, stufe: p.stufe, summary: `Protokoll «${name}»: ${p.beschreibung}` });
+  } catch (e) {
+    // Etwa die Speicherkarte voll: createAuftrag hat nichts angelegt; der Grund geschwärzt ins Dashboard
+    console.error("Protokoll-Auftrag nicht angelegt:", schwaerze(e instanceof Error ? e.message : String(e)));
+    return void res.status(500).json({ ok: false, error: "nicht_angelegt", text: `Protokoll «${name}» nicht angelegt, Sir: ${schwaerze(e instanceof Error ? e.message : String(e))}` });
+  }
   audit("auftrag_angelegt", { id: a.id, tool: a.tool, stufe: a.stufe, name, quelle: "dashboard" });
   await hooks.onAuftrag(a).catch(() => undefined);
   res.json({ ok: true, text: `Auftrag #${a.id} angelegt (${p.stufe}), Freigabe unten in den Aufträgen.` });
@@ -298,6 +308,8 @@ export function auftraegeJson(req: Request, res: Response): void {
     .sort((x, y) => y.id - x.id);
   res.json({
     ok: true,
+    // Leere Liste heisst dann nicht «keine Aufträge»: der Bestand liegt in der unlesbaren Datei
+    ...(auftraegeNichtGeladen ? { unlesbar: true, text: AUFTRAEGE_UNLESBAR } : {}),
     gesamt: treffer.length,
     auftraege: treffer.slice(0, limit).map((a) => ({
       id: a.id,
@@ -335,11 +347,14 @@ function zuruecksetzen<T extends object>(ziel: T, alt: T): void {
 /** ID aus dem Pfad; nur Ziffern, sonst undefined. */
 const pfadId = (req: Request): number | undefined => (/^\d{1,9}$/.test(String(req.params.id ?? "")) ? Number(req.params.id) : undefined);
 
-/** Ohne Auftrag (von Hand bearbeitet: fehlend, leer, kein Text) läuft ein Zeitplan nie (zeitplaene.ts, laeuft): die Anzeige nennt den Grund. */
-const auftragFehlt = (auftrag: unknown): boolean => typeof auftrag !== "string" || auftrag.trim() === "";
+/**
+ * Läuft ein Zeitplan nicht (von Hand bearbeitet: Uhrzeit «25:00», Tage «montags», leerer Auftrag), nennt die Anzeige den
+ * Grund nach derselben Regel wie der Scheduler (zeitplanZustand in zeitplaene.ts): laeuft false und grund.
+ */
 const zeitplanJson = (z: Zeitplan, jetzt: Date) => {
   const n = naechsterLaufSicher(z, jetzt);
-  return { id: z.id, name: textAnzeige(z.name), zeit: zeitAnzeige(z.zeit), tage: tageAnzeige(z.tage), auftrag: textAnzeige(z.auftrag), ...(z.lastRun ? { lastRun: z.lastRun } : {}), ...(z.angelegt ? { angelegt: z.angelegt } : {}), ...(n ? { naechsterLauf: n.toISOString() } : {}), ...(auftragFehlt(z.auftrag) ? { laeuft: false, grund: "Auftrag fehlt" } : {}) };
+  const { grund } = zeitplanZustand(z);
+  return { id: z.id, name: textAnzeige(z.name), zeit: zeitAnzeige(z.zeit), tage: tageAnzeige(z.tage), auftrag: textAnzeige(z.auftrag), ...(z.lastRun ? { lastRun: z.lastRun } : {}), ...(z.angelegt ? { angelegt: z.angelegt } : {}), ...(n ? { naechsterLauf: n.toISOString() } : {}), ...(grund ? { laeuft: false, grund } : {}) };
 };
 
 const zeitplanAudit = (z: Zeitplan) => ({ id: z.id, name: kurz(z.name, 60), zeit: z.zeit, tage: z.tage, auftrag: kurz(z.auftrag), quelle: "dashboard" });

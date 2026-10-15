@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { after, afterEach, beforeEach, describe, it } from "node:test";
+import { afterEach, beforeEach, describe, it } from "node:test";
 import { spawnSync } from "node:child_process";
 import Anthropic from "@anthropic-ai/sdk";
 
@@ -11,7 +11,9 @@ const projekt = resolve(import.meta.dirname, "..");
 const temp = mkdtempSync(join(tmpdir(), "jarvis-robust-"));
 process.chdir(temp);
 process.env.WATCHDOG_MINUTEN = "10";
-after(() => { process.chdir(projekt); rmSync(temp, { recursive: true, force: true }); });
+// Im Temp-Ordner bleiben, nie zurück ins Projekt: was nach den Root-after-Hooks noch schreibt (Wiederholungen mit
+// echten Timern, nicht abgewartete Meldungen), landet so nie in data/ des Projekts. Aufgeräumt wird beim Prozessende.
+process.once("exit", () => rmSync(temp, { recursive: true, force: true }));
 
 const { config } = await import("../src/config.js");
 const r = await import("../src/robust.js");

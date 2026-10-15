@@ -9,7 +9,9 @@ import type { Request, Response } from "express";
 const projekt = resolve(import.meta.dirname, "..");
 const temp = mkdtempSync(join(tmpdir(), "jarvis-events-"));
 process.chdir(temp);
-after(() => { process.chdir(projekt); rmSync(temp, { recursive: true, force: true }); });
+// Im Temp-Ordner bleiben, nie zurück ins Projekt: was nach den Root-after-Hooks noch schreibt (Wiederholungen mit
+// echten Timern, nicht abgewartete Meldungen), landet so nie in data/ des Projekts. Aufgeräumt wird beim Prozessende.
+process.once("exit", () => rmSync(temp, { recursive: true, force: true }));
 const TOKEN = "ereignis-token-nur-attrappe-0123456789";
 process.env.JARVIS_EVENT_TOKEN = TOKEN;
 process.env.ANTHROPIC_API_KEY = "sk-ant-test-nur-attrappe";

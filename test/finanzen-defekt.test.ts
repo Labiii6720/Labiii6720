@@ -1,14 +1,15 @@
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
-import { after, describe, it } from "node:test";
+import { join } from "node:path";
+import { describe, it } from "node:test";
 
 // Eigene Datei: der Lader läuft nur einmal beim Import, hier mit kaputtem rechnungen.json im Temp-Verzeichnis
-const projekt = resolve(import.meta.dirname, "..");
 const temp = mkdtempSync(join(tmpdir(), "jarvis-finanzen-defekt-"));
 process.chdir(temp);
-after(() => { process.chdir(projekt); rmSync(temp, { recursive: true, force: true }); });
+// Im Temp-Ordner bleiben, nie zurück ins Projekt: was nach den Root-after-Hooks noch schreibt (Wiederholungen mit
+// echten Timern, nicht abgewartete Meldungen), landet so nie in data/ des Projekts. Aufgeräumt wird beim Prozessende.
+process.once("exit", () => rmSync(temp, { recursive: true, force: true }));
 
 const DATEI = join(temp, "data", "rechnungen.json");
 const KAPUTT = '[{"id": 1, "empfaenger": "Swisscom", "betrag": 89, "waehrung": "CHF", "status": "bezahlt", "bezahltAm": "2026-09-30"},';

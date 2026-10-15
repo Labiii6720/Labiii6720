@@ -1,11 +1,10 @@
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import { after, afterEach, beforeEach, describe, it } from "node:test";
 
 // Vor dem Import: Temp-Verzeichnis (data/ liegt relativ) und Umgebung; nie echte Dienste
-const projekt = resolve(import.meta.dirname, "..");
 const temp = mkdtempSync(join(tmpdir(), "jarvis-sources-telegram-"));
 process.chdir(temp);
 process.env.ANTHROPIC_API_KEY = "sk-ant-test-nur-attrappe";
@@ -14,7 +13,9 @@ process.env.TELEGRAM_CHAT_ID = "12345";
 process.env.LAT = "47.37";
 process.env.LON = "8.54";
 process.env.WATCHDOG_MINUTEN = "10";
-after(() => { process.chdir(projekt); rmSync(temp, { recursive: true, force: true }); });
+// Im Temp-Ordner bleiben, nie zurück ins Projekt: was nach den Root-after-Hooks noch schreibt (Wiederholungen mit
+// echten Timern, nicht abgewartete Meldungen), landet so nie in data/ des Projekts. Aufgeräumt wird beim Prozessende.
+process.once("exit", () => rmSync(temp, { recursive: true, force: true }));
 
 // ---------- fetch-Attrappe ----------
 

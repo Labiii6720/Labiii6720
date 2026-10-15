@@ -29,12 +29,35 @@ export interface Protokoll {
   schritte: Schritt[];
 }
 
+const STUFEN: readonly unknown[] = ["auto", "extern", "sensibel"];
+
+/**
+ * Stufe eines Protokolls aus protokolle.json: nur genau auto, extern oder sensibel. Alles andere («Sensibel»,
+ * «sensibel », fehlend) gilt als sensibel, also Tippen plus PIN: Ein Tippfehler bei einem Protokoll, das Schlösser oder
+ * den Alarm schaltet, darf nie ohne PIN laufen (die PIN prüfen Telegram und Dashboard nur bei genau «sensibel»).
+ */
+export const protokollStufe = (roh: unknown): Stufe => (STUFEN.includes(roh) ? (roh as Stufe) : "sensibel");
+
 export const protokolle: Record<string, Protokoll> = (() => {
+  let roh: unknown;
   try {
-    return JSON.parse(readFileSync("protokolle.json", "utf8")) as Record<string, Protokoll>;
+    roh = JSON.parse(readFileSync("protokolle.json", "utf8"));
   } catch {
     return {};
   }
+  if (!roh || typeof roh !== "object" || Array.isArray(roh)) return {};
+  const aus: Record<string, Protokoll> = {};
+  let strenger = 0;
+  for (const [name, p] of Object.entries(roh as Record<string, unknown>)) {
+    if (!p || typeof p !== "object" || Array.isArray(p)) continue;
+    const eintrag = p as Protokoll;
+    const stufe = protokollStufe(eintrag.stufe);
+    if (stufe !== eintrag.stufe) strenger++;
+    aus[name] = { ...eintrag, stufe };
+  }
+  // Nur die Anzahl, kein Inhalt der Datei
+  if (strenger) console.error(`protokolle.json: ${strenger === 1 ? "1 Protokoll" : `${strenger} Protokolle`} ohne gültige Stufe (auto, extern, sensibel) – gilt als sensibel, Freigabe mit PIN.`);
+  return aus;
 })();
 
 export function describeProtokolle(): string {

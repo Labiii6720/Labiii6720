@@ -11,7 +11,7 @@ import { state } from "./state.js";
 import { clock } from "./time.js";
 import { listFiles, readFile, ROOT, runCommand, safePath, writeFile } from "./workspace.js";
 import * as browser from "./browser.js";
-import { neueZeitplanId, normaleTage, pruefeZeitplaeneSchreibbar, pruefeZeitplan, pruefungsText, saveZeitplaene, ZEITPLAENE_UNLESBAR, zeitplaene, zeitplaeneNichtGeladen } from "./zeitplaene.js";
+import { neueZeitplanId, normaleTage, pruefeZeitplaeneSchreibbar, pruefeZeitplan, pruefungsText, saveZeitplaene, ZEITPLAENE_UNLESBAR, zeitplaene, zeitplaeneNichtGeladen, zeitplanZustand } from "./zeitplaene.js";
 import { describeCameras, dynamicWachen, neueWacheId, eventClip, formatEvents, hasCameras, look, pruefeWache, pruefeWachenSchreibbar, recentEvents, saveWachen, allWachen, bedingungWert, wacheZustand, WACHEN_UNLESBAR, wachenNichtGeladen } from "./cameras.js";
 import { addRechnung, erkenneRechnung, formatRechnung, offeneRechnungen, RECHNUNGEN_UNLESBAR, rechnungen, rechnungenNichtGeladen, setzeStatus } from "./finanzen.js";
 import { readMail as gmailRead, searchMails as gmailSearch } from "./gmail.js";
@@ -496,8 +496,12 @@ const plaene: Tool[] = [
     description: "Zeigt alle wiederkehrenden Aufgaben.",
     input_schema: { type: "object", properties: {} },
     stufe: "auto",
-    // Unlesbare Datei: leere Liste hiesse sonst fälschlich «keine Zeitpläne»
-    run: async () => (zeitplaeneNichtGeladen ? ZEITPLAENE_UNLESBAR : zeitplaene.map((z) => `#${z.id} ${feldOder(z.name, "ohne Namen")} · ${feldOder(z.tage, "ohne Tage")} ${feldOder(z.zeit, "ohne Uhrzeit")} · ${feldOder(z.auftrag, "ohne Auftrag")}`).join("\n") || "Keine Zeitpläne."),
+    // Unlesbare Datei: leere Liste hiesse sonst fälschlich «keine Zeitpläne». Läuft einer nicht (gemeinsame Regel
+    // zeitplanZustand, wie Scheduler und Kommandozentrale), steht der Grund dabei.
+    run: async () => (zeitplaeneNichtGeladen ? ZEITPLAENE_UNLESBAR : zeitplaene.map((z) => {
+      const { grund } = zeitplanZustand(z);
+      return `#${z.id} ${feldOder(z.name, "ohne Namen")} · ${feldOder(z.tage, "ohne Tage")} ${feldOder(z.zeit, "ohne Uhrzeit")} · ${feldOder(z.auftrag, "ohne Auftrag")}${grund ? ` (läuft nicht: ${grund})` : ""}`;
+    }).join("\n") || "Keine Zeitpläne."),
   },
   {
     name: "zeitplan_loeschen",

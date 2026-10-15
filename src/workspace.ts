@@ -2,9 +2,11 @@ import { exec } from "node:child_process";
 import { closeSync, constants, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync, type Stats } from "node:fs";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { config } from "./config.js";
+import { istNurLesen } from "./datei.js";
 
 export const ROOT = resolve(config.workspace);
-mkdirSync(ROOT, { recursive: true });
+// npm run check liest nur: dort keinen Arbeitsordner anlegen (der Dienst legt ihn beim Start an)
+if (!istNurLesen()) mkdirSync(ROOT, { recursive: true });
 
 const vorhanden = (p: string): Stats | undefined => {
   try {

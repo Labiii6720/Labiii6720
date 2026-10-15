@@ -1,4 +1,5 @@
-import { chmodSync, constants, copyFileSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { mkdirSync, renameSync, writeFileSync } from "node:fs";
+import { ladeListe, rechnungEintrag } from "./datei.js";
 import { todayKey } from "./time.js";
 
 /**
@@ -22,66 +23,25 @@ export interface Rechnung {
 }
 
 const FILE = "data/rechnungen.json";
-/** Unlesbare Rechnungs-Datei wird hierhin kopiert; liegt dort schon eine ältere Sicherung, mit Zeitstempel daneben */
-const SICHERUNG_DEFEKT = `${FILE}.defekt`;
-
-/** Kopiert die unlesbare Datei unter einen freien Namen (0o600, eine ältere Sicherung bleibt unberührt). */
-function sichereDefekt(): string | undefined {
-  try {
-    mkdirSync("data", { recursive: true, mode: 0o700 });
-    const stempel = new Date().toISOString().replace(/[:.]/g, "-");
-    for (let n = 0; n < 100; n++) {
-      const nach = n === 0 ? SICHERUNG_DEFEKT : `${SICHERUNG_DEFEKT}-${stempel}${n > 1 ? `-${n}` : ""}`;
-      try {
-        // EXCL: nie eine vorhandene Sicherung überschreiben, auch nicht bei gleichzeitigem Start
-        copyFileSync(FILE, nach, constants.COPYFILE_EXCL);
-      } catch (e) {
-        if ((e as NodeJS.ErrnoException).code === "EEXIST") continue;
-        throw e;
-      }
-      chmodSync(nach, 0o600);
-      return nach;
-    }
-    throw new Error("kein freier Name für die Sicherung");
-  } catch (e) {
-    console.error("Rechnungs-Sicherung fehlgeschlagen:", e instanceof Error ? e.message : e);
-    return undefined;
-  }
-}
 
 /**
- * true, wenn data/rechnungen.json vorhanden, aber nicht lesbar war (Rechte, kaputtes JSON …). Dann startet Jarvis ohne
- * Rechnungen im Speicher, `saveRechnungen()` verweigert aber das Schreiben: sonst ersetzte das nächste Erfassen oder
- * Abhaken die echte Liste samt bezahltAm durch eine leere.
+ * Einträge prüft ladeListe (rechnungEintrag in datei.ts): ein null oder ein Eintrag ohne id, Empfänger oder bekannten
+ * Status fällt beim Laden weg (Sicherung .defekt, Hinweis in /status, Startmeldung und npm run check), statt
+ * /status.json, /api/finanzen, /finanzen und die Erinnerung abstürzen zu lassen. Die übrigen laufen, Speichern bleibt erlaubt.
  */
-export let rechnungenNichtGeladen = false;
+const geladen = ladeListe<Rechnung>(FILE, "Rechnungen", rechnungEintrag);
 
-export const rechnungen: Rechnung[] = (() => {
-  let text: string;
-  try {
-    text = readFileSync(FILE, "utf8");
-  } catch (e) {
-    // Nur eine fehlende Datei heisst «noch keine Rechnungen»
-    if ((e as NodeJS.ErrnoException).code === "ENOENT") return [];
-    rechnungenNichtGeladen = true;
-    console.error(
-      `Rechnungen nicht lesbar (${(e as NodeJS.ErrnoException).code ?? "Fehler"}) – Jarvis startet ohne Rechnungen und speichert keine, bis ${FILE} wieder lesbar ist und Jarvis neu startet.`,
-    );
-    return [];
-  }
-  try {
-    const roh = JSON.parse(text) as unknown;
-    if (!Array.isArray(roh)) throw new Error("keine Liste");
-    return roh as Rechnung[];
-  } catch {
-    rechnungenNichtGeladen = true;
-    const kopie = sichereDefekt();
-    console.error(
-      `Rechnungen unlesbar – ${kopie ? `Kopie unter ${kopie}` : "Sicherung fehlgeschlagen"}. Jarvis startet ohne Rechnungen und speichert keine, bis ${FILE} repariert ist und Jarvis neu startet.`,
-    );
-    return [];
-  }
-})();
+/**
+ * true, wenn data/rechnungen.json vorhanden, aber nicht lesbar war (Rechte, kaputtes JSON …; Sicherung .defekt). Dann
+ * startet Jarvis ohne Rechnungen im Speicher, `saveRechnungen()` verweigert aber das Schreiben: sonst ersetzte das
+ * nächste Erfassen oder Abhaken die echte Liste samt bezahltAm durch eine leere.
+ */
+export const rechnungenNichtGeladen = geladen.nichtGeladen;
+
+export const rechnungen: Rechnung[] = geladen.liste;
+
+/** Höchste Nummer beim Start, verworfene Einträge eingeschlossen: eine neue Rechnung bekommt keine davon wieder. */
+const hoechsteIdBeimStart = geladen.hoechsteId;
 
 /** Meldung für alle Anzeigen und Erinnerungen, solange die Datei beim Start unlesbar war */
 export const RECHNUNGEN_UNLESBAR =
@@ -169,7 +129,8 @@ export function erkenneRechnung(text: string): Erkannt {
 
 export function addRechnung(r: Omit<Rechnung, "id" | "erkanntAm" | "status"> & { status?: Rechnung["status"] }): Rechnung {
   pruefeSchreibbar(); // vor dem push: sonst stünde im Speicher eine Rechnung, die nie gespeichert wird
-  const rechnung: Rechnung = { id: (rechnungen.at(-1)?.id ?? 0) + 1, erkanntAm: new Date().toISOString(), status: "offen", ...r };
+  const id = Math.max(hoechsteIdBeimStart, ...rechnungen.map((x) => x.id)) + 1;
+  const rechnung: Rechnung = { id, erkanntAm: new Date().toISOString(), status: "offen", ...r };
   rechnungen.push(rechnung);
   saveRechnungen();
   return rechnung;

@@ -1711,6 +1711,39 @@ describe("Kommandozentrale im Browser", { skip: chrome ? false : "kein Chromium 
     await sofort(page);
   });
 
+  it("unlesbare data/auftraege.json: Lage, Übersicht und Freigaben sagen es, statt «Nichts zu tun» oder «Noch keine Freigaben»", async () => {
+    const TEXT = "⚠️ data/auftraege.json war beim Start unlesbar, Sir (Sicherung …).";
+    // So antwortet der Dienst bei unlesbarer Datei: status.auftraegeUnlesbar, leere Liste; /api/auftraege mit unlesbar und text
+    await page.route("**/status.json", async (route) => {
+      const echt = await route.fetch();
+      const d = await echt.json();
+      await route.fulfill({ response: echt, json: { ...d, auftraegeUnlesbar: true, auftraege: [] } });
+    });
+    await page.route("**/api/auftraege*", (r) => r.fulfill({ json: { ok: true, unlesbar: true, text: TEXT, gesamt: 0, auftraege: [] } }));
+    try {
+      await page.evaluate(() => { location.hash = "uebersicht"; });
+      await sofort(page);
+      await page.waitForFunction(() => (document.getElementById("auftrAnker")?.textContent ?? "").includes("data/auftraege.json ist unlesbar."), null, { timeout: 3000 });
+      const uebersicht = (await page.textContent("#v-uebersicht")) ?? "";
+      assert.doesNotMatch(uebersicht, /Nichts zu tun|nichts wartet/);
+      assert.match((await page.textContent("#v-uebersicht .lage-liste")) ?? "", /data\/auftraege\.json unlesbar/);
+      assert.match((await page.textContent("#v-uebersicht .kpis")) ?? "", /data\/auftraege\.json unlesbar/);
+      assert.equal(await page.getAttribute('#v-uebersicht .lage-liste a[data-merk="lage:datei:auftraegeUnlesbar"]', "href"), "#freigaben");
+      await page.evaluate(() => { location.hash = "freigaben"; });
+      await page.waitForFunction(() => (document.getElementById("v-freigaben")?.textContent ?? "").includes("data/auftraege.json ist unlesbar."), null, { timeout: 3000 });
+      const freigaben = (await page.textContent("#v-freigaben")) ?? "";
+      assert.doesNotMatch(freigaben, /Noch keine Freigaben/);
+      assert.match(freigaben, /data\/auftraege\.json war beim Start unlesbar, Sir/, "Text des Servers, ohne Symbol");
+      assert.doesNotMatch(freigaben, /⚠️/);
+    } finally {
+      await page.unroute("**/status.json");
+      await page.unroute("**/api/auftraege*");
+    }
+    await page.evaluate(() => { location.hash = "uebersicht"; });
+    await sofort(page);
+    await page.waitForSelector("#v-uebersicht .auftraege", { timeout: 3000 });
+  });
+
   it("über alle Abläufe: keine Skriptfehler und keine CSP-Verletzung", async () => {
     // Abgewiesene Anfragen (401/423/502 aus den Attrappen) meldet Chromium als Ladefehler; Skriptfehler nie
     assert.deepEqual(probleme.filter((p) => !/Failed to load resource/.test(p)), []);

@@ -1,17 +1,18 @@
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import { after, describe, it } from "node:test";
 
 // Eigene Datei: cameras.json und data/wachen.json werden nur einmal beim Import gelesen. Hier stehen dynamische Wachen
 // auf einer verworfenen Kamera («garten»: null), auf einer aus cameras.json entfernten («carport») und auf Namen aus
 // dem Objekt-Prototyp («toString», «__proto__»). wachenTick überspringt sie alle; die Kommandozentrale darf sie nicht
 // als laufend zeigen.
-const projekt = resolve(import.meta.dirname, "..");
 const temp = mkdtempSync(join(tmpdir(), "jarvis-wache-kamera-fehlt-"));
 process.chdir(temp);
-after(() => { process.chdir(projekt); rmSync(temp, { recursive: true, force: true }); });
+// Im Temp-Ordner bleiben, nie zurück ins Projekt: was nach den Root-after-Hooks noch schreibt (Wiederholungen mit
+// echten Timern, nicht abgewartete Meldungen), landet so nie in data/ des Projekts. Aufgeräumt wird beim Prozessende.
+process.once("exit", () => rmSync(temp, { recursive: true, force: true }));
 process.env.TELEGRAM_BOT_TOKEN = "123456789:ABCdefGHIjklMNOpqrSTUvwxYZ0123456789";
 process.env.TELEGRAM_CHAT_ID = "12345";
 process.env.ANTHROPIC_API_KEY = "sk-ant-test-nur-attrappe";

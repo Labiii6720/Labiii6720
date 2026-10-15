@@ -17,7 +17,9 @@ process.env.JARVIS_EVENT_TOKEN = "attrappe-event-token";
 delete process.env.DASHBOARD;
 delete process.env.ALEXA_VOICE;
 delete process.env.ALEXA_NACHT;
-after(() => { process.chdir(projekt); rmSync(temp, { recursive: true, force: true }); });
+// Im Temp-Ordner bleiben, nie zurück ins Projekt: was nach den Root-after-Hooks noch schreibt (Wiederholungen mit
+// echten Timern, nicht abgewartete Meldungen), landet so nie in data/ des Projekts. Aufgeräumt wird beim Prozessende.
+process.once("exit", () => rmSync(temp, { recursive: true, force: true }));
 
 // fetch-Attrappe: Telegram antwortet ok, alles andere (Claude, Wetter, …) ist ein Testfehler
 const aufrufe: { url: string; body: string }[] = [];

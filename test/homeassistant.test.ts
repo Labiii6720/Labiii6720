@@ -1,10 +1,9 @@
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import { after, afterEach, beforeEach, describe, it } from "node:test";
 
-const projekt = resolve(import.meta.dirname, "..");
 const temp = mkdtempSync(join(tmpdir(), "jarvis-ha-"));
 process.chdir(temp);
 process.env.ANTHROPIC_API_KEY = "sk-ant-test-nur-attrappe";
@@ -12,7 +11,9 @@ process.env.HA_URL = "http://ha.test:8123/";
 process.env.HA_TOKEN = "geheimes-ha-token-attrappe";
 process.env.HA_PRESENCE_ENTITY = "person.test";
 process.env.WATCHDOG_MINUTEN = "10";
-after(() => { process.chdir(projekt); rmSync(temp, { recursive: true, force: true }); });
+// Im Temp-Ordner bleiben, nie zurück ins Projekt: was nach den Root-after-Hooks noch schreibt (Wiederholungen mit
+// echten Timern, nicht abgewartete Meldungen), landet so nie in data/ des Projekts. Aufgeräumt wird beim Prozessende.
+process.once("exit", () => rmSync(temp, { recursive: true, force: true }));
 
 const { haStates, haService, haState, isHome, _testOptionen } = await import("../src/homeassistant.js");
 const { gesundheit, HttpFehler } = await import("../src/robust.js");

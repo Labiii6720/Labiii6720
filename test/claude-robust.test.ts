@@ -1,16 +1,17 @@
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
-import { after, afterEach, beforeEach, describe, it } from "node:test";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, it } from "node:test";
 import Anthropic from "@anthropic-ai/sdk";
 
-const projekt = resolve(import.meta.dirname, "..");
 const temp = mkdtempSync(join(tmpdir(), "jarvis-claude-"));
 process.chdir(temp);
 process.env.ANTHROPIC_API_KEY = "sk-ant-test-nur-attrappe";
 process.env.WATCHDOG_MINUTEN = "10";
-after(() => { process.chdir(projekt); rmSync(temp, { recursive: true, force: true }); });
+// Im Temp-Ordner bleiben, nie zurück ins Projekt: was nach den Root-after-Hooks noch schreibt (Wiederholungen mit
+// echten Timern, nicht abgewartete Meldungen), landet so nie in data/ des Projekts. Aufgeräumt wird beim Prozessende.
+process.once("exit", () => rmSync(temp, { recursive: true, force: true }));
 
 const { anthropic, claudeAufruf } = await import("../src/claude.js");
 const { gesundheit } = await import("../src/robust.js");

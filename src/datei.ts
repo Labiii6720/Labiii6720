@@ -1,11 +1,13 @@
 import { chmodSync, constants, copyFileSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import type { Wache } from "./cameras.js";
+import type { Rechnung } from "./finanzen.js";
+import type { Auftrag } from "./queue.js";
 import type { Vorgang } from "./vorgaenge.js";
 import type { Zeitplan } from "./zeitplaene.js";
 
 /**
- * Gemeinsamer Lader für Listen-Dateien in data/ (Zeitpläne, Wachen, Erinnerungen, Postausgang, Vorgänge).
+ * Gemeinsamer Lader für Listen-Dateien in data/ (Zeitpläne, Wachen, Erinnerungen, Postausgang, Vorgänge, Aufträge, Rechnungen).
  * Eine fehlende Datei heisst «leer». Jede andere unlesbare Datei setzt `nichtGeladen`: Der Aufrufer darf dann
  * nicht speichern, sonst ersetzte die nächste Änderung den ganzen Bestand. Inhalt geht nie ins Log.
  *
@@ -20,7 +22,25 @@ export interface GeladeneListe<T> {
   nichtGeladen: boolean;
   /** Beim Laden übersprungene Einträge (0 ohne Eintragsprüfung) */
   verworfen: number;
+  /**
+   * Höchste Nummer («id», auch als Ziffernfolge) unter allen Einträgen der Datei, verworfene eingeschlossen (0 ohne).
+   * Wer IDs vergibt, darf keine wiederverwenden, die nur noch in der Sicherung steht (alte Knöpfe, Freigaben, Verweise).
+   */
+  hoechsteId: number;
 }
+
+/**
+ * Nur lesen (npm run check): ladeListe legt keine Sicherung an, schreibt nichts und loggt nichts; verworfene Einträge
+ * fallen trotzdem weg. Ebenso sichern state.ts und profil.ts dann keine unlesbare Datei, und workspace.ts legt den
+ * Arbeitsordner nicht an (istNurLesen). Gilt für den ganzen Prozess, also nur in einem Prozess setzen, der nichts
+ * speichert (scripts/check.ts), und vor dem Laden der Module (dynamischer Import danach). Nie im Dienst.
+ */
+let nurLesenAktiv = false;
+export function nurLesen(): void {
+  nurLesenAktiv = true;
+}
+/** true, wenn der Prozess nur liest (siehe nurLesen). */
+export const istNurLesen = (): boolean => nurLesenAktiv;
 
 /** Reine Prüfung eines Eintrags: der (ggf. normalisierte) Eintrag oder undefined, wenn er nicht gilt. */
 export type Eintragspruefung<T> = (roh: unknown) => T | undefined;
@@ -44,6 +64,17 @@ function gleicheSicherung(datei: string): string | undefined {
     // Datei oder Ordner nicht lesbar: dann eben eine neue Sicherung versuchen
   }
   return undefined;
+}
+
+/** Höchste gültige Nummer unter den rohen Einträgen (verworfene eingeschlossen), 0 ohne. */
+function hoechsteRohId(roh: readonly unknown[]): number {
+  let max = 0;
+  for (const e of roh) {
+    if (!istObjekt(e)) continue;
+    const n = zahlOderZiffern(e.id);
+    if (n !== undefined && Number.isSafeInteger(n) && n > max) max = n;
+  }
+  return max;
 }
 
 /**
@@ -147,33 +178,36 @@ export function eintragsHinweise(): string[] {
 export function ladeListe<T>(datei: string, name: string, pruefe?: Eintragspruefung<T>): GeladeneListe<T> {
   if (pruefe) vermerkeUebersprungen(datei, 0, false);
   const gelesen = leseListe(datei);
-  if (gelesen.zustand === "fehlt") return { liste: [], nichtGeladen: false, verworfen: 0 };
+  if (gelesen.zustand === "fehlt") return { liste: [], nichtGeladen: false, verworfen: 0, hoechsteId: 0 };
   if (gelesen.zustand === "nicht_lesbar") {
-    console.error(`${name} nicht lesbar (${gelesen.code}) – Jarvis startet ohne ${datei} und speichert die Datei nicht, bis sie wieder lesbar ist und Jarvis neu startet.`);
-    return { liste: [], nichtGeladen: true, verworfen: 0 };
+    if (!nurLesenAktiv) console.error(`${name} nicht lesbar (${gelesen.code}) – Jarvis startet ohne ${datei} und speichert die Datei nicht, bis sie wieder lesbar ist und Jarvis neu startet.`);
+    return { liste: [], nichtGeladen: true, verworfen: 0, hoechsteId: 0 };
   }
   if (gelesen.zustand === "kaputt") {
+    if (nurLesenAktiv) return { liste: [], nichtGeladen: true, verworfen: 0, hoechsteId: 0 };
     const kopie = sichereDefekt(datei);
     console.error(
       `${name} unlesbar – ${kopie ? `Kopie unter ${kopie}` : "Sicherung fehlgeschlagen"}. Jarvis startet ohne ${datei} und speichert die Datei nicht, bis sie repariert ist und Jarvis neu startet.`,
     );
-    return { liste: [], nichtGeladen: true, verworfen: 0 };
+    return { liste: [], nichtGeladen: true, verworfen: 0, hoechsteId: 0 };
   }
-  if (!pruefe) return { liste: gelesen.roh as T[], nichtGeladen: false, verworfen: 0 };
+  const hoechsteId = hoechsteRohId(gelesen.roh);
+  if (!pruefe) return { liste: gelesen.roh as T[], nichtGeladen: false, verworfen: 0, hoechsteId };
   const { gueltig, verworfen } = gueltigeEintraege(gelesen.roh, pruefe);
-  if (verworfen === 0) return { liste: gueltig, nichtGeladen: false, verworfen: 0 };
+  // Nur lesen: ohne Sicherung, Log und Hinweis; der Prozess speichert keine Liste (siehe nurLesen)
+  if (verworfen === 0 || nurLesenAktiv) return { liste: gueltig, nichtGeladen: false, verworfen, hoechsteId };
   const kopie = sichereDefekt(datei, { gleicheWiederverwenden: true });
   if (!kopie) {
     console.error(
       `${name} unlesbar (${anzahlText(verworfen)}, Sicherung fehlgeschlagen) – Jarvis startet ohne ${datei} und speichert die Datei nicht, bis sie repariert ist und Jarvis neu startet.`,
     );
-    return { liste: [], nichtGeladen: true, verworfen };
+    return { liste: [], nichtGeladen: true, verworfen, hoechsteId };
   }
   console.error(
     `${name}: ${anzahlText(verworfen)} übersprungen (Sicherung unter ${kopie}). Die übrigen ${gueltig.length} sind geladen; beim nächsten Speichern fehlen die übersprungenen in ${datei}.`,
   );
   vermerkeUebersprungen(datei, verworfen, kopie);
-  return { liste: gueltig, nichtGeladen: false, verworfen };
+  return { liste: gueltig, nichtGeladen: false, verworfen, hoechsteId };
 }
 
 /**
@@ -195,9 +229,10 @@ export const gesperrtText = (datei: string, was: string): string =>
 // ---------- Eintragsprüfungen (eine Stelle für alle Listen) ----------
 //
 // Geprüft werden Form und Typen der Felder, ohne die der Code abstürzt oder «undefined» zeigt. Ungültige Werte mit
-// richtigem Typ (Uhrzeit «25:00», Tage «montags», unbekannte Kamera, Intervall 0, leere Frage, falsches «nur_wenn»)
-// bleiben stehen: Scheduler und Wachen-Takt lassen sie nicht laufen, und Kommandozentrale und Werkzeuge zeigen sie mit
-// Grund, damit man sie dort ändern oder löschen kann. Optionale Felder prüfen die Nutzer selbst (zweite Verteidigung).
+// richtigem Typ (Uhrzeit «25:00», Tage «montags», leerer Auftrag, unbekannte Kamera, Intervall 0, leere Frage, falsches
+// «nur_wenn») bleiben stehen: Scheduler und Wachen-Takt lassen sie nicht laufen, und Kommandozentrale und Werkzeuge
+// zeigen sie mit Grund (zeitplanZustand in zeitplaene.ts, wacheZustand in cameras.ts), damit man sie dort ändern oder
+// löschen kann. Optionale Felder prüfen die Nutzer selbst (zweite Verteidigung).
 
 const istObjekt = (v: unknown): v is Record<string, unknown> => v !== null && typeof v === "object" && !Array.isArray(v);
 const istText = (v: unknown): v is string => typeof v === "string";
@@ -254,11 +289,43 @@ export function vorgangEintrag(roh: unknown): Vorgang | undefined {
 
 /**
  * data/postausgang.json: ts als lesbarer Zeitpunkt (sonst wirft clock() beim Nachreichen, und der ganze Postausgang
- * stünde still), text als Text; «vorrang» zählt nur als true.
+ * stünde still), text als Text; «vorrang» zählt nur als true. ts wird als UTC-ISO weitergereicht: Notfall-Freigabe und
+ * Kürzen vergleichen ihn als Text mit ISO-Zeitstempeln (von Hand «2026-10-15T10:00:00+02:00» wäre sonst falsch einsortiert).
  */
 export function postausgangEintrag(roh: unknown): { ts: string; text: string; vorrang?: true } | undefined {
   if (!istObjekt(roh) || !istZeitpunkt(roh.ts) || !istText(roh.text)) return undefined;
-  return roh.vorrang === true ? { ts: roh.ts, text: roh.text, vorrang: true } : { ts: roh.ts, text: roh.text };
+  const ts = new Date(roh.ts).toISOString();
+  return roh.vorrang === true ? { ts, text: roh.text, vorrang: true } : { ts, text: roh.text };
+}
+
+const AUFTRAG_STATUS: readonly unknown[] = ["offen", "erledigt", "abgelehnt", "fehler"];
+const AUFTRAG_STUFE: readonly unknown[] = ["extern", "sensibel"];
+
+/**
+ * data/auftraege.json: id ganzzahlig > 0, tool, summary und createdAt als Text, stufe extern|sensibel, status bekannt,
+ * input als Objekt; result und gestartetAm, falls vorhanden, als Text. Sonst würfen /status.json, /api/auftraege,
+ * /auftraege, die Freigabe-Knöpfe und der Systemprompt (a.status auf null, schwaerze(a.summary)) – oder ein Auftrag
+ * ohne Stufe liefe ohne PIN.
+ */
+export function auftragEintrag(roh: unknown): Auftrag | undefined {
+  if (!istObjekt(roh) || !istId(roh.id) || !istText(roh.tool) || !istText(roh.summary) || !istText(roh.createdAt)) return undefined;
+  if (!AUFTRAG_STUFE.includes(roh.stufe) || !AUFTRAG_STATUS.includes(roh.status) || !istObjekt(roh.input)) return undefined;
+  if ((roh.result !== undefined && !istText(roh.result)) || (roh.gestartetAm !== undefined && !istText(roh.gestartetAm))) return undefined;
+  return roh as unknown as Auftrag;
+}
+
+const RECHNUNG_STATUS: readonly unknown[] = ["offen", "bezahlt", "ignoriert"];
+
+/**
+ * data/rechnungen.json: id ganzzahlig > 0, empfaenger als Text, status bekannt; betrag, falls vorhanden, als endliche
+ * Zahl (toFixed), faellig als Text (Sortierung mit localeCompare). Sonst würfen /status.json, /api/finanzen, /finanzen,
+ * die Erinnerung und rechnungen_offen schon an einem einzigen null-Eintrag.
+ */
+export function rechnungEintrag(roh: unknown): Rechnung | undefined {
+  if (!istObjekt(roh) || !istId(roh.id) || !istText(roh.empfaenger) || !RECHNUNG_STATUS.includes(roh.status)) return undefined;
+  if (roh.betrag !== undefined && roh.betrag !== null && !(typeof roh.betrag === "number" && Number.isFinite(roh.betrag))) return undefined;
+  if (roh.faellig !== undefined && roh.faellig !== null && !istText(roh.faellig)) return undefined;
+  return roh as unknown as Rechnung;
 }
 
 /** Alle Listen mit ihrer Prüfung (Selbsttest). Die Module laden mit denselben Pfaden und Prüfungen. */
@@ -268,4 +335,6 @@ export const LISTEN: readonly { datei: string; name: string; pruefe: Eintragspru
   { datei: "data/erinnerungen.json", name: "Erinnerungen", pruefe: erinnerungEintrag },
   { datei: "data/vorgaenge.json", name: "Vorgänge", pruefe: vorgangEintrag },
   { datei: "data/postausgang.json", name: "Postausgang", pruefe: postausgangEintrag },
+  { datei: "data/auftraege.json", name: "Aufträge", pruefe: auftragEintrag },
+  { datei: "data/rechnungen.json", name: "Rechnungen", pruefe: rechnungEintrag },
 ];

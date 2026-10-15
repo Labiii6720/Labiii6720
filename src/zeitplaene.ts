@@ -123,14 +123,23 @@ function uhrzeitGueltig(zeit: string): boolean {
   return m !== null && Number(m[1]) <= 23 && Number(m[2]) <= 59;
 }
 
+export type ZeitplanGrund = "Uhrzeit ungültig" | "Tage ungültig" | "Auftrag fehlt";
+
 /**
- * Kann der Eintrag überhaupt laufen? Zweite Verteidigung neben der Ladeprüfung (zeitplanEintrag): ohne zeit/tage als
- * Text (sonst Absturz im Scheduler-Takt), mit ungültiger Uhrzeit oder ohne Auftrag (sonst ein bezahlter Claude-Lauf mit
- * dem Auftrag «undefined» bzw. Leertext) ist ein Zeitplan nie fällig und hat keinen nächsten Lauf.
+ * Läuft ein Zeitplan, und wenn nicht, warum? Gemeinsame Regel für den Scheduler (faelligIm, naechsterLauf), die
+ * Kommandozentrale und zeitplaene_anzeigen (wie wacheZustand bei den Wachen). Zweite Verteidigung neben der Ladeprüfung
+ * (zeitplanEintrag): ohne zeit/tage als Text (sonst Absturz im Takt), mit ungültiger Uhrzeit («25:00», «07:60»), mit
+ * Tagen, die normaleTage nicht kennt («montags», «mo,mo»), oder ohne Auftrag (sonst ein bezahlter Claude-Lauf mit
+ * «undefined» bzw. Leertext) ist ein Zeitplan nie fällig und hat keinen nächsten Lauf. Reihenfolge: Uhrzeit, Tage, Auftrag.
  */
-function laeuft(z: Zeitplan): boolean {
-  return typeof z.zeit === "string" && typeof z.tage === "string" && typeof z.auftrag === "string" && z.auftrag.trim() !== "" && uhrzeitGueltig(z.zeit);
+export function zeitplanZustand(z: Pick<Zeitplan, "zeit" | "tage" | "auftrag">): { laeuft: boolean; grund?: ZeitplanGrund } {
+  if (typeof z.zeit !== "string" || !uhrzeitGueltig(z.zeit)) return { laeuft: false, grund: "Uhrzeit ungültig" };
+  if (typeof z.tage !== "string" || normaleTage(z.tage) === undefined) return { laeuft: false, grund: "Tage ungültig" };
+  if (typeof z.auftrag !== "string" || z.auftrag.trim() === "") return { laeuft: false, grund: "Auftrag fehlt" };
+  return { laeuft: true };
 }
+
+const laeuft = (z: Zeitplan): boolean => zeitplanZustand(z).laeuft;
 
 /** Genau zur Minute (Fenster 1 Minute) – bleibt für Kompatibilität. */
 export function faelltAn(z: Zeitplan, now: Date): boolean {

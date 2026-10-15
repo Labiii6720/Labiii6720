@@ -800,6 +800,7 @@
 
   /* ---------- Lage: Dringliches nach Rang, höchstens fünf Punkte ---------- */
   const DATEIEN = [
+    ["auftraegeUnlesbar", "data/auftraege.json", "Freigaben", "#freigaben"],
     ["rechnungenUnlesbar", "data/rechnungen.json", "Finanzen", "#finanzen"],
     ["zeitplaeneUnlesbar", "data/zeitplaene.json", "Zeitpläne", "#zeitplaene"],
     ["wachenUnlesbar", "data/wachen.json", "Wachen", "#zeitplaene"],
@@ -911,8 +912,12 @@
     /* Stat-Kacheln */
     const offen = offene(); const warten = wartende();
     const aelteste = warten.reduce((m, a) => (!m || String(a.seit) < String(m) ? a.seit : m), null);
-    const auftrKpi = kpi("Offene Aufträge", String(offen.length), null, offen.length ? `${warten.length} warten · ${offen.length - warten.length} läuft` : "nichts wartet",
-      aelteste ? h("div", { class: "zweit-t", text: "älteste wartet " + seit(aelteste) }) : null);
+    // Unlesbare data/auftraege.json: die leere Liste heisst dann nicht «nichts wartet»
+    const auftrUnlesbar = Boolean(st.auftraegeUnlesbar) && !offen.length;
+    const auftrKpi = auftrUnlesbar
+      ? kpi("Offene Aufträge", "–", null, h("div", { class: "unter zustand z-ernst" }, ikon("warn", true), "data/auftraege.json unlesbar"))
+      : kpi("Offene Aufträge", String(offen.length), null, offen.length ? `${warten.length} warten · ${offen.length - warten.length} läuft` : "nichts wartet",
+        aelteste ? h("div", { class: "zweit-t", text: "älteste wartet " + seit(aelteste) }) : null);
 
     const kd = Q.kosten14 && Q.kosten14.daten;
     const monatName = MONATE_LANG[Number(isoTag(jetzt()).slice(5, 7)) - 1];
@@ -942,7 +947,9 @@
 
     /* Aufträge links – Anbindungen und «Als Nächstes» rechts */
     const auftr = h("div", { class: "karte auftr-karte", id: "auftrAnker", tabindex: "-1" }, h("h2", { class: "etikett" }, "Offene Aufträge", h("a", { class: "rest", href: "#freigaben", "data-merk": "u-historie", text: "Historie ›" })),
-      offen.length ? h("div", { class: "auftraege" }, offen.map(auftragKarte)) : leer("leer", "Nichts zu tun, Sir.", "Neue Aufträge erscheinen hier."),
+      offen.length ? h("div", { class: "auftraege" }, offen.map(auftragKarte))
+        : auftrUnlesbar ? leer("warn", "data/auftraege.json ist unlesbar.", AUFTR_UNLESBAR_TEXT)
+        : leer("leer", "Nichts zu tun, Sir.", "Neue Aufträge erscheinen hier."),
       h("p", { class: "kfuss" }, ikon("lock", true), "Sensibles gebe ich nur mit Ihrer PIN frei. Telegram und diese Seite zählen gleich."));
     v.append(h("div", { class: "raster r-2-1 mt" }, auftr, h("div", { class: "spalte" }, anbKarte(), naechstKarte())));
 
@@ -998,6 +1005,7 @@
   }
 
   /* ---------- Freigaben ---------- */
+  const AUFTR_UNLESBAR_TEXT = "Frühere Freigaben kenne ich nicht, und neue lege ich erst an, wenn die Datei repariert ist und ich neu gestartet bin, Sir.";
   const filterF = { status: "alle", stufe: "alle" };
   const F_STATUS = [["alle", "Alle"], ["offen", "Offen"], ["erledigt", "Erledigt"], ["abgelehnt", "Abgelehnt"], ["fehler", "Fehler"]];
   const F_STUFE = [["alle", "Alle Stufen"], ["extern", "extern"], ["sensibel", "sensibel"]];
@@ -1007,6 +1015,8 @@
     if (Q.status && Q.status.notfall) { v.append(gesperrtKarte()); return; }
     if (!q) { v.append(h("div", { class: "karte" }, h("p", { class: "ruhig", text: "Einen Moment, Sir. Ich hole die Historie." }))); return; }
     if (!q.daten) { v.append(h("div", { class: "karte" }, leer("warn", "Die Historie ist gerade nicht verfügbar.", fehlerText({ status: q.fehler, daten: { text: q.text } })))); return; }
+    // Unlesbare data/auftraege.json: die leere Liste heisst nicht «noch keine Freigaben»
+    if (q.daten.unlesbar) { v.append(h("div", { class: "karte" }, leer("warn", "data/auftraege.json ist unlesbar.", ohneSymbol(q.daten.text || AUFTR_UNLESBAR_TEXT)))); return; }
     const alle = Array.isArray(q.daten.auftraege) ? q.daten.auftraege : [];
     const passtStufe = (a) => filterF.stufe === "alle" || a.stufe === filterF.stufe;
     const anz = (k) => alle.filter((a) => (k === "alle" || a.status === k) && passtStufe(a)).length;

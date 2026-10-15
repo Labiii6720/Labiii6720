@@ -3,7 +3,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { after, describe, it } from "node:test";
+import { describe, it } from "node:test";
 import { parseEnv as nodeParseEnv } from "node:util";
 import type { Feld, FeldArt } from "../src/setup.js"; // nur Typen: kein Import vor dem chdir
 
@@ -11,7 +11,8 @@ const projekt = resolve(import.meta.dirname, "..");
 const temp: string[] = [];
 const neuesTemp = (name: string) => { const d = mkdtempSync(join(tmpdir(), name)); temp.push(d); return d; };
 process.chdir(neuesTemp("jarvis-setup-"));
-after(() => { process.chdir(projekt); for (const d of temp) rmSync(d, { recursive: true, force: true }); });
+// Im Temp-Ordner bleiben, nie zurück ins Projekt (spätes Schreiben landet sonst in data/ des Projekts); Aufräumen beim Prozessende
+process.once("exit", () => { for (const d of temp) rmSync(d, { recursive: true, force: true }); });
 
 const s = await import("../src/setup.js");
 

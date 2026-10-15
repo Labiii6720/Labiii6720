@@ -1,16 +1,17 @@
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
-import { after, describe, it } from "node:test";
+import { join } from "node:path";
+import { describe, it } from "node:test";
 
 // Start mit von Hand verdorbenen Listen in data/: gültiges JSON, aber einzelne Einträge sind keine gültigen Einträge
 // (null, Zahl, Text, fehlende Pflichtfelder, falsche Typen). Der Import darf nicht werfen, die gültigen Einträge laufen,
 // und jede betroffene Datei erscheint mit Anzahl (nie Inhalt) in Startmeldung, /status und npm run check.
-const projekt = resolve(import.meta.dirname, "..");
 const temp = mkdtempSync(join(tmpdir(), "jarvis-listen-eintraege-"));
 process.chdir(temp);
-after(() => { process.chdir(projekt); rmSync(temp, { recursive: true, force: true }); });
+// Im Temp-Ordner bleiben, nie zurück ins Projekt: was nach den Root-after-Hooks noch schreibt (Wiederholungen mit
+// echten Timern, nicht abgewartete Meldungen), landet so nie in data/ des Projekts. Aufgeräumt wird beim Prozessende.
+process.once("exit", () => rmSync(temp, { recursive: true, force: true }));
 process.env.TELEGRAM_BOT_TOKEN = "123456789:ABCdefGHIjklMNOpqrSTUvwxYZ0123456789";
 process.env.TELEGRAM_CHAT_ID = "12345";
 process.env.FRIGATE_URL = "http://127.0.0.1:9";
@@ -117,7 +118,7 @@ describe("Listen in data/ mit ungültigen Einträgen beim Start", () => {
   it("npm run check: Befund «Listen» nennt jede Datei mit Anzahl", async () => {
     const [b] = await selbsttest(["Listen"]);
     assert.equal(b?.status, "fehler");
-    assert.equal(b!.info, "Zeitpläne 2 ungültig, Wachen 2 ungültig, Erinnerungen 2 ungültig, Vorgänge 2 ungültig, Postausgang 2 ungültig; Sicherung je .defekt");
+    assert.equal(b!.info, "ungültig: Zeitpläne 2, Wachen 2, Erinnerungen 2, Vorgänge 2, Postausgang 2; Sicherung je .defekt");
     assert.doesNotMatch(b!.info, /geheim/);
   });
 

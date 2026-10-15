@@ -1,4 +1,5 @@
 import { chmodSync, constants, copyFileSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { istNurLesen } from "./datei.js";
 import type { NotfallStatus } from "./notfall.js";
 import { todayKey } from "./time.js";
 
@@ -55,6 +56,11 @@ export interface State {
   naechsteZeitplanId?: number;
   /** nächste freie ID, gelöschte werden nie neu vergeben */
   naechsteWacheId?: number;
+  /**
+   * Untergrenze für neue Auftragsnummern (queue.ts): nach jedem Anlegen die nächste Nummer, dazu beim Start die über
+   * verworfenen Einträgen. Hält die Nummern auch dann eindeutig, wenn data/auftraege.json entfernt oder ersetzt wurde.
+   */
+  naechsteAuftragId?: number;
 }
 
 /** Vorhandene Sicherung mit genau diesem Inhalt (jeder Prozessstart – Dienst, check, setup, Auth-Skripte – lädt neu). */
@@ -127,14 +133,22 @@ function load(): State {
   }
 }
 
-/** Unlesbarer Zustand: wir wissen nicht, ob Notfall oder Notaus lief, also gilt der strengste Fall. */
+/**
+ * Unlesbarer Zustand: wir wissen nicht, ob Notfall oder Notaus lief, also gilt der strengste Fall.
+ * Nur lesen (npm run check): keine Sicherung, nur der Hinweis; sichern tut der Dienst beim Start.
+ */
 function sichererStart(ursache: string): State {
   stateNichtGeladen = true;
-  const kopie = sichereDefekt();
-  zustandDefekt = { ursache, ...(kopie ? { kopie } : {}) };
-  console.error(
-    `Zustand unlesbar (${ursache}) – ${kopie ? `Kopie unter ${kopie}` : "Sicherung fehlgeschlagen"}. Jarvis startet im Notfall und speichert keinen Zustand, bis ${FILE} repariert ist und Jarvis neu startet.`,
-  );
+  if (istNurLesen()) {
+    zustandDefekt = { ursache };
+    console.error(`Zustand unlesbar (${ursache}) – nur gelesen, keine Sicherung angelegt. Der Dienst startet damit im Notfall, bis ${FILE} repariert ist.`);
+  } else {
+    const kopie = sichereDefekt();
+    zustandDefekt = { ursache, ...(kopie ? { kopie } : {}) };
+    console.error(
+      `Zustand unlesbar (${ursache}) – ${kopie ? `Kopie unter ${kopie}` : "Sicherung fehlgeschlagen"}. Jarvis startet im Notfall und speichert keinen Zustand, bis ${FILE} repariert ist und Jarvis neu startet.`,
+    );
+  }
   return {
     paused: true,
     notfall: { aktiv: true, seit: new Date().toISOString(), grund: "state.json unlesbar" },

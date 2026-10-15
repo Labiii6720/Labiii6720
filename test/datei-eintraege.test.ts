@@ -1,15 +1,16 @@
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
-import { after, afterEach, beforeEach, describe, it } from "node:test";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, it } from "node:test";
 
 // ladeListe mit Eintragsprüfung (datei.ts): ungültige Einträge fallen weg, die Datei wird einmal gesichert, das Log
 // nennt nur die Anzahl, und die gültigen Einträge laufen weiter. Alles in einem eigenen Temp-Ordner.
-const projekt = resolve(import.meta.dirname, "..");
 const temp = mkdtempSync(join(tmpdir(), "jarvis-datei-eintraege-"));
 process.chdir(temp);
-after(() => { process.chdir(projekt); rmSync(temp, { recursive: true, force: true }); });
+// Im Temp-Ordner bleiben, nie zurück ins Projekt: was nach den Root-after-Hooks noch schreibt (Wiederholungen mit
+// echten Timern, nicht abgewartete Meldungen), landet so nie in data/ des Projekts. Aufgeräumt wird beim Prozessende.
+process.once("exit", () => rmSync(temp, { recursive: true, force: true }));
 
 const d = await import("../src/datei.js");
 
@@ -156,7 +157,7 @@ describe("ladeListe mit Eintragsprüfung", () => {
 
   it("fehlende Datei: leer, ohne Sperre, ohne Sicherung", () => {
     const g = d.ladeListe(DATEI, "Testliste", pruefe);
-    assert.deepEqual(g, { liste: [], nichtGeladen: false, verworfen: 0 });
+    assert.deepEqual(g, { liste: [], nichtGeladen: false, verworfen: 0, hoechsteId: 0 });
     assert.deepEqual(fehler, []);
   });
 
@@ -261,6 +262,8 @@ describe("Eintragsprüfungen der Listen", () => {
       ["data/erinnerungen.json", d.erinnerungEintrag],
       ["data/vorgaenge.json", d.vorgangEintrag],
       ["data/postausgang.json", d.postausgangEintrag],
+      ["data/auftraege.json", d.auftragEintrag],
+      ["data/rechnungen.json", d.rechnungEintrag],
     ]);
   });
 });

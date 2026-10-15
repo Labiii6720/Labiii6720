@@ -1,14 +1,15 @@
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
-import { after, beforeEach, describe, it } from "node:test";
+import { join } from "node:path";
+import { beforeEach, describe, it } from "node:test";
 
 // Vor dem Import: Temp-Verzeichnis (data/profil.json liegt relativ); nie echte Dienste
-const projekt = resolve(import.meta.dirname, "..");
 const temp = mkdtempSync(join(tmpdir(), "jarvis-profil-"));
 process.chdir(temp);
-after(() => { process.chdir(projekt); rmSync(temp, { recursive: true, force: true }); });
+// Im Temp-Ordner bleiben, nie zurück ins Projekt: was nach den Root-after-Hooks noch schreibt (Wiederholungen mit
+// echten Timern, nicht abgewartete Meldungen), landet so nie in data/ des Projekts. Aufgeräumt wird beim Prozessende.
+process.once("exit", () => rmSync(temp, { recursive: true, force: true }));
 process.env.ANTHROPIC_API_KEY = "sk-ant-test-nur-attrappe";
 globalThis.fetch = (async (eingabe: string | URL | Request) => {
   throw new Error(`unerwarteter Netzaufruf: ${String(eingabe instanceof Request ? eingabe.url : eingabe)}`);
@@ -211,6 +212,30 @@ describe("Speichern und Laden im neuen Format", () => {
       }
       assert.throws(() => b.saveProfil(), /Profil nicht geladen/);
       assert.equal(readFileSync(PROFIL, "utf8"), '{"werte":["Zweiter Vorfall"');
+    } finally {
+      console.error = origErr;
+      for (const n of sicherungen()) rmSync(join(data, n));
+      writeFileSync(PROFIL, orig);
+    }
+  });
+
+  it("Neustart mit unveränderter defekter Datei: keine weitere Kopie (gleiche Sicherung gilt)", async () => {
+    const orig = readFileSync(PROFIL, "utf8");
+    const origErr = console.error;
+    const log: string[] = [];
+    console.error = (...a: unknown[]) => { log.push(a.map(String).join(" ")); };
+    const data = join(temp, "data");
+    const sicherungen = () => readdirSync(data).filter((n) => n.startsWith("profil.json.defekt-")).sort();
+    try {
+      writeFileSync(join(data, "profil.json.defekt"), "alte Sicherung");
+      writeFileSync(PROFIL, '{"ziele":[{"id":7');
+      await import(new URL("../src/profil.js?gleich=1", import.meta.url).href);
+      await import(new URL("../src/profil.js?gleich=2", import.meta.url).href);
+      await import(new URL("../src/profil.js?gleich=3", import.meta.url).href);
+      const neue = sicherungen();
+      assert.equal(neue.length, 1, neue.join(", "));
+      assert.equal(readFileSync(join(data, neue[0]!), "utf8"), '{"ziele":[{"id":7');
+      assert.equal(log.filter((z) => z.includes(`Kopie unter data/${neue[0]}`)).length, 3, log.join("\n"));
     } finally {
       console.error = origErr;
       for (const n of sicherungen()) rmSync(join(data, n));

@@ -220,7 +220,15 @@ async function execute(use: Anthropic.ToolUseBlock, hooks: AgentHooks): Promise<
     const summary = tool.summary ? tool.summary(input) : `${tool.name} ${brief}`;
     // Kopie: das Original steht in der Chat-Historie und geht so an die API zurück
     const gespeichert = tool.festhalten ? tool.festhalten({ ...input }) : input;
-    const auftrag = createAuftrag({ tool: tool.name, input: gespeichert, stufe, summary });
+    let auftrag: Auftrag;
+    try {
+      auftrag = createAuftrag({ tool: tool.name, input: gespeichert, stufe, summary });
+    } catch (e) {
+      // Etwa data/auftraege.json beim Start unlesbar (Speichern gesperrt): Claude erfährt den Grund, der Lauf bricht nicht ab
+      const msg = schwaerze(e instanceof Error ? e.message : String(e));
+      audit("auftrag_nicht_angelegt", { tool: tool.name, stufe, fehler: msg.slice(0, 200) });
+      return { content: `Fehler: Auftrag nicht angelegt, nichts ausgeführt. ${msg}`, is_error: true };
+    }
     audit("auftrag_angelegt", { id: auftrag.id, tool: tool.name, stufe, input: brief });
     await hooks.onAuftrag(auftrag).catch((e) => console.error("Freigabe-Nachricht fehlgeschlagen:", e));
     return { content: `Auftrag #${auftrag.id} angelegt (Stufe ${stufe}). Wartet auf Freigabe des Nutzers, ist noch NICHT ausgeführt.` };

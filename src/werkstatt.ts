@@ -2,7 +2,7 @@ import { anthropic as claude, claudeAufruf, trackUsage } from "./claude.js";
 import { createHash } from "node:crypto";
 import { spawn, type ChildProcess, type ExecException, type ExecOptions, type SpawnOptions } from "node:child_process";
 import { accessSync, closeSync, constants, existsSync, mkdirSync, openSync, readFileSync, readSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { basename, relative, resolve, sep } from "node:path";
 import { config } from "./config.js";
 import { HttpFehler, mitWiederholung, schwaerze } from "./robust.js";
@@ -178,9 +178,9 @@ const q = (p: string) => `'${p.replace(/'/g, "'\\''")}'`;
 
 interface Lauf { ok: boolean; out: string; stdout: string; zeitlimit: boolean; code?: number | string | null }
 
-function ausfuehren(cmd: string, timeoutMs: number, env?: NodeJS.ProcessEnv): Promise<Lauf> {
+function ausfuehren(cmd: string, timeoutMs: number, env?: NodeJS.ProcessEnv, cwd = ROOT): Promise<Lauf> {
   return new Promise((done) => {
-    abhaengigkeiten.exec(cmd, { cwd: ROOT, timeout: timeoutMs, maxBuffer: 8 * 1024 * 1024, ...(env ? { env } : {}) }, (err, stdout, stderr) => {
+    abhaengigkeiten.exec(cmd, { cwd, timeout: timeoutMs, maxBuffer: 8 * 1024 * 1024, ...(env ? { env } : {}) }, (err, stdout, stderr) => {
       const out = [stdout, stderr].filter(Boolean).join("\n");
       // exec setzt killed bei Zeitlimit; ein Pufferüberlauf tötet den Prozess ebenfalls, ist aber kein Zeitlimit
       const zeitlimit = Boolean(err?.killed) && err?.code !== MAXBUFFER_CODE;
@@ -519,7 +519,8 @@ export function gcodeZusammenfassung(gcodePath: string): string {
 export async function pruefeSlicer(timeoutMs: number): Promise<string> {
   const bin = slicer();
   if (!bin) throw new Error(config.slicerPath ? `PrusaSlicer nicht gefunden oder nicht ausführbar: ${config.slicerPath} (muss auf das Programm zeigen, nicht auf den Ordner)` : "PrusaSlicer nicht gefunden (PRUSASLICER_PATH setzen)");
-  const r = await ausfuehren(`${slicerAufruf(bin)} --help`, timeoutMs, slicerUmgebung());
+  // npm run check legt den Arbeitsordner nicht an (nur lesen): --help braucht ihn nicht, dann im Temp-Ordner
+  const r = await ausfuehren(`${slicerAufruf(bin)} --help`, timeoutMs, slicerUmgebung(), existsSync(ROOT) ? ROOT : tmpdir());
   if (r.zeitlimit) throw new Error(`PrusaSlicer reagiert nicht (--help nach ${Math.round(timeoutMs / 1000)} s abgebrochen)`);
   // Nur die Versionszeile von --help zählt; Shell- und Loader-Fehler enthalten den Programmpfad und dürfen nicht als Kennung gelten
   const kennung = /^(?:PrusaSlicer|Slic3r)[- ]\d[^\s]*/m.exec(r.stdout)?.[0];

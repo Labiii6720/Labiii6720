@@ -1,11 +1,10 @@
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
-import { after, describe, it } from "node:test";
+import { join } from "node:path";
+import { describe, it } from "node:test";
 
 // Bestand aus 0.21: Wachen #1 und #2, state.json ohne Zähler naechsteWacheId
-const projekt = resolve(import.meta.dirname, "..");
 const temp = mkdtempSync(join(tmpdir(), "jarvis-wachen-bestand-"));
 mkdirSync(join(temp, "data"), { recursive: true });
 const STATE = join(temp, "data", "state.json");
@@ -14,7 +13,9 @@ const wache = (id: number, frage: string) => ({ id, kamera: "garten", frage, all
 writeFileSync(WACHEN, JSON.stringify([wache(1, "Ist das Tor offen?"), wache(2, "Liegt ein Paket da?")]));
 writeFileSync(STATE, JSON.stringify({ mode: "normal" }));
 process.chdir(temp);
-after(() => { process.chdir(projekt); rmSync(temp, { recursive: true, force: true }); });
+// Im Temp-Ordner bleiben, nie zurück ins Projekt: was nach den Root-after-Hooks noch schreibt (Wiederholungen mit
+// echten Timern, nicht abgewartete Meldungen), landet so nie in data/ des Projekts. Aufgeräumt wird beim Prozessende.
+process.once("exit", () => rmSync(temp, { recursive: true, force: true }));
 
 // Wie `npm run check` neben dem laufenden Dienst: state.js ist geladen, dann setzt der Dienst Notfall und Notaus
 const { state } = await import("../src/state.js");

@@ -4,7 +4,7 @@ import { audit, throttled } from "./audit.js";
 import { basename } from "node:path";
 import { addSystemNote, handleMessage, pausiertText, resetHistory, runAuftrag } from "./agent.js";
 import { config } from "./config.js";
-import { getAuftrag, offeneAuftraege, saveAuftraege, setStatus, type Auftrag } from "./queue.js";
+import { AUFTRAEGE_UNLESBAR, auftraegeNichtGeladen, getAuftrag, offeneAuftraege, saveAuftraege, setStatus, type Auftrag } from "./queue.js";
 import { save, state, zustandsHinweis, type Mode } from "./state.js";
 import { activeTools, ERINNERUNGEN_UNLESBAR, erinnerungenNichtGeladen, reminders, saveReminders } from "./tools.js";
 import { ZEITPLAENE_UNLESBAR, zeitplaeneNichtGeladen } from "./zeitplaene.js";
@@ -470,7 +470,11 @@ function freigabeText(a: Auftrag): string {
 }
 
 async function sendAuftrag(a: Auftrag): Promise<void> {
-  const id = await sendText(freigabeText(a), {
+  const text = freigabeText(a);
+  // Knöpfe nur unter dem letzten Teil: onCallback lässt nur die zuletzt gesendete Nachricht (a.messageId) gelten
+  const schnitt = Math.floor((text.length - 1) / 4000) * 4000;
+  if (schnitt > 0) await sendText(text.slice(0, schnitt));
+  const id = await sendText(text.slice(schnitt), {
     reply_markup: { inline_keyboard: [[{ text: "✅ Freigeben", callback_data: `ok:${a.id}` }, { text: "❌ Ablehnen", callback_data: `nein:${a.id}` }]] },
   });
   if (id) {
@@ -611,6 +615,8 @@ export async function denyAuftrag(a: Auftrag): Promise<string> {
   return `❌ #${a.id} abgelehnt.`;
 }
 
+const VERALTETER_KNOPF = "Dieser Knopf ist veraltet, Sir. /auftraege zeigt die aktuellen.";
+
 async function onCallback(cb: { id: string; data?: string; message?: { message_id: number } }): Promise<void> {
   // Kosmetik ohne Warten: bei gestörtem Senden dauerten die Wiederholungen sonst Minuten, und Kette und Freigabe stünden still.
   void apiRobust("answerCallbackQuery", { callback_query_id: cb.id }).catch(log);
@@ -636,6 +642,12 @@ async function onCallback(cb: { id: string; data?: string; message?: { message_i
   const a = getAuftrag(Number(idStr));
   if (!a) return void await sendText("Diesen Auftrag kenne ich nicht mehr.");
   if (cb.message) knoepfeEntfernen(cb.message.message_id);
+  // Knopf unter einer anderen Nachricht als der zuletzt gesendeten Freigabe: veraltet (etwa ein Auftrag mit derselben
+  // Nummer vor dem Ersetzen von data/auftraege.json). Nie freigeben, was unter einer anderen Zusammenfassung stand.
+  if (cb.message && a.messageId !== undefined && cb.message.message_id !== a.messageId) {
+    audit("knopf_veraltet", { id: a.id, aktion: action });
+    return void await sendText(VERALTETER_KNOPF);
+  }
   if (a.status !== "offen") return void await sendText(`#${a.id} ist bereits ${a.status}.`);
   if (inArbeit.has(a.id)) return void await sendText(laeuftBereits(a));
   if (a.gestartetAm && action === "ok") return void await sendText(ergebnisUnklar(a));
@@ -667,7 +679,8 @@ async function onCommand(cmd: string, arg: string): Promise<void> {
       );
     case "/auftraege": {
       const offen = offeneAuftraege();
-      if (offen.length === 0) return void await sendText("Keine offenen Aufträge.");
+      // Leere Liste heisst hier nicht «keine Aufträge»: der Bestand liegt in der unlesbaren Datei
+      if (offen.length === 0) return void await sendText(auftraegeNichtGeladen ? AUFTRAEGE_UNLESBAR : "Keine offenen Aufträge.");
       // Notfall: nur Anzahl und Nummern, keine Inhalte (Mailtexte, Termine) in einen womöglich kompromittierten Chat
       if (notfallAktiv()) {
         return void await sendText(`🚨 Notfall aktiv. Offene Aufträge: ${offen.length} (${offen.map((a) => `#${a.id}`).join(", ")}). Inhalte erst nach /entwarnung, Sir.`);
@@ -715,7 +728,16 @@ async function onCommand(cmd: string, arg: string): Promise<void> {
       const gesperrt = protokollGesperrt();
       if (gesperrt) return void await sendText(gesperrt);
       if (p.stufe === "auto") return void await sendText(await runProtokoll(name, hooks));
-      const a = createAuftrag({ tool: "protokoll_ausfuehren", input: { name }, stufe: p.stufe, summary: `Protokoll «${name}»: ${p.beschreibung}` });
+      // Leere Liste heisst nicht «keine Aufträge»: neue lege ich erst nach Reparatur und Neustart an
+      if (auftraegeNichtGeladen) return void await sendText(AUFTRAEGE_UNLESBAR);
+      let a: Auftrag;
+      try {
+        a = createAuftrag({ tool: "protokoll_ausfuehren", input: { name }, stufe: p.stufe, summary: `Protokoll «${name}»: ${p.beschreibung}` });
+      } catch (e) {
+        // Etwa die Speicherkarte voll: nichts angelegt (createAuftrag nimmt alles zurück), und der Nutzer erfährt es
+        log(e);
+        return void await sendText(`Protokoll «${name}» nicht angelegt, Sir: ${schwaerze(e instanceof Error ? e.message : String(e))}`);
+      }
       return sendAuftrag(a);
     }
     case "/notfall":
@@ -1234,6 +1256,7 @@ export function dateiHinweise(): string[] {
     ...(erinnerungenNichtGeladen ? [ERINNERUNGEN_UNLESBAR] : []),
     ...(vorgaengeNichtGeladen ? [VORGAENGE_UNLESBAR] : []),
     ...(postausgangNichtGeladen ? [POSTAUSGANG_UNLESBAR] : []),
+    ...(auftraegeNichtGeladen ? [AUFTRAEGE_UNLESBAR] : []),
     ...eintragsHinweise(),
   ];
 }

@@ -2,12 +2,13 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { after, describe, it } from "node:test";
+import { describe, it } from "node:test";
 
 // Vor dem Import: Temp-Verzeichnis (data/, cameras.json, protokolle.json werden relativ gelesen) und Attrappen
 const temp = mkdtempSync(join(tmpdir(), "jarvis-check-"));
 process.chdir(temp);
-after(() => rmSync(temp, { recursive: true, force: true }));
+// Im Temp-Ordner bleiben bis zum Prozessende (spätes Schreiben landet nie im Projekt), dann aufräumen
+process.once("exit", () => rmSync(temp, { recursive: true, force: true }));
 process.env.TELEGRAM_BOT_TOKEN = "123456789:ABCdefGHIjklMNOpqrSTUvwxYZ0123456789";
 process.env.TELEGRAM_CHAT_ID = "12345";
 
@@ -43,7 +44,7 @@ describe("selbsttest(nur)", () => {
   it("Listen ohne Dateien in data/: ok mit Anzahl, ohne Netz und ohne Sicherung", async () => {
     aufrufe = 0;
     const b = await selbsttest(["Listen"]);
-    assert.deepEqual(b, [{ name: "Listen", status: "ok", info: "5 Listen in data/ lesbar, 0 gültige Einträge" }]);
+    assert.deepEqual(b, [{ name: "Listen", status: "ok", info: "7 Listen in data/ lesbar, 0 gültige Einträge" }]);
     assert.equal(aufrufe, 0);
   });
 

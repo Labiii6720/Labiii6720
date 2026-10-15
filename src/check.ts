@@ -26,13 +26,16 @@ const sources = () => import("./sources.js");
 const TEST_MS = Number(process.env.JARVIS_CHECK_TIMEOUT_MS);
 const PRUEF_MS = TEST_MS > 0 ? TEST_MS : 10_000;
 
+/** Höchstlänge eines Fehlertexts im Befund (pruefe kürzt darauf; listenBefund bleibt darunter). */
+const BEFUND_MAX = 140;
+
 async function pruefe(name: string, eingerichtet: boolean, test: () => Promise<string>): Promise<Befund> {
   if (!eingerichtet) return { name, status: "fehlt", info: "nicht eingerichtet" };
   try {
     return { name, status: "ok", info: await test() };
   } catch (e) {
     // Erst schwärzen, dann kürzen: Fehlertexte können URLs mit Zugangsdaten enthalten und gehen per /check nach Telegram.
-    return { name, status: "fehler", info: schwaerze(e instanceof Error ? e.message : String(e)).slice(0, 140) };
+    return { name, status: "fehler", info: schwaerze(e instanceof Error ? e.message : String(e)).slice(0, BEFUND_MAX) };
   }
 }
 
@@ -163,23 +166,22 @@ export async function selbsttest(nur?: string[], beiBefund?: (b: Befund) => void
     const ohneFrage = zustaende.filter((z) => z.grund === "Frage fehlt").length;
     return `${aktiv} Wache(n) aktiv${ohneTakt ? `, ${ohneTakt} ohne gültiges Intervall (laufen nicht)` : ""}${ohneKamera ? `, ${ohneKamera} auf fehlender Kamera (laufen nicht)` : ""}${ohneBedingung ? `, ${ohneBedingung} mit ungültiger Bedingung «nur_wenn» (laufen nicht)` : ""}${ohneFrage ? `, ${ohneFrage} ohne Frage (laufen nicht)` : ""}`;
   });
-  // Listen in data/ nur lesen (keine Sicherung, kein Laden der schweren Module): unlesbar oder mit ungültigen Einträgen,
-  // die der Dienst beim Start überspringt. Dazu die übersprungenen Einträge in cameras.json (gezählt beim Laden der Kameras).
+  // Listen in data/ nur lesen (untersucheListe: keine Sicherung, kein Log): unlesbar oder mit ungültigen Einträgen, die
+  // der Dienst beim Start überspringt. Dazu die beim Laden übersprungenen Einträge in cameras.json, die Jarvis nie ändert.
   await lauf("Listen", true, async () => {
     const d = await import("./datei.js");
     await import("./cameras.js");
-    const maengel: string[] = [];
+    const unlesbar: string[] = [];
+    const ungueltig: { name: string; anzahl: number }[] = [];
     let eintraege = 0;
     for (const l of d.LISTEN) {
       const u = d.untersucheListe(l.datei, l.pruefe);
       eintraege += u.eintraege;
-      // Knapp: Befund-Texte werden auf 140 Zeichen gekürzt, und alle fünf Listen sollen hineinpassen
-      if (u.zustand === "unlesbar") maengel.push(`${l.name} unlesbar`);
-      else if (u.verworfen) maengel.push(`${l.name} ${u.verworfen} ungültig`);
+      if (u.zustand === "unlesbar") unlesbar.push(l.name);
+      else if (u.verworfen) ungueltig.push({ name: l.name, anzahl: u.verworfen });
     }
     const kameras = d.uebersprungenAnzahl("cameras.json");
-    if (kameras) maengel.push(`cameras.json ${kameras} ungültig`);
-    if (maengel.length) throw new Error(`${maengel.join(", ")}; Sicherung je .defekt`);
+    if (unlesbar.length || ungueltig.length || kameras) throw new Error(listenBefund(unlesbar, ungueltig, kameras));
     return `${d.LISTEN.length} Listen in data/ lesbar, ${eintraege} gültige Einträge`;
   });
   await lauf("Protokolle", true, async () => `${Object.keys((await import("./protokolle.js")).protokolle).length} Protokoll(e)`);
@@ -201,6 +203,24 @@ export async function selbsttest(nur?: string[], beiBefund?: (b: Befund) => void
     beiBefund?.(befund);
   }
   return b;
+}
+
+/**
+ * Befund «Listen» lesbar in BEFUND_MAX Zeichen, statt mitten im Wort abgeschnitten: zuerst mit Anzahl je Liste, sonst nur
+ * die Namen, sonst nur die Zahl der Listen. Eine Sicherung (.defekt) legt nur der Dienst für data/ an, nie für cameras.json.
+ */
+export function listenBefund(unlesbar: string[], ungueltig: { name: string; anzahl: number }[], kameras: number): string {
+  const cam = kameras ? [`cameras.json ${kameras} ungültig (von Hand reparieren)`] : [];
+  const sicherung = unlesbar.length || ungueltig.length ? ["Sicherung je .defekt"] : [];
+  const text = (u: string | undefined, g: string | undefined) =>
+    [...(u ? [`unlesbar: ${u}`] : []), ...(g ? [`ungültig: ${g}`] : []), ...sicherung, ...cam].join("; ");
+  const anzahl = (n: number) => (n ? `${n} ${n === 1 ? "Liste" : "Listen"}` : undefined);
+  const stufen = [
+    text(unlesbar.join(", ") || undefined, ungueltig.map((x) => `${x.name} ${x.anzahl}`).join(", ") || undefined),
+    text(unlesbar.join(", ") || undefined, ungueltig.map((x) => x.name).join(", ") || undefined),
+    text(anzahl(unlesbar.length), anzahl(ungueltig.length)),
+  ];
+  return stufen.find((t) => t.length <= BEFUND_MAX) ?? stufen.at(-1)!;
 }
 
 /** Liest `--nur a,b` (oder `--nur=a,b`) aus argv; ohne Flag undefined. */

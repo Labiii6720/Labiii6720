@@ -1,15 +1,18 @@
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import { after, describe, it } from "node:test";
 
 // Von Hand beschädigte data/zeitplaene.json: gültiges JSON und eine Liste, aber ein Eintrag ist kein gültiger Zeitplan
 // (kein Objekt, Pflichtfeld fehlt oder hat den falschen Typ). Früher brach schon der Import ab (z.id auf null) – und mit
 // ihm der ganze Dienst samt Telegram und Notaus; danach galt die ganze Datei als unlesbar. Jetzt fällt nur der Eintrag weg.
-const projekt = resolve(import.meta.dirname, "..");
+// Arbeitsverzeichnis ist durchgehend ein Temp-Ordner (nie das Projekt): auch ein spätes Schreiben landet nicht in data/ des Projekts
+const basis = mkdtempSync(join(tmpdir(), "jarvis-zeitplaene-eintrag-basis-"));
+process.chdir(basis);
+process.once("exit", () => rmSync(basis, { recursive: true, force: true }));
 const origErr = console.error;
-after(() => { console.error = origErr; process.chdir(projekt); });
+after(() => { console.error = origErr; });
 
 type Modul = typeof import("../src/zeitplaene.js");
 
@@ -68,7 +71,7 @@ describe("data/zeitplaene.json mit ungültigem Eintrag", () => {
         assert.doesNotThrow(() => mod.pruefeZeitplaeneSchreibbar());
         mod.saveZeitplaene();
       } finally {
-        process.chdir(projekt);
+        process.chdir(basis);
       }
       assert.deepEqual(JSON.parse(readFileSync(datei, "utf8")), gueltig);
       assert.equal(readFileSync(sicherung, "utf8"), inhalt, "die Sicherung bewahrt den verworfenen Eintrag");

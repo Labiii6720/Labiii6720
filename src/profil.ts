@@ -1,4 +1,5 @@
-import { chmodSync, constants, copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { istNurLesen, sichereDefekt } from "./datei.js";
 import { todayKey } from "./time.js";
 
 /**
@@ -39,8 +40,6 @@ export const FAKT_MAX_ZEICHEN = 200;
 const FILE = "data/profil.json";
 /** Sicherung der Datei im alten Format (fakten: string[]), einmalig vor der ersten Umstellung */
 const SICHERUNG_ALT = "data/profil.vor-0.17.json";
-/** Unlesbare Profil-Datei wird hierhin kopiert; liegt dort schon eine ältere Sicherung, mit Zeitstempel daneben */
-const SICHERUNG_DEFEKT = "data/profil.json.defekt";
 
 type Obj = Record<string, unknown>;
 const istObj = (x: unknown): x is Obj => typeof x === "object" && x !== null && !Array.isArray(x);
@@ -126,38 +125,12 @@ export function hoechsteFaktId(p: Pick<Profil, "fakten" | "faktIdMax">): number 
 }
 
 function sichere(nach: string): void {
+  if (istNurLesen()) return; // npm run check: die Umstellung (und ihre Sicherung) macht erst der Dienst
   try {
     mkdirSync("data", { recursive: true, mode: 0o700 });
     if (!existsSync(nach)) copyFileSync(FILE, nach);
   } catch (e) {
     console.error("Profil-Sicherung:", e instanceof Error ? e.message : e);
-  }
-}
-
-/**
- * Kopiert die unlesbare Profil-Datei unter einen freien Namen (eine ältere Sicherung bleibt unberührt, 0o600).
- * Gibt den Pfad der Kopie zurück, oder undefined, wenn sie nicht gelang.
- */
-function sichereDefekt(): string | undefined {
-  try {
-    mkdirSync("data", { recursive: true, mode: 0o700 });
-    const stempel = new Date().toISOString().replace(/[:.]/g, "-");
-    for (let n = 0; n < 100; n++) {
-      const nach = n === 0 ? SICHERUNG_DEFEKT : `${SICHERUNG_DEFEKT}-${stempel}${n > 1 ? `-${n}` : ""}`;
-      try {
-        // EXCL: nie eine vorhandene Sicherung überschreiben, auch nicht bei gleichzeitigem Start
-        copyFileSync(FILE, nach, constants.COPYFILE_EXCL);
-      } catch (e) {
-        if ((e as NodeJS.ErrnoException).code === "EEXIST") continue;
-        throw e;
-      }
-      chmodSync(nach, 0o600);
-      return nach;
-    }
-    throw new Error("kein freier Name für die Sicherung");
-  } catch (e) {
-    console.error("Profil-Sicherung fehlgeschlagen:", e instanceof Error ? e.message : e);
-    return undefined;
   }
 }
 
@@ -189,7 +162,12 @@ export const profil: Profil = (() => {
     return normalisiereProfil(roh);
   } catch {
     profilNichtGeladen = true;
-    const kopie = sichereDefekt();
+    if (istNurLesen()) {
+      console.error(`Profil unlesbar – nur gelesen, keine Sicherung angelegt. Der Dienst startet damit mit leerem Profil, bis ${FILE} repariert ist.`);
+      return normalisiereProfil({});
+    }
+    // Unter data/profil.json.defekt (belegt: mit Zeitstempel daneben); derselbe Inhalt wird nicht bei jedem Start neu kopiert
+    const kopie = sichereDefekt(FILE, { gleicheWiederverwenden: true });
     console.error(
       `Profil unlesbar – ${kopie ? `Kopie unter ${kopie}` : "Sicherung fehlgeschlagen"}. Jarvis startet mit leerem Profil und speichert es nicht, bis ${FILE} repariert ist und Jarvis neu startet.`,
     );
