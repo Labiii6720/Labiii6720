@@ -1,5 +1,5 @@
 import { mkdirSync, renameSync, writeFileSync } from "node:fs";
-import { gesperrtText, ladeListe, sichereDefekt } from "./datei.js";
+import { gesperrtText, ladeListe, zeitplanEintrag } from "./datei.js";
 import { save, state } from "./state.js";
 import { hhmm, imFenster, minutesOfDay, todayKey } from "./time.js";
 
@@ -19,34 +19,25 @@ export interface Zeitplan {
 }
 
 const FILE = "data/zeitplaene.json";
-/** Nur Objekte gelten als Eintrag; null, Zahlen, Texte oder Listen (Handeingriff) machen die Datei unlesbar. */
-const istZeitplanEintrag = (z: unknown): boolean => z !== null && typeof z === "object" && !Array.isArray(z);
 
 /**
- * ladeListe prüft nur, ob es eine Liste ist. Ein Nicht-Objekt im Bestand liesse schon den Import abstürzen (z.id), also
- * den ganzen Dienst samt Telegram und Notaus: Die Datei gilt dann wie unlesbares JSON als defekt (Sicherung, Sperre).
+ * Einträge prüft ladeListe (zeitplanEintrag in datei.ts): Nicht-Objekte, fehlende id oder name/zeit/tage/auftrag ohne
+ * Text fallen beim Laden weg (Sicherung .defekt, Hinweis); sonst bräche schon der Import ab (z.id auf null) und mit ihm
+ * der ganze Dienst samt Telegram und Notaus. Ungültige Werte mit richtigem Typ bleiben stehen und laufen nicht (laeuft).
  */
-const geladen = ((): { liste: Zeitplan[]; nichtGeladen: boolean } => {
-  const roh = ladeListe<unknown>(FILE, "Zeitpläne");
-  if (roh.nichtGeladen || roh.liste.every(istZeitplanEintrag)) return roh as { liste: Zeitplan[]; nichtGeladen: boolean };
-  const kopie = sichereDefekt(FILE);
-  console.error(
-    `Zeitpläne unlesbar (ungültiger Eintrag) – ${kopie ? `Kopie unter ${kopie}` : "Sicherung fehlgeschlagen"}. Jarvis startet ohne ${FILE} und speichert die Datei nicht, bis sie repariert ist und Jarvis neu startet.`,
-  );
-  return { liste: [], nichtGeladen: true };
-})();
+const geladen = ladeListe(FILE, "Zeitpläne", zeitplanEintrag);
 export const zeitplaene: Zeitplan[] = geladen.liste;
-/** true, wenn data/zeitplaene.json vorhanden, aber unlesbar war: keine Zeitpläne, und nichts wird gespeichert. */
+/** true, wenn data/zeitplaene.json vorhanden, aber unlesbar war: keine Zeitpläne, und nichts wird gespeichert. Übersprungene Einträge sperren nicht. */
 export const zeitplaeneNichtGeladen = geladen.nichtGeladen;
 export const ZEITPLAENE_UNLESBAR =
   "⚠️ data/zeitplaene.json war beim Start unlesbar, Sir (Sicherung, sofern möglich, unter data/zeitplaene.json.defekt). Die Zeitpläne laufen nicht, und ich ändere keine, bis die Datei repariert ist und ich neu gestartet bin.";
 
 /** Vor jeder Änderung an zeitplaene aufrufen: wirft, solange die Datei beim Start unlesbar war. */
 export function pruefeZeitplaeneSchreibbar(): void {
-  if (zeitplaeneNichtGeladen) throw new Error(gesperrtText(FILE, "keine Zeitpläne"));
+  if (zeitplaeneNichtGeladen) throw new Error(gesperrtText(FILE, "die Zeitpläne"));
 }
 
-/** Gültige IDs der Zeitpläne; von Hand bearbeitete Einträge ohne Objekt-Form zählen nicht. */
+/** Gültige IDs der Zeitpläne (zweite Verteidigung: die Ladeprüfung lässt nur Einträge mit gültiger id durch). */
 function zeitplanIds(): number[] {
   return zeitplaene.flatMap((z) => (z && typeof z === "object" && Number.isSafeInteger(z.id) ? [z.id] : []));
 }
@@ -124,11 +115,21 @@ function tagPasst(z: Zeitplan, now: Date): boolean {
 }
 
 /**
- * Kann der Eintrag überhaupt laufen? Von Hand bearbeitete Einträge ohne zeit/tage (sonst Absturz im Scheduler-Takt) oder
- * ohne Auftrag (sonst ein bezahlter Claude-Lauf mit dem Auftrag «undefined») sind nie fällig und haben keinen nächsten Lauf.
+ * Uhrzeit H:MM oder HH:MM mit Stunde 0–23 und Minute 0–59 (dieselbe Regel wie naechsterLauf). Sonst liefe «07:60» im
+ * Scheduler um 08:00, während die Kommandozentrale keinen nächsten Lauf zeigt.
+ */
+function uhrzeitGueltig(zeit: string): boolean {
+  const m = /^(\d{1,2}):(\d{2})$/.exec(zeit.trim());
+  return m !== null && Number(m[1]) <= 23 && Number(m[2]) <= 59;
+}
+
+/**
+ * Kann der Eintrag überhaupt laufen? Zweite Verteidigung neben der Ladeprüfung (zeitplanEintrag): ohne zeit/tage als
+ * Text (sonst Absturz im Scheduler-Takt), mit ungültiger Uhrzeit oder ohne Auftrag (sonst ein bezahlter Claude-Lauf mit
+ * dem Auftrag «undefined» bzw. Leertext) ist ein Zeitplan nie fällig und hat keinen nächsten Lauf.
  */
 function laeuft(z: Zeitplan): boolean {
-  return typeof z.zeit === "string" && typeof z.tage === "string" && typeof z.auftrag === "string" && z.auftrag.trim() !== "";
+  return typeof z.zeit === "string" && typeof z.tage === "string" && typeof z.auftrag === "string" && z.auftrag.trim() !== "" && uhrzeitGueltig(z.zeit);
 }
 
 /** Genau zur Minute (Fenster 1 Minute) – bleibt für Kompatibilität. */

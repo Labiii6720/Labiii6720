@@ -4,9 +4,9 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { after, describe, it } from "node:test";
 
-// README ↔ Verhalten bei einem Eintrag, der kein Objekt ist (Handeingriff, etwa null):
-// in «wachen» von cameras.json fällt nur dieser Eintrag weg, data/wachen.json und data/zeitplaene.json
-// gelten dagegen als ganz unlesbar. Die README darf nicht «nur dieser Eintrag fällt weg» für alle versprechen.
+// README ↔ Verhalten bei einem ungültigen Eintrag (Handeingriff, etwa null): in «wachen» von cameras.json,
+// data/wachen.json und data/zeitplaene.json fällt nur dieser Eintrag weg (bei den Listen in data/ mit Sicherung),
+// die übrigen laufen. Ganz unlesbar ist eine Datei nur noch bei kaputtem JSON, falschen Rechten oder ohne Liste.
 const projekt = resolve(import.meta.dirname, "..");
 const readme = readFileSync(join(projekt, "README.md"), "utf8");
 const temp = mkdtempSync(join(tmpdir(), "jarvis-readme-eintrag-"));
@@ -34,6 +34,7 @@ console.error = () => {};
 const kameras = await import("../src/cameras.js");
 const zeitplaene = await import("../src/zeitplaene.js");
 console.error = origErr;
+const { eintragsHinweise } = await import("../src/datei.js");
 
 /** Absatz der README, der mit `anfang` beginnt (bis zur nächsten Leerzeile) */
 function absatz(anfang: string): string {
@@ -43,27 +44,39 @@ function absatz(anfang: string): string {
   return readme.slice(start, ende < 0 ? undefined : ende);
 }
 
-describe("README: Einträge ohne Objekt-Form", () => {
-  it("Verhalten: cameras.json überspringt den Eintrag, data/wachen.json und data/zeitplaene.json gelten als unlesbar", () => {
+describe("README: ungültige Einträge", () => {
+  it("Verhalten: überall fällt nur der Eintrag weg; data/wachen.json und data/zeitplaene.json mit Sicherung, ohne Sperre", () => {
     assert.equal(kameras.camerasNichtGeladen, false, "cameras.json bleibt geladen");
-    assert.equal(kameras.wachenNichtGeladen, true, "data/wachen.json gilt als unlesbar");
-    assert.equal(zeitplaene.zeitplaeneNichtGeladen, true, "data/zeitplaene.json gilt als unlesbar");
+    assert.deepEqual(kameras.allWachen().map((w) => w.frage), ["Tor offen?", "Paket da?"]);
+    assert.equal(kameras.wachenNichtGeladen, false, "data/wachen.json sperrt nicht");
+    assert.equal(zeitplaene.zeitplaeneNichtGeladen, false, "data/zeitplaene.json sperrt nicht");
+    assert.deepEqual(zeitplaene.zeitplaene.map((z) => z.id), [1]);
     assert.equal(existsSync(join(temp, "data", "wachen.json.defekt")), true, "Sicherung von wachen.json");
     assert.equal(existsSync(join(temp, "data", "zeitplaene.json.defekt")), true, "Sicherung von zeitplaene.json");
+    assert.equal(existsSync(join(temp, "cameras.json.defekt")), false, "cameras.json wird nie gesichert (Jarvis ändert sie nicht)");
+    const hinweise = eintragsHinweise();
+    for (const datei of ["cameras.json", "data/wachen.json", "data/zeitplaene.json"]) {
+      assert.ok(hinweise.some((h) => h.startsWith(`⚠️ ${datei}: 1 ungültiger Eintrag beim Start übersprungen`)), datei);
+    }
   });
 
-  it("Abschnitt 12 verspricht das Wegfallen einzelner Einträge nur für cameras.json, nicht für data/wachen.json", () => {
+  it("Abschnitt 12 verspricht das Wegfallen einzelner Einträge für cameras.json und data/wachen.json, ohne Sperre", () => {
     const text = absatz("Von Hand bearbeitet:");
-    assert.doesNotMatch(text, /Dasselbe gilt für Wachen-Einträge ohne Objekt-Form\./, "alte, zu pauschale Aussage");
-    assert.match(text, /unter `wachen` in `cameras\.json`, die kein Objekt sind/);
-    assert.match(text, /`data\/wachen\.json` oder `data\/zeitplaene\.json`[^.]*die ganze Datei unlesbar/);
-    assert.match(text, /Speichern ist gesperrt/);
-    assert.match(text, /«Unlesbare Dateien»/);
+    assert.doesNotMatch(text, /die ganze Datei unlesbar/, "alte Aussage (Sperre bei einem Eintrag)");
+    assert.match(text, /unter `wachen` in `cameras\.json` prüft Jarvis wie die in `data\/wachen\.json`/);
+    assert.match(text, /nur dieser Eintrag, die übrigen Wachen laufen weiter/);
+    assert.match(text, /«Ungültige Einträge» in Abschnitt 20/);
   });
 
-  it("«Unlesbare Dateien» nennt den Eintrag ohne Objekt-Form als Ursache, nur für wachen.json und zeitplaene.json", () => {
-    const text = absatz("**Unlesbare Dateien.**");
-    assert.match(text, /bei `wachen\.json` und `zeitplaene\.json` auch ein einzelner Eintrag, der kein Objekt ist/);
-    assert.doesNotMatch(text, /Kaputtes JSON wird zuerst/, "auch gültiges JSON mit null-Eintrag wird gesichert");
+  it("«Unlesbare Dateien» nennt keinen einzelnen Eintrag mehr als Ursache; «Ungültige Einträge» beschreibt Sicherung und Speichern", () => {
+    const unlesbar = absatz("**Unlesbare Dateien.**");
+    assert.doesNotMatch(unlesbar, /ein einzelner Eintrag/);
+    const ungueltig = absatz("**Ungültige Einträge.**");
+    assert.match(ungueltig, /überspringt Jarvis nur diesen Eintrag/);
+    assert.match(ungueltig, /`<datei>\.defekt`/);
+    assert.match(ungueltig, /Speichern bleibt erlaubt/);
+    assert.match(ungueltig, /nie den Inhalt/);
+    assert.match(ungueltig, /Scheitert die Sicherung, gilt die Datei wie eine unlesbare/);
+    assert.match(ungueltig, /«Listen»/);
   });
 });

@@ -1,5 +1,5 @@
 import { appendFileSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { gesperrtText, ladeListe } from "./datei.js";
+import { erinnerungEintrag, gesperrtText, ladeListe } from "./datei.js";
 import { relative } from "node:path";
 import { config } from "./config.js";
 import { createDraft, readMail, searchMails, sendMail } from "./gmail.js";
@@ -73,14 +73,15 @@ const num = (desc: string) => ({ type: "number", description: desc });
 
 export interface Reminder { at: string; text: string }
 const REMINDER_FILE = "data/erinnerungen.json";
-const erinnerungenGeladen = ladeListe<Reminder>(REMINDER_FILE, "Erinnerungen");
+// Ohne lesbares «at» oder Text als «text» fällt ein Eintrag beim Laden weg (erinnerungEintrag): sonst nie fällig bzw. «⏰ undefined»
+const erinnerungenGeladen = ladeListe<Reminder>(REMINDER_FILE, "Erinnerungen", erinnerungEintrag);
 export const reminders: Reminder[] = erinnerungenGeladen.liste;
 /** true, wenn data/erinnerungen.json vorhanden, aber unlesbar war: keine Erinnerungen, und nichts wird gespeichert. */
 export const erinnerungenNichtGeladen = erinnerungenGeladen.nichtGeladen;
 export const ERINNERUNGEN_UNLESBAR =
   "⚠️ data/erinnerungen.json war beim Start unlesbar, Sir (Sicherung, sofern möglich, unter data/erinnerungen.json.defekt). Die Erinnerungen darin kommen nicht, und ich lege keine neuen an, bis die Datei repariert ist und ich neu gestartet bin.";
 export function pruefeErinnerungenSchreibbar(): void {
-  if (erinnerungenNichtGeladen) throw new Error(gesperrtText(REMINDER_FILE, "keine Erinnerungen"));
+  if (erinnerungenNichtGeladen) throw new Error(gesperrtText(REMINDER_FILE, "die Erinnerungen"));
 }
 export function saveReminders(): void {
   pruefeErinnerungenSchreibbar();

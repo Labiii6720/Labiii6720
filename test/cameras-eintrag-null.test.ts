@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { after, describe, it } from "node:test";
@@ -20,14 +20,17 @@ process.env.VERDICHTUNG = "off";
 
 mkdirSync(join(temp, "data"), { recursive: true });
 writeFileSync(join(temp, "data", "routinen.json"), "{}");
-// Von Hand bearbeitet: Tippfehler im Feldnamen, also kein «alle_minuten»; dazu Wachen auf der verworfenen Kamera «garten»
-// (gültiges Intervall) und auf einer Kamera, die es nie gab (ohne Intervall)
+// Von Hand bearbeitet: Tippfehler im Feldnamen, also kein «alle_minuten» (fällt beim Laden weg, mit Sicherung); dazu
+// Wachen mit ungültigem Intervall als Zahl (bleiben stehen, laufen nicht), auf der verworfenen Kamera «garten» (gültiges
+// Intervall) und auf einer Kamera, die es nie gab (ohne gültiges Intervall)
 writeFileSync(
   join(temp, "data", "wachen.json"),
   JSON.stringify([
     { id: 1, kamera: "hof", frage: "Geheime Frage A?", alle_minuen: 30 },
     { id: 2, kamera: "garten", frage: "Person im Garten?", alle_minuten: 10 },
-    { id: 3, kamera: "toString", frage: "Prototyp?" },
+    { id: 3, kamera: "toString", frage: "Prototyp ohne Intervall?" },
+    { id: 4, kamera: "hof", frage: "Geheime Frage C?", alle_minuten: 0 },
+    { id: 5, kamera: "toString", frage: "Prototyp?", alle_minuten: -5 },
   ]),
 );
 writeFileSync(
@@ -35,7 +38,11 @@ writeFileSync(
   JSON.stringify({
     garten: null,
     keller: 7,
-    hof: { frigate: "hof_cam", beschreibung: "Innenhof", wachen: [{ frage: "Geheime Frage B?", alle_minuten: "oft" }, { frage: "Tor offen?", alle_minuten: 10 }, null] },
+    hof: {
+      frigate: "hof_cam",
+      beschreibung: "Innenhof",
+      wachen: [{ frage: "Geheime Frage B?", alle_minuten: "oft" }, { frage: "Geheime Frage D?", alle_minuten: 0 }, { frage: "Tor offen?", alle_minuten: 10 }, null],
+    },
   }),
 );
 
@@ -50,6 +57,7 @@ const origErr = console.error;
 console.error = (...a: unknown[]) => { fehler.push(a.map(String).join(" ")); };
 const kameras = await import("../src/cameras.js");
 console.error = origErr;
+const { eintragsHinweise } = await import("../src/datei.js");
 const { onCameraEvent } = await import("../src/watch.js");
 const { statusJson, wachenJson } = await import("../src/dashboard.js");
 const { selbsttest } = await import("../src/check.js");
@@ -96,12 +104,22 @@ describe("cameras.json mit einer Kamera, die kein Objekt ist", () => {
 });
 
 describe("Wachen ohne gültiges «alle_minuten»", () => {
-  it("werden beim Laden gemeldet (Herkunft und Kamera, nie die Frage) und nicht gelöscht", () => {
+  it("mit ungültiger Zahl: beim Laden gemeldet (Herkunft und Kamera, nie die Frage) und nicht gelöscht", () => {
     assert.ok(fehler.some((f) => f.startsWith("cameras.json: 1 Wache(n) bei Kamera «hof» ohne gültiges «alle_minuten»")), JSON.stringify(fehler));
     assert.ok(fehler.some((f) => f.startsWith("data/wachen.json: 1 Wache(n) bei Kamera «hof» ohne gültiges «alle_minuten»")), JSON.stringify(fehler));
-    assert.ok(!fehler.some((f) => f.includes("Geheime Frage")), "kein Dateiinhalt im Log");
-    assert.equal(kameras.dynamicWachen.length, 3);
+    assert.ok(!fehler.some((f) => f.includes("Geheime Frage") || f.includes("Prototyp")), "kein Dateiinhalt im Log");
+    assert.deepEqual(kameras.dynamicWachen.map((w) => w.id), [2, 4, 5]);
     assert.equal(kameras.wachenNichtGeladen, false);
+  });
+
+  it("ohne «alle_minuten» als Zahl (Tippfehler, «oft», null): beim Laden übersprungen, gezählt, gesichert, Hinweis ohne Inhalt", () => {
+    assert.ok(fehler.some((f) => f.startsWith("Wachen: 2 ungültige Einträge übersprungen (Sicherung unter data/wachen.json.defekt)")), JSON.stringify(fehler));
+    assert.ok(fehler.some((f) => f.startsWith("cameras.json: 2 ungültige(r) Wachen-Eintrag/Einträge bei Kamera «hof» übersprungen")), JSON.stringify(fehler));
+    assert.ok(existsSync(join(temp, "data", "wachen.json.defekt")));
+    const hinweise = eintragsHinweise();
+    assert.ok(hinweise.some((h) => h.startsWith("⚠️ cameras.json: 4 ungültige Einträge beim Start übersprungen, Sir.")), hinweise.join("\n"));
+    assert.ok(hinweise.some((h) => h.startsWith("⚠️ data/wachen.json: 2 ungültige Einträge beim Start übersprungen, Sir (Sicherung unter data/wachen.json.defekt)")), hinweise.join("\n"));
+    assert.ok(!hinweise.some((h) => h.includes("Geheime Frage") || h.includes("Prototyp")));
   });
 
   it("taktMinuten: Zahl oder Ziffernfolge > 0 (mindestens 1), sonst undefined", () => {
@@ -118,15 +136,15 @@ describe("Wachen ohne gültiges «alle_minuten»", () => {
     const wachen = (wa.body as { wachen: { frage: string; alle_minuten: unknown; laeuft: boolean; grund?: string }[] }).wachen;
     // Auf fehlender oder verworfener Kamera läuft eine Wache nicht (wachenTick überspringt sie); das Intervall bleibt stehen
     assert.deepEqual(wachen.map((w) => [w.frage, w.alle_minuten, w.laeuft, w.grund]), [
-      ["Geheime Frage B?", null, false, "Intervall fehlt"],
+      ["Geheime Frage D?", null, false, "Intervall fehlt"],
       ["Tor offen?", 10, true, undefined],
-      ["Geheime Frage A?", null, false, "Intervall fehlt"],
       ["Person im Garten?", 10, false, "Kamera fehlt"],
+      ["Geheime Frage C?", null, false, "Intervall fehlt"],
       ["Prototyp?", null, false, "Kamera und Intervall fehlen"],
     ]);
     const st = antwort();
     statusJson(req(), st as unknown as Res);
-    assert.deepEqual((st.body as { wachen: { alle_minuten: unknown; laeuft: boolean }[] }).wachen.map((w) => [w.alle_minuten, w.laeuft]), [[null, false], [10, true], [null, false], [10, false], [null, false]]);
+    assert.deepEqual((st.body as { wachen: { alle_minuten: unknown; laeuft: boolean }[] }).wachen.map((w) => [w.alle_minuten, w.laeuft]), [[null, false], [10, true], [10, false], [null, false], [null, false]]);
   });
 
   it("npm run check zählt nur laufende Wachen als aktiv und nennt die übrigen (Intervall bzw. Kamera fehlt)", async () => {
@@ -152,9 +170,9 @@ describe("Wachen ohne gültiges «alle_minuten»", () => {
     assert.match(zeilen[0]!, /alle \? min \(läuft nicht: Intervall fehlt\)/);
     assert.match(zeilen[1]!, /alle 10 min · Tor offen\?/);
     assert.doesNotMatch(zeilen[1]!, /läuft nicht/);
-    assert.match(zeilen[2]!, /alle \? min \(läuft nicht: Intervall fehlt\)/);
-    assert.match(zeilen[3]!, /^#2 garten · alle 10 min \(läuft nicht: Kamera fehlt\) · Person im Garten\?/);
-    assert.match(zeilen[4]!, /^#3 toString · alle \? min \(läuft nicht: Kamera und Intervall fehlen\)/);
+    assert.match(zeilen[2]!, /^#2 garten · alle 10 min \(läuft nicht: Kamera fehlt\) · Person im Garten\?/);
+    assert.match(zeilen[3]!, /^#4 hof · alle \? min \(läuft nicht: Intervall fehlt\)/);
+    assert.match(zeilen[4]!, /^#5 toString · alle \? min \(läuft nicht: Kamera und Intervall fehlen\)/);
     assert.ok(!zeilen.some((z) => /oft|undefined/.test(z)));
   });
 });

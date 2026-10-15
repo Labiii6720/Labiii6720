@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { after, describe, it } from "node:test";
@@ -30,8 +30,10 @@ writeFileSync(
     { id: 2, kamera: "hof", frage: "Tor offen?", alle_minuten: 15 },
     { id: 3, kamera: "carport", frage: "Auto da?", alle_minuten: 20 },
     { id: 4, kamera: "toString", frage: "Prototyp?", alle_minuten: 25 },
-    { id: 5, kamera: "garten", frage: "Ohne alles?" },
-    { id: 6, kamera: "hof", frage: "Ohne Takt?" },
+    // Intervall als Zahl, aber ungültig: bleibt stehen und läuft nicht (fehlt das Feld, fällt der Eintrag beim Laden weg)
+    { id: 5, kamera: "garten", frage: "Ohne alles?", alle_minuten: 0 },
+    { id: 6, kamera: "hof", frage: "Ohne Takt?", alle_minuten: -1 },
+    // Ohne «kamera» als Text: fällt beim Laden weg (Eintragsprüfung in datei.ts)
     { id: 7, frage: "Ohne Kamera?", alle_minuten: 30 },
   ]),
 );
@@ -63,7 +65,9 @@ type W = { id?: number; kamera?: string; frage: string; alle_minuten: number | n
 describe("Wachen auf einer fehlenden oder verworfenen Kamera", () => {
   it("Ausgangslage: «garten» ist verworfen, die Wachen bleiben in der Liste", () => {
     assert.deepEqual(Object.keys(kameras.cameras), ["hof"]);
-    assert.equal(kameras.dynamicWachen.length, 7);
+    assert.deepEqual(kameras.dynamicWachen.map((w) => w.id), [1, 2, 3, 4, 5, 6]);
+    assert.equal(kameras.wachenNichtGeladen, false);
+    assert.ok(existsSync(join(temp, "data", "wachen.json.defekt")), "die Wache ohne Kamera liegt in der Sicherung");
   });
 
   it("/api/wachen: laeuft false und «grund» nennt die Ursache; das Intervall bleibt sichtbar", () => {
@@ -80,7 +84,6 @@ describe("Wachen auf einer fehlenden oder verworfenen Kamera", () => {
         [4, 25, false, "Kamera fehlt"],
         [5, null, false, "Kamera und Intervall fehlen"],
         [6, null, false, "Intervall fehlt"],
-        [7, 30, false, "Kamera fehlt"],
       ],
     );
     // Eine laufende Wache trägt kein Feld «grund»
@@ -96,7 +99,11 @@ describe("Wachen auf einer fehlenden oder verworfenen Kamera", () => {
     assert.equal(wachen.find((w) => w.frage === "Paket?")?.grund, "Kamera fehlt");
   });
 
-  it("Wache ohne «kamera» (von Hand bearbeitet): kamera \"\" statt eines fehlenden Felds, nirgends «undefined»", () => {
+  it("Wache ohne «kamera» (von Hand bearbeitet): zweite Verteidigung, kamera \"\" statt eines fehlenden Felds, nirgends «undefined»", (t) => {
+    // Beim Laden fällt sie weg; käme sie trotzdem in die Liste, zeigt die Kommandozentrale sie ohne «undefined»
+    const ohneKamera = { id: 7, frage: "Ohne Kamera?", alle_minuten: 30 } as unknown as (typeof kameras.dynamicWachen)[number];
+    kameras.dynamicWachen.push(ohneKamera);
+    t.after(() => { kameras.dynamicWachen.splice(kameras.dynamicWachen.indexOf(ohneKamera), 1); });
     const wa = antwort();
     wachenJson(req(), wa as unknown as Res);
     const w7 = (wa.body as { wachen: W[] }).wachen.find((w) => w.id === 7)!;

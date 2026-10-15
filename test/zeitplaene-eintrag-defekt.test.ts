@@ -4,8 +4,9 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { after, describe, it } from "node:test";
 
-// Von Hand beschädigte data/zeitplaene.json: gültiges JSON und eine Liste, aber ein Eintrag ist kein Objekt.
-// Früher brach schon der Import ab (z.id auf null) – und mit ihm der ganze Dienst samt Telegram und Notaus.
+// Von Hand beschädigte data/zeitplaene.json: gültiges JSON und eine Liste, aber ein Eintrag ist kein gültiger Zeitplan
+// (kein Objekt, Pflichtfeld fehlt oder hat den falschen Typ). Früher brach schon der Import ab (z.id auf null) – und mit
+// ihm der ganze Dienst samt Telegram und Notaus; danach galt die ganze Datei als unlesbar. Jetzt fällt nur der Eintrag weg.
 const projekt = resolve(import.meta.dirname, "..");
 const origErr = console.error;
 after(() => { console.error = origErr; process.chdir(projekt); });
@@ -33,47 +34,55 @@ async function ladeIn(inhalt: string): Promise<{ mod: Modul; dir: string; fehler
 
 const GUELTIG = { id: 3, name: "geheim-name", zeit: "07:00", tage: "mo", auftrag: "geheim-auftrag" };
 
-describe("data/zeitplaene.json mit Nicht-Objekt-Eintrag", () => {
+describe("data/zeitplaene.json mit ungültigem Eintrag", () => {
   const faelle: Record<string, unknown[]> = {
     "null allein": [null],
     "null vor einem gültigen Eintrag": [null, GUELTIG],
     "null nach einem gültigen Eintrag": [GUELTIG, null],
-    "Zahl": [1],
-    "Text": ["x"],
-    "Liste": [[]],
+    "Zahl": [GUELTIG, 1],
+    "Text": [GUELTIG, "x"],
+    "Liste": [GUELTIG, []],
+    "nur id (Felder fehlen)": [GUELTIG, { id: 4 }],
+    "auftrag fehlt": [GUELTIG, { id: 4, name: "n", zeit: "07:00", tage: "mo" }],
+    "zeit als Zahl": [GUELTIG, { id: 4, name: "n", zeit: 700, tage: "mo", auftrag: "a" }],
+    "id als Text": [GUELTIG, { id: "4", name: "n", zeit: "07:00", tage: "mo", auftrag: "a" }],
+    "id 0": [GUELTIG, { id: 0, name: "n", zeit: "07:00", tage: "mo", auftrag: "a" }],
   };
   for (const [titel, liste] of Object.entries(faelle)) {
-    it(`${titel}: Import wirft nicht, Datei gilt als unlesbar (Sicherung, Sperre, nichts gespeichert)`, async () => {
+    it(`${titel}: Import wirft nicht, nur der Eintrag fällt weg (Sicherung, Log ohne Inhalt), Speichern behält die gültigen`, async () => {
       const inhalt = JSON.stringify(liste);
       const { mod, dir, fehler } = await ladeIn(inhalt);
       const datei = join(dir, "data", "zeitplaene.json");
-      assert.equal(mod.zeitplaeneNichtGeladen, true);
-      assert.equal(mod.zeitplaene.length, 0);
+      const gueltig = liste.includes(GUELTIG) ? [GUELTIG] : [];
+      assert.equal(mod.zeitplaeneNichtGeladen, false);
+      assert.deepEqual(mod.zeitplaene, gueltig);
       const sicherung = `${datei}.defekt`;
-      assert.ok(existsSync(sicherung), "Sicherung .defekt fehlt");
       assert.equal(readFileSync(sicherung, "utf8"), inhalt);
       assert.equal(statSync(sicherung).mode & 0o777, 0o600);
-      assert.ok(fehler.some((f) => f.startsWith("Zeitpläne unlesbar")), fehler.join("\n"));
+      assert.ok(fehler.some((f) => f.startsWith("Zeitpläne: 1 ungültiger Eintrag übersprungen (Sicherung unter data/zeitplaene.json.defekt)")), fehler.join("\n"));
       assert.ok(!fehler.some((f) => f.includes("geheim")), "kein Dateiinhalt im Log");
       assert.ok(!existsSync(join(dir, "data", "state.json")), "beim Import wird nichts gespeichert");
+      assert.equal(readFileSync(datei, "utf8"), inhalt, "beim Import bleibt die Datei unverändert");
       process.chdir(dir);
       try {
-        assert.throws(() => mod.pruefeZeitplaeneSchreibbar(), /unlesbar/);
-        assert.throws(() => mod.saveZeitplaene(), /unlesbar/);
+        assert.doesNotThrow(() => mod.pruefeZeitplaeneSchreibbar());
+        mod.saveZeitplaene();
       } finally {
         process.chdir(projekt);
       }
-      assert.equal(readFileSync(datei, "utf8"), inhalt, "Bestand bleibt unverändert");
+      assert.deepEqual(JSON.parse(readFileSync(datei, "utf8")), gueltig);
+      assert.equal(readFileSync(sicherung, "utf8"), inhalt, "die Sicherung bewahrt den verworfenen Eintrag");
       assert.ok(!existsSync(`${datei}.tmp`));
-      assert.ok(!existsSync(join(dir, "data", "state.json")));
     });
   }
 
-  it("nur Objekte (auch mit fehlenden Feldern): kein Defekt, Bestand geladen", async () => {
-    const inhalt = JSON.stringify([GUELTIG, { id: 4 }]);
-    const { mod, dir } = await ladeIn(inhalt);
+  it("nur gültige Einträge (auch mit ungültigen Werten wie «25:00» oder «montags»): keine Sicherung, Bestand geladen", async () => {
+    const wert = { id: 4, name: "", zeit: "25:00", tage: "montags", auftrag: " " };
+    const inhalt = JSON.stringify([GUELTIG, wert]);
+    const { mod, dir, fehler } = await ladeIn(inhalt);
     assert.equal(mod.zeitplaeneNichtGeladen, false);
     assert.deepEqual(mod.zeitplaene.map((z) => z.id), [3, 4]);
     assert.ok(!existsSync(join(dir, "data", "zeitplaene.json.defekt")));
+    assert.ok(!fehler.some((f) => f.includes("übersprungen")));
   });
 });

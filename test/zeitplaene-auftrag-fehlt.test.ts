@@ -73,26 +73,37 @@ describe("Zeitplan ohne Auftrag", () => {
     assert.equal(naechsterLauf(z, sa(6, 0), 60)!.getTime(), sa(7, 0).getTime());
   });
 
-  it("geladener Bestand ohne name/auftrag: der Scheduler startet keinen Claude-Lauf und meldet nichts", async () => {
-    assert.equal(zeitplaeneNichtGeladen, false, "Objekte mit fehlenden Feldern machen die Datei nicht unlesbar");
-    assert.equal(zeitplaene.length, 1);
-    for (const [h, m] of [[7, 0], [7, 1], [7, 30], [7, 59]] as const) await zeitplanTick(sa(h, m));
-    // Am nächsten Tag ebenso
-    await zeitplanTick(new Date(2026, 9, 11, 7, 0, 0, 0));
-    assert.deepEqual(prompts, [], "kein Auftrag «undefined» an Claude");
-    assert.deepEqual(gesendet, [], "keine Meldung «🕒 undefined»");
-    assert.equal(zeitplaene[0]!.lastRun, undefined, "nichts abgehakt");
-    assert.equal(readFileSync(ZEITPLAENE_DATEI, "utf8"), BESTAND, "Bestand bleibt unverändert");
+  it("geladener Bestand ohne name/auftrag: beim Laden übersprungen (Sicherung), die Datei sperrt nicht", () => {
+    assert.equal(zeitplaeneNichtGeladen, false, "ein ungültiger Eintrag macht die Datei nicht unlesbar");
+    assert.equal(zeitplaene.length, 0);
+    assert.equal(readFileSync(`${ZEITPLAENE_DATEI}.defekt`, "utf8"), BESTAND, "der Eintrag liegt in der Sicherung");
+  });
+
+  it("zweite Verteidigung: käme ein Eintrag ohne name/auftrag doch in die Liste, startet der Scheduler keinen Claude-Lauf und meldet nichts", async () => {
+    const roh = JSON.parse(BESTAND)[0] as Zeitplan;
+    zeitplaene.push(roh);
+    try {
+      for (const [h, m] of [[7, 0], [7, 1], [7, 30], [7, 59]] as const) await zeitplanTick(sa(h, m));
+      // Am nächsten Tag ebenso
+      await zeitplanTick(new Date(2026, 9, 11, 7, 0, 0, 0));
+      assert.deepEqual(prompts, [], "kein Auftrag «undefined» an Claude");
+      assert.deepEqual(gesendet, [], "keine Meldung «🕒 undefined»");
+      assert.equal(roh.lastRun, undefined, "nichts abgehakt");
+      assert.equal(readFileSync(ZEITPLAENE_DATEI, "utf8"), BESTAND, "Bestand bleibt unverändert");
+    } finally {
+      zeitplaene.splice(zeitplaene.indexOf(roh), 1);
+    }
   });
 
   it("Gegenprobe im selben Takt: ein Eintrag mit Auftrag läuft weiterhin", async () => {
-    zeitplaene.push({ id: 2, name: "Wetter", zeit: "07:00", tage: "taeglich", auftrag: "Sag mir das Wetter" });
+    const roh = JSON.parse(BESTAND)[0] as Zeitplan;
+    zeitplaene.push(roh, { id: 2, name: "Wetter", zeit: "07:00", tage: "taeglich", auftrag: "Sag mir das Wetter" });
     try {
       await zeitplanTick(sa(7, 0));
       assert.deepEqual(prompts, ["[Zeitplan «Wetter», läuft automatisch] Sag mir das Wetter"]);
       assert.deepEqual(gesendet, ["🕒 Wetter\n\nErledigt, Sir."]);
     } finally {
-      zeitplaene.splice(1);
+      zeitplaene.splice(0);
     }
   });
 });

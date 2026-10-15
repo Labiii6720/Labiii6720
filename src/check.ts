@@ -163,6 +163,25 @@ export async function selbsttest(nur?: string[], beiBefund?: (b: Befund) => void
     const ohneFrage = zustaende.filter((z) => z.grund === "Frage fehlt").length;
     return `${aktiv} Wache(n) aktiv${ohneTakt ? `, ${ohneTakt} ohne gültiges Intervall (laufen nicht)` : ""}${ohneKamera ? `, ${ohneKamera} auf fehlender Kamera (laufen nicht)` : ""}${ohneBedingung ? `, ${ohneBedingung} mit ungültiger Bedingung «nur_wenn» (laufen nicht)` : ""}${ohneFrage ? `, ${ohneFrage} ohne Frage (laufen nicht)` : ""}`;
   });
+  // Listen in data/ nur lesen (keine Sicherung, kein Laden der schweren Module): unlesbar oder mit ungültigen Einträgen,
+  // die der Dienst beim Start überspringt. Dazu die übersprungenen Einträge in cameras.json (gezählt beim Laden der Kameras).
+  await lauf("Listen", true, async () => {
+    const d = await import("./datei.js");
+    await import("./cameras.js");
+    const maengel: string[] = [];
+    let eintraege = 0;
+    for (const l of d.LISTEN) {
+      const u = d.untersucheListe(l.datei, l.pruefe);
+      eintraege += u.eintraege;
+      // Knapp: Befund-Texte werden auf 140 Zeichen gekürzt, und alle fünf Listen sollen hineinpassen
+      if (u.zustand === "unlesbar") maengel.push(`${l.name} unlesbar`);
+      else if (u.verworfen) maengel.push(`${l.name} ${u.verworfen} ungültig`);
+    }
+    const kameras = d.uebersprungenAnzahl("cameras.json");
+    if (kameras) maengel.push(`cameras.json ${kameras} ungültig`);
+    if (maengel.length) throw new Error(`${maengel.join(", ")}; Sicherung je .defekt`);
+    return `${d.LISTEN.length} Listen in data/ lesbar, ${eintraege} gültige Einträge`;
+  });
   await lauf("Protokolle", true, async () => `${Object.keys((await import("./protokolle.js")).protokolle).length} Protokoll(e)`);
   await lauf("Sicherheit", true, async () => {
     const warn: string[] = [];

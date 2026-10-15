@@ -40,6 +40,13 @@ describe("selbsttest(nur)", () => {
     assert.equal(aufrufe, 0);
   });
 
+  it("Listen ohne Dateien in data/: ok mit Anzahl, ohne Netz und ohne Sicherung", async () => {
+    aufrufe = 0;
+    const b = await selbsttest(["Listen"]);
+    assert.deepEqual(b, [{ name: "Listen", status: "ok", info: "5 Listen in data/ lesbar, 0 gültige Einträge" }]);
+    assert.equal(aufrufe, 0);
+  });
+
   it("nur Telegram: ein Befund, ok, genau ein fetch-Aufruf", async () => {
     aufrufe = 0;
     const b = await selbsttest(["Telegram"]);

@@ -29,7 +29,9 @@ writeFileSync(
     { id: 2, kamera: "hof", frage: "Läuft?", alle_minuten: 5, nur_wenn: "abwesend" },
     // Kamera fehlt geht vor der Bedingung (Reihenfolge wie im Takt)
     { id: 3, kamera: "garten", frage: "Garten?", alle_minuten: 5, nur_wenn: "Nacht" },
-    { id: 4, kamera: "hof", frage: "Ohne Takt?", nur_wenn: 7 },
+    // Intervall 0 (Zahl, aber ungültig): bleibt beim Laden stehen, läuft nicht. Fehlt «alle_minuten» ganz, fällt der
+    // Eintrag schon beim Laden weg (wachen-eintraege.test.ts)
+    { id: 4, kamera: "hof", frage: "Ohne Takt?", alle_minuten: 0, nur_wenn: 7 },
   ]),
 );
 writeFileSync(

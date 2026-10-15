@@ -53,8 +53,9 @@ export function notfallSperre(_req: Request, res: Response, next: NextFunction):
 const kurz = (t: unknown, n = 120): string => schwaerze(String(t ?? "")).slice(0, n);
 
 /**
- * Von Hand bearbeitete data/zeitplaene.json: ladeListe prüft die Einträge nicht. Fehlt «tage» oder «zeit», darf das
- * Dashboard nicht mit 500 ausfallen (sonst «Verbindung gestört» samt Notaus-Anzeige); der Eintrag erscheint ohne nächsten Lauf.
+ * Zweite Verteidigung: Einträge ohne «tage» oder «zeit» als Text lässt schon ladeListe (zeitplanEintrag) beim Laden weg.
+ * Käme trotzdem einer durch, darf das Dashboard nicht mit 500 ausfallen (sonst «Verbindung gestört» samt Notaus-Anzeige);
+ * der Eintrag erscheint ohne nächsten Lauf.
  */
 const tageAnzeige = (tage: unknown): string => (typeof tage === "string" ? (normaleTage(tage) ?? tage) : "");
 const zeitAnzeige = (zeit: unknown): string => (typeof zeit === "string" ? zeit : "");

@@ -94,21 +94,31 @@ describe("wachen.json: weitere Fälle (frischer Import im eigenen Ordner)", () =
     assert.throws(() => mod.saveWachen(), /unlesbar/);
   });
 
-  for (const [name, eintrag] of [["null", "null"], ["Zahl", "5"], ["Text", '"x"'], ["Liste", "[]"]] as const) {
-    it(`Eintrag ${name} statt Objekt: Import gelingt, Sperre mit Sicherung, nichts gespeichert`, async () => {
+  for (const [name, eintrag] of [["null", "null"], ["Zahl", "5"], ["Text", '"x"'], ["Liste", "[]"], ["ohne Frage", '{"id": 2, "kamera": "x", "alle_minuten": 5}']] as const) {
+    it(`Eintrag ${name} statt gültiger Wache: Import gelingt, nur dieser fällt weg (Sicherung, Hinweis), Speichern behält die gültige`, async () => {
       let dir = "";
-      const inhalt = `[{"id": 1, "kamera": "x", "frage": "f", "alle_minuten": 30}, ${eintrag}]`;
+      const inhalt = `[{"id": 1, "kamera": "x", "frage": "geheim-frage", "alle_minuten": 30}, ${eintrag}]`;
       const { mod, fehler: f } = await ladeIn((d) => {
         dir = d;
         mkdirSync(join(d, "data"));
         writeFileSync(join(d, "data", "wachen.json"), inhalt);
       });
-      assert.equal(mod.wachenNichtGeladen, true);
-      assert.equal(mod.dynamicWachen.length, 0);
-      assert.ok(f.some((x) => x.includes("Wachen unlesbar")));
+      assert.equal(mod.wachenNichtGeladen, false);
+      assert.deepEqual(mod.dynamicWachen.map((w) => w.id), [1]);
+      assert.ok(f.some((x) => x.startsWith("Wachen: 1 ungültiger Eintrag übersprungen")), f.join("\n"));
+      assert.ok(!f.some((x) => x.includes("geheim")), "kein Dateiinhalt im Log");
       assert.equal(readFileSync(join(dir, "data", "wachen.json.defekt"), "utf8"), inhalt);
+      assert.equal(statSync(join(dir, "data", "wachen.json.defekt")).mode & 0o777, 0o600);
       assert.ok(!existsSync(join(dir, "data", "state.json")), "beim Import wird kein Zustand geschrieben");
-      assert.throws(() => mod.saveWachen(), /unlesbar/);
+      const vorher = process.cwd();
+      process.chdir(dir);
+      try {
+        mod.saveWachen();
+      } finally {
+        process.chdir(vorher);
+      }
+      assert.deepEqual(JSON.parse(readFileSync(join(dir, "data", "wachen.json"), "utf8")), [{ id: 1, kamera: "x", frage: "geheim-frage", alle_minuten: 30 }]);
+      assert.equal(readFileSync(join(dir, "data", "wachen.json.defekt"), "utf8"), inhalt, "die Sicherung bewahrt den verworfenen Eintrag");
     });
   }
 

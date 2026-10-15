@@ -1,6 +1,6 @@
 import { mkdirSync, renameSync, writeFileSync } from "node:fs";
 import { uptime } from "node:os";
-import { gesperrtText, ladeListe } from "./datei.js";
+import { gesperrtText, ladeListe, vorgangEintrag } from "./datei.js";
 import { addSystemNote, runTask, type AgentHooks } from "./agent.js";
 import { schwaerze } from "./robust.js";
 import { state } from "./state.js";
@@ -81,7 +81,9 @@ async function unterbrochenMelden(betroffen: Vorgang[]): Promise<void> {
   await sendeSpaeter(text);
 }
 
-const geladen = ladeListe<Vorgang>(FILE, "Vorgänge");
+// Ohne id, auftrag, startedAt, bekannten status oder steps fällt ein Eintrag beim Laden weg (vorgangEintrag): sonst
+// würfen /vorgaenge und /status.json (auftrag.slice), und die nächste ID wäre Unsinn
+const geladen = ladeListe(FILE, "Vorgänge", vorgangEintrag);
 export const vorgaenge: Vorgang[] = geladen.liste;
 /** true, wenn data/vorgaenge.json vorhanden, aber unlesbar war: dann wird nichts gespeichert und kein Vorgang gestartet. */
 export const vorgaengeNichtGeladen = geladen.nichtGeladen;
@@ -113,7 +115,7 @@ export async function vorgaengeNachNeustart(u: Umgebung = {}): Promise<Vorgang[]
 }
 
 function save(): void {
-  if (vorgaengeNichtGeladen) throw new Error(gesperrtText(FILE, "keine Vorgänge"));
+  if (vorgaengeNichtGeladen) throw new Error(gesperrtText(FILE, "die Vorgänge"));
   mkdirSync("data", { recursive: true, mode: 0o700 });
   writeFileSync(`${FILE}.tmp`, JSON.stringify(vorgaenge.slice(-100), null, 2), { mode: 0o600 });
   renameSync(`${FILE}.tmp`, FILE);

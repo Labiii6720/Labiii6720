@@ -5,8 +5,9 @@ import { join, resolve } from "node:path";
 import { after, describe, it } from "node:test";
 
 // Eigene Datei: cameras.json und data/wachen.json werden nur einmal beim Import gelesen. Hier fehlt allen Wachen eine
-// brauchbare «frage» (fehlend, nur Leerzeichen, Zahl). Ohne Prüfung ginge alle 30 Minuten ein Standbild mit der Frage
-// «undefined» an die API (Leitplanke 9); Kommandozentrale, wachen_anzeigen und Selbsttest dürfen sie nicht als laufend zeigen.
+// brauchbare «frage». Ohne Text (fehlend, Zahl) fallen sie schon beim Laden weg (Eintragsprüfung in datei.ts); als
+// Leertext bleiben sie stehen. Ohne Prüfung ginge alle 30 Minuten ein Standbild mit der Frage «undefined» bzw. ohne
+// Frage an die API (Leitplanke 9); Kommandozentrale, wachen_anzeigen und Selbsttest dürfen sie nicht als laufend zeigen.
 const projekt = resolve(import.meta.dirname, "..");
 const temp = mkdtempSync(join(tmpdir(), "jarvis-wache-ohne-frage-"));
 process.chdir(temp);
@@ -28,9 +29,11 @@ writeFileSync(
     { id: 1, kamera: "hof", alle_minuten: 30 },
     { id: 2, kamera: "hof", frage: "  ", alle_minuten: 30 },
     { id: 3, kamera: "hof", frage: 7, alle_minuten: 30 },
+    { id: 4, kamera: "hof", frage: "", alle_minuten: 30 },
+    { id: 5, kamera: "hof", frage: "\n\t", alle_minuten: 30 },
   ]),
 );
-writeFileSync(join(temp, "cameras.json"), JSON.stringify({ hof: { frigate: "hof_cam", beschreibung: "Hof", wachen: [{ alle_minuten: 30 }] } }));
+writeFileSync(join(temp, "cameras.json"), JSON.stringify({ hof: { frigate: "hof_cam", beschreibung: "Hof", wachen: [{ alle_minuten: 30 }, { frage: " ", alle_minuten: 30 }] } }));
 
 const echteFetch = globalThis.fetch;
 let netz = 0;
@@ -73,6 +76,14 @@ describe("Wachen ohne «frage»", () => {
     const text = fehler.join("\n");
     assert.match(text, /cameras\.json: 1 Wache\(n\) bei Kamera «hof» ohne «frage»/);
     assert.match(text, /data\/wachen\.json: 3 Wache\(n\) bei Kamera «hof» ohne «frage»/);
+  });
+
+  it("«frage» ohne Text (fehlend, Zahl): beim Laden übersprungen und gezählt, die übrigen bleiben", () => {
+    const text = fehler.join("\n");
+    assert.match(text, /Wachen: 2 ungültige Einträge übersprungen \(Sicherung unter data\/wachen\.json\.defekt\)/);
+    assert.match(text, /cameras\.json: 1 ungültige\(r\) Wachen-Eintrag\/Einträge bei Kamera «hof» übersprungen/);
+    assert.deepEqual(kameras.dynamicWachen.map((w) => w.id), [2, 4, 5]);
+    assert.equal(kameras.wachenNichtGeladen, false);
   });
 
   it("der Takt schaut nicht hin: weder Frigate noch Claude", async () => {

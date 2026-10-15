@@ -454,8 +454,10 @@ describe("Wache ohne gültiges «alle_minuten» (cameras.json oder von Hand in d
     assert.equal(aufrufe.filter((a) => a === "frigate").length, 2, "Standbilder nur für die gültige Wache");
     assert.equal(claudeAufrufe, 2);
     for (const f of ungueltig) assert.equal(claudeFragen.filter((q) => q.includes(f)).length, 0, `kein Bild für «${f}» an Claude`);
-    // Einmal pro ungültiger Wache gemeldet, nicht pro Takt, und ohne Frage-Text
-    assert.equal(zeilen.filter((z) => z.includes("ohne gültiges «alle_minuten»")).length, ungueltig.length);
+    // Einmal pro ungültiger Wache gemeldet, nicht pro Takt, und ohne Frage-Text. Die Wache aus cameras.json ohne
+    // «alle_minuten» lässt schon die Eintragsprüfung weg (kameraWacheEintrag): sie erscheint gar nicht erst im Takt.
+    assert.equal(zeilen.filter((z) => z.includes("ohne gültiges «alle_minuten»")).length, dynamisch.length);
+    assert.ok(!cameras.allWachen().some((w) => w.frage === ohne.frage), "ohne «alle_minuten» nicht in allWachen");
     for (const f of ungueltig) assert.ok(!zeilen.some((z) => z.includes(f)), "kein Frage-Text im Log");
   });
 

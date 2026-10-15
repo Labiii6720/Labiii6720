@@ -217,3 +217,29 @@ describe("von Hand beschädigte Einträge", () => {
     assert.equal(naechsterLauf(z, sa(8, 0), 0), undefined);
   });
 });
+
+describe("ungültige Werte mit richtigem Typ (bleiben beim Laden stehen)", () => {
+  it("Uhrzeit ausserhalb 00:00–23:59: Scheduler und nächster Lauf sind sich einig – nie fällig", () => {
+    // Früher lief «07:60» im Scheduler um 08:00, während die Kommandozentrale keinen nächsten Lauf zeigte
+    for (const zeit of ["07:60", "7:75", "24:00", "25:00", "abc", "", "07:3"]) {
+      const z = plan(zeit, "taeglich");
+      for (const [h, m] of [[7, 0], [8, 0], [8, 15], [0, 0], [1, 0]] as const) {
+        assert.equal(faelligIm(z, sa(h, m), 60), false, `${zeit} um ${h}:${m}`);
+        assert.equal(faelltAn(z, sa(h, m)), false, `${zeit} um ${h}:${m}`);
+      }
+      assert.equal(naechsterLauf(z, sa(6, 0), 60), undefined, zeit);
+    }
+  });
+
+  it("Gegenprobe: H:MM und HH:MM im gültigen Bereich laufen wie bisher", () => {
+    assert.equal(faelligIm(plan("7:05", "taeglich"), sa(7, 5), 0), true);
+    assert.equal(faelligIm(plan(" 23:59 ", "taeglich"), sa(23, 59), 0), true);
+    assert.equal(naechsterLauf(plan("7:05", "taeglich"), sa(6, 0), 0)!.getTime(), sa(7, 5).getTime());
+  });
+
+  it("Tagesangabe ohne passenden Wochentag: nie fällig, kein nächster Lauf", () => {
+    const z = plan("08:30", "montags");
+    assert.equal(faelligIm(z, mo(8, 45), 60), false);
+    assert.equal(naechsterLauf(z, sa(6, 0), 60), undefined);
+  });
+});

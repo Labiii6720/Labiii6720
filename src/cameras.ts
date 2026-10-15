@@ -1,7 +1,8 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { anthropic as claude, claudeAufruf, trackUsage } from "./claude.js";
-import { chmodSync, constants, copyFileSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { config } from "./config.js";
+import { gesperrtText, gueltigeEintraege, kameraWacheEintrag, ladeListe, vermerkeUebersprungen, wacheEintrag, zahlOderZiffern } from "./datei.js";
 import { HttpFehler, mitWiederholung, retryAfterAusHeader, type WiederholOptionen } from "./robust.js";
 import { save, state } from "./state.js";
 
@@ -47,25 +48,25 @@ export interface Camera {
 export let camerasNichtGeladen = false;
 
 /**
- * Ein Wachen-Eintrag (data/wachen.json oder «wachen» in cameras.json) muss ein Objekt sein; null, Zahl, Text oder
- * Liste (Handeingriff) machen data/wachen.json unlesbar und werden in cameras.json übersprungen.
+ * Wachen einer Kamera aus cameras.json, die dieselbe Eintragsprüfung bestehen wie data/wachen.json (kameraWacheEintrag in
+ * datei.ts: Objekt, «frage» als Text, «alle_minuten» als Zahl); null, fehlende Kamera oder «wachen» ohne Liste ergeben keine.
  */
-const istWachenEintrag = (w: unknown): boolean => w !== null && typeof w === "object" && !Array.isArray(w);
-
-/** Wachen einer Kamera aus cameras.json, die ein Objekt sind; null, fehlende Kamera oder «wachen» ohne Liste ergeben keine. */
 function wachenAusDatei(c: unknown): Record<string, unknown>[] {
   const liste = c !== null && typeof c === "object" ? (c as { wachen?: unknown }).wachen : undefined;
-  return Array.isArray(liste) ? (liste.filter(istWachenEintrag) as Record<string, unknown>[]) : [];
+  return Array.isArray(liste) ? gueltigeEintraege(liste, kameraWacheEintrag).gueltig : [];
 }
 
-/** Ungültige Wachen-Einträge in cameras.json laut melden (nur Kamera und Anzahl, nie Inhalt): sie laufen nicht. */
-function meldeUngueltigeWachen(roh: Record<string, Camera>): void {
+/** Ungültige Wachen-Einträge in cameras.json laut melden (nur Kamera und Anzahl, nie Inhalt): sie laufen nicht. Rückgabe: Anzahl. */
+function meldeUngueltigeWachen(roh: Record<string, Camera>): number {
+  let summe = 0;
   for (const [kamera, c] of Object.entries(roh)) {
     const liste = c !== null && typeof c === "object" ? (c as { wachen?: unknown }).wachen : undefined;
     if (liste === undefined) continue;
     const ungueltig = Array.isArray(liste) ? liste.length - wachenAusDatei(c).length : 1;
-    if (ungueltig > 0) console.error(`cameras.json: ${ungueltig} ungültige(r) Wachen-Eintrag/Einträge bei Kamera «${kamera}» übersprungen (kein Objekt bzw. «wachen» keine Liste).`);
+    summe += ungueltig;
+    if (ungueltig > 0) console.error(`cameras.json: ${ungueltig} ungültige(r) Wachen-Eintrag/Einträge bei Kamera «${kamera}» übersprungen (kein Objekt, «frage» ohne Text oder «alle_minuten» ohne Zahl, bzw. «wachen» keine Liste).`);
   }
+  return summe;
 }
 
 /**
@@ -76,8 +77,8 @@ function meldeUngueltigeWachen(roh: Record<string, Camera>): void {
  * Dieselbe Regel gilt für den Takt (watch.ts), die Ladeprüfung und die Anzeige in der Kommandozentrale.
  */
 export function taktMinuten(v: unknown): number | undefined {
-  const n = typeof v === "number" ? v : typeof v === "string" && /^\s*\d+(\.\d+)?\s*$/.test(v) ? Number(v) : Number.NaN;
-  return Number.isFinite(n) && n > 0 ? Math.max(1, n) : undefined;
+  const n = zahlOderZiffern(v);
+  return n !== undefined && n > 0 ? Math.max(1, n) : undefined;
 }
 
 /**
@@ -199,12 +200,18 @@ function nurGueltigeKameras(roh: Record<string, unknown>): Record<string, Camera
   ) as Record<string, Camera>;
 }
 
+/**
+ * cameras.json schreibt Jarvis nie: übersprungene Kameras und Wachen nur zählen und als Hinweis bereitstellen (wie die
+ * Listen in data/, dort zusätzlich mit Sicherung), damit /status, Startmeldung und npm run check sie nennen.
+ */
 function ladeKameras(): Record<string, Camera> {
+  vermerkeUebersprungen("cameras.json", 0, false);
   try {
     const roh = JSON.parse(readFileSync("cameras.json", "utf8")) as unknown;
     if (!roh || typeof roh !== "object" || Array.isArray(roh)) throw new Error("kein Objekt");
     const kameras = nurGueltigeKameras(roh as Record<string, unknown>);
-    meldeUngueltigeWachen(kameras);
+    const ohneKamera = Object.keys(roh).length - Object.keys(kameras).length;
+    vermerkeUebersprungen("cameras.json", ohneKamera + meldeUngueltigeWachen(kameras), false);
     const ausDatei = Object.entries(kameras).flatMap(([kamera, c]) => wachenAusDatei(c).map((w) => ({ kamera, w })));
     meldeOhneTakt("cameras.json", ausDatei);
     meldeUngueltigeBedingung("cameras.json", ausDatei);
@@ -233,7 +240,7 @@ export function describeCameras(): string {
       .map(([k, c]) => {
         const f = ["schauen"];
         if (c.melden) f.push(`melden (${c.melden.labels.join(", ")}${c.melden.zonen ? ", Zonen " + c.melden.zonen.join("/") : ""}, ${bedingungWert(c.melden.nur_wenn) ?? "Bedingung ungültig"})`);
-        // Nur gültige Einträge zählen (wie allWachen); übersprungene Nicht-Objekte laufen nicht
+        // Nur gültige Einträge zählen (wie allWachen); übersprungene Einträge laufen nicht
         const wachen = wachenAusDatei(c).length;
         if (wachen) f.push(`${wachen} Wache(n)`);
         return `${k}: ${c.beschreibung} · ${f.join(" · ")}`;
@@ -332,79 +339,38 @@ export async function look(cam: string, question: string, image?: Buffer): Promi
 // ---------- Wachen (dynamisch per Werkzeug, zusätzlich zu cameras.json) ----------
 
 const WACHEN_FILE = "data/wachen.json";
-const WACHEN_DEFEKT = `${WACHEN_FILE}.defekt`;
 
-/** Kopiert die unlesbare Wachen-Datei unter einen freien Namen (0o600); eine ältere Sicherung bleibt unberührt. */
-function sichereWachenDefekt(): string | undefined {
-  try {
-    mkdirSync("data", { recursive: true, mode: 0o700 });
-    const stempel = new Date().toISOString().replace(/[:.]/g, "-");
-    for (let n = 0; n < 100; n++) {
-      const nach = n === 0 ? WACHEN_DEFEKT : `${WACHEN_DEFEKT}-${stempel}${n > 1 ? `-${n}` : ""}`;
-      try {
-        copyFileSync(WACHEN_FILE, nach, constants.COPYFILE_EXCL);
-      } catch (e) {
-        if ((e as NodeJS.ErrnoException).code === "EEXIST") continue;
-        throw e;
-      }
-      chmodSync(nach, 0o600);
-      return nach;
-    }
-    throw new Error("kein freier Name für die Sicherung");
-  } catch (e) {
-    console.error("Wachen-Sicherung fehlgeschlagen:", e instanceof Error ? e.message : e);
-    return undefined;
-  }
-}
+/**
+ * Per Werkzeug oder Kommandozentrale angelegte Wachen. Einträge prüft ladeListe (wacheEintrag in datei.ts): ohne
+ * Objekt-Form, id, kamera und frage als Text oder alle_minuten als Zahl fallen sie beim Laden weg (Sicherung .defekt,
+ * Hinweis) – sonst bräche schon der erste Zugriff auf w.id oder w.kamera ab (Start, Ticks, Anzeigen). Ungültige Werte
+ * (Intervall 0, leere Frage, falsches «nur_wenn», unbekannte Kamera) bleiben stehen, laufen nicht und werden gemeldet.
+ */
+const wachenGeladen = ladeListe(WACHEN_FILE, "Wachen", wacheEintrag);
+export const dynamicWachen: Wache[] = wachenGeladen.liste;
 
 /**
  * true, wenn data/wachen.json vorhanden, aber unlesbar war (Rechte, abgeschnittenes JSON …). Dann laufen die
  * per Werkzeug angelegten Wachen nicht, und `saveWachen()` verweigert das Schreiben: sonst ersetzte die nächste
- * neue Wache den ganzen Bestand.
+ * neue Wache den ganzen Bestand. Übersprungene Einträge sperren nicht.
  */
-export let wachenNichtGeladen = false;
+export const wachenNichtGeladen = wachenGeladen.nichtGeladen;
 
 /** Meldung für Anzeigen, Selbsttest und Werkzeuge, solange die Datei beim Start unlesbar war */
 export const WACHEN_UNLESBAR =
   "⚠️ data/wachen.json war beim Start unlesbar, Sir (Sicherung, sofern möglich, unter data/wachen.json.defekt). Die dort angelegten Wachen laufen nicht, und ich ändere keine, bis die Datei repariert ist und ich neu gestartet bin.";
 
-export const dynamicWachen: Wache[] = (() => {
-  let text: string;
-  try {
-    text = readFileSync(WACHEN_FILE, "utf8");
-  } catch (e) {
-    // Nur eine fehlende Datei heisst «noch keine Wachen»
-    if ((e as NodeJS.ErrnoException).code === "ENOENT") return [];
-    wachenNichtGeladen = true;
-    console.error(
-      `Wachen nicht lesbar (${(e as NodeJS.ErrnoException).code ?? "Fehler"}) – Jarvis startet ohne die Wachen aus ${WACHEN_FILE} und speichert keine, bis die Datei wieder lesbar ist und Jarvis neu startet.`,
-    );
-    return [];
-  }
-  try {
-    const roh = JSON.parse(text) as unknown;
-    if (!Array.isArray(roh)) throw new Error("keine Liste");
-    // Sonst bräche schon der erste Zugriff auf w.id oder w.kamera ab (Start, Ticks, Anzeigen)
-    if (!roh.every(istWachenEintrag)) throw new Error("ungültiger Eintrag");
-    // Ohne gültiges Intervall läuft eine Wache nicht (watch.ts); melden, aber nichts löschen
-    const eintraege = (roh as Record<string, unknown>[]).map((w) => ({ kamera: w.kamera, w }));
-    meldeOhneTakt(WACHEN_FILE, eintraege);
-    meldeUngueltigeBedingung(WACHEN_FILE, eintraege);
-    meldeOhneFrage(WACHEN_FILE, eintraege);
-    return roh as Wache[];
-  } catch {
-    wachenNichtGeladen = true;
-    const kopie = sichereWachenDefekt();
-    console.error(
-      `Wachen unlesbar – ${kopie ? `Kopie unter ${kopie}` : "Sicherung fehlgeschlagen"}. Jarvis startet ohne die Wachen aus ${WACHEN_FILE} und speichert keine, bis die Datei repariert ist und Jarvis neu startet.`,
-    );
-    return [];
-  }
-})();
+{
+  // Ohne gültiges Intervall, mit ungültiger Bedingung oder leerer Frage läuft eine Wache nicht (watch.ts); melden, aber nichts löschen
+  const eintraege = dynamicWachen.map((w) => ({ kamera: w.kamera, w: w as unknown as Record<string, unknown> }));
+  meldeOhneTakt(WACHEN_FILE, eintraege);
+  meldeUngueltigeBedingung(WACHEN_FILE, eintraege);
+  meldeOhneFrage(WACHEN_FILE, eintraege);
+}
 
-/** Gültige IDs der per Werkzeug angelegten Wachen; von Hand bearbeitete Einträge ohne Objekt-Form zählen nicht. */
+/** Gültige IDs der per Werkzeug angelegten Wachen (zweite Verteidigung: zur Laufzeit angelegte haben immer eine). */
 function wachenIds(): number[] {
-  return dynamicWachen.flatMap((w) => (istWachenEintrag(w) && Number.isSafeInteger(w.id) ? [w.id as number] : []));
+  return dynamicWachen.flatMap((w) => (Number.isSafeInteger(w?.id) ? [w.id as number] : []));
 }
 
 /**
@@ -438,7 +404,7 @@ function wachenZaehlerNachziehen(): void {
 
 /** Vor jeder Änderung an dynamicWachen aufrufen: wirft, solange data/wachen.json beim Start unlesbar war. */
 export function pruefeWachenSchreibbar(): void {
-  if (wachenNichtGeladen) throw new Error(`${WACHEN_FILE} war beim Start unlesbar, Sir. Ich ändere keine Wachen, bis die Datei repariert ist und ich neu gestartet bin – sonst wäre der Bestand weg.`);
+  if (wachenNichtGeladen) throw new Error(gesperrtText(WACHEN_FILE, "die Wachen"));
 }
 
 export function saveWachen(): void {
@@ -462,10 +428,10 @@ export function neueWacheId(): number {
 /**
  * Alle Wachen: aus cameras.json (ohne ID) und die per Werkzeug angelegten (mit ID). Ein «id» in cameras.json (etwa aus
  * data/wachen.json kopiert) fällt weg: sonst gälte die Wache in Kommandozentrale und Werkzeugen als bearbeitbar.
- * Einträge in cameras.json, die kein Objekt sind, fallen weg (beim Laden gemeldet).
+ * Einträge in cameras.json ohne gültige Form fallen weg (beim Laden gemeldet).
  */
 export function allWachen(): Wache[] {
-  // Nur Objekt-Einträge: ein null (Handeingriff) liesse sonst die Destrukturierung werfen, und damit stünden alle
+  // Nur geprüfte Einträge: ein null (Handeingriff) liesse sonst die Destrukturierung werfen, und damit stünden alle
   // Wachen still (wachenTick), /status.json und /api/wachen antworteten mit 500
   const fromConfig = Object.entries(cameras).flatMap(([kamera, c]) =>
     wachenAusDatei(c).map((w) => {

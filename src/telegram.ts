@@ -21,7 +21,7 @@ import { abuseSignal } from "./notfall.js";
 import { HttpFehler, fehlerArt, fehlerDetail, gesundheit, mitWiederholung, nutzerText, schwaerze, voruebergehend, wartezeit } from "./robust.js";
 import { clock } from "./time.js";
 import { berichtText, verdichteJetzt, vorschauText } from "./verdichtung.js";
-import { ladeListe } from "./datei.js";
+import { eintragsHinweise, ladeListe, postausgangEintrag } from "./datei.js";
 import { finanzUebersicht, RECHNUNGEN_UNLESBAR, rechnungen, rechnungenNichtGeladen, wochenberichtText } from "./finanzen.js";
 
 const API = () => `https://api.telegram.org/bot${config.telegramToken}`;
@@ -259,7 +259,8 @@ interface Postausgang {
   vorrang?: true;
 }
 
-const postausgangGeladen = ladeListe<unknown>(POSTAUSGANG_FILE, "Postausgang");
+// Ungültige Einträge (kein Text, kein lesbarer Zeitpunkt) fallen beim Laden weg, mit Sicherung und Hinweis (postausgangEintrag)
+const postausgangGeladen = ladeListe<Postausgang>(POSTAUSGANG_FILE, "Postausgang", postausgangEintrag);
 /**
  * true, wenn data/postausgang.json vorhanden, aber unlesbar war (Sicherung .defekt). Anders als bei den übrigen Dateien
  * wirft das Speichern dann nicht – sonst ginge jede Meldung bei einer Störung verloren. Neue Einträge warten nur im
@@ -269,9 +270,7 @@ export const postausgangNichtGeladen = postausgangGeladen.nichtGeladen;
 export const POSTAUSGANG_UNLESBAR =
   "⚠️ data/postausgang.json war beim Start unlesbar, Sir (Sicherung, sofern möglich, unter data/postausgang.json.defekt). Was dort auf Zustellung wartete, kommt nicht; neue Meldungen warten bis zum Neustart nur im Speicher.";
 
-const postausgang: Postausgang[] = postausgangGeladen.liste.filter(
-  (e): e is Postausgang => typeof e === "object" && e !== null && typeof (e as Postausgang).text === "string" && typeof (e as Postausgang).ts === "string",
-);
+const postausgang: Postausgang[] = postausgangGeladen.liste;
 
 function speicherePostausgang(): void {
   if (postausgangNichtGeladen) return;
@@ -1221,7 +1220,10 @@ async function poll(): Promise<void> {
 export const CAMERAS_UNLESBAR =
   "⚠️ cameras.json war beim Start unlesbar, Sir. Kameras, Meldungen und Wachen aus der Datei sind aus, bis sie repariert ist und ich neu gestartet bin.";
 
-/** Hinweise auf beim Start unlesbare Dateien (Zustand zuerst); ohne Dateiinhalt, dürfen also auch im Notfall hinaus. */
+/**
+ * Hinweise auf beim Start unlesbare Dateien (Zustand zuerst) und auf übersprungene ungültige Einträge (eintragsHinweise,
+ * nur Anzahl und Sicherung); ohne Dateiinhalt, dürfen also auch im Notfall hinaus.
+ */
 export function dateiHinweise(): string[] {
   const zustand = zustandsHinweis();
   return [
@@ -1232,6 +1234,7 @@ export function dateiHinweise(): string[] {
     ...(erinnerungenNichtGeladen ? [ERINNERUNGEN_UNLESBAR] : []),
     ...(vorgaengeNichtGeladen ? [VORGAENGE_UNLESBAR] : []),
     ...(postausgangNichtGeladen ? [POSTAUSGANG_UNLESBAR] : []),
+    ...eintragsHinweise(),
   ];
 }
 
