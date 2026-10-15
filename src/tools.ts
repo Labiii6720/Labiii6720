@@ -17,7 +17,7 @@ import { addRechnung, erkenneRechnung, formatRechnung, offeneRechnungen, RECHNUN
 import { readMail as gmailRead, searchMails as gmailSearch } from "./gmail.js";
 import { beraterTools } from "./berater.js";
 import { profil, saveProfil } from "./profil.js";
-import { describeProtokolle, protokolle, runProtokoll } from "./protokolle.js";
+import { describeProtokolle, protokollFesthalten, protokollNamens, pruefeProtokollFreigabe, runProtokoll } from "./protokolle.js";
 import { anDrucker, dauerText, gcodeZusammenfassung, hasOpenscad, hasSlicer, pruefeVorschau, pruefsumme, render, schreibeScad, slice, vomSlicer } from "./werkstatt.js";
 
 type Input = Record<string, any>;
@@ -224,7 +224,8 @@ const mails: Tool[] = [
       required: ["an", "betreff", "text"],
     },
     stufe: "extern",
-    summary: (i) => `Mail an ${i.an}\nBetreff: ${i.betreff}\n\n${String(i.text).slice(0, 700)}`,
+    // Der ganze Text, genau wie er gesendet wird: freigegeben ist nur, was gezeigt wurde (sendAuftrag teilt lange Texte auf)
+    summary: (i) => `Mail an ${i.an}\nBetreff: ${i.betreff}\n\n${String(i.text)}`,
     run: (i) => sendMail({ to: i.an, subject: i.betreff, text: i.text, replyToId: i.antwort_auf }),
   },
 ];
@@ -313,7 +314,8 @@ const haus: Tool[] = [
       required: ["entity_id", "dienst"],
     },
     stufe: (i) => geraetStufe(i),
-    summary: (i) => `Gerät schalten: ${i.dienst} auf ${i.entity_id}${hatDaten(i.daten) ? ` mit ${JSON.stringify(i.daten).slice(0, 400)}` : ""}`,
+    // daten ungekürzt: alles, was an Home Assistant geht, steht in der Freigabe
+    summary: (i) => `Gerät schalten: ${i.dienst} auf ${i.entity_id}${hatDaten(i.daten) ? ` mit ${JSON.stringify(i.daten)}` : ""}`,
     run: async (i) => haService(String(i.entity_id), String(i.dienst), geraetDaten(i.daten)),
   },
 ];
@@ -366,9 +368,17 @@ export function tippenStufe(i: Input): Stufe {
   return i.enter || String(i.text ?? "").length > TIPPEN_AUTO_MAX ? "extern" : "auto";
 }
 
+/** Gekürzt nur mit sichtbarem Vermerk: eine Freigabe darf nie still weniger zeigen, als da ist. */
+const gekuerzt = (s: string, max: number): string => (s.length <= max ? s : `${s.slice(0, max)}… (+${s.length - max} Zeichen)`);
+
 /** Was seit dem letzten Öffnen ohne Absenden getippt wurde: Ein Klick kann es abschicken, die Freigabe zeigt es. */
-const browserEingaben: string[] = [];
-const eingabenHinweis = (): string => (browserEingaben.length ? `\nKann ein Formular mit diesen Eingaben absenden: ${browserEingaben.join("; ")}` : "");
+const browserEingaben: { feld: string; text: string }[] = [];
+const eingabenHinweis = (): string =>
+  browserEingaben.length
+    ? `\nKann ein Formular mit diesen Eingaben absenden: ${browserEingaben.map((e) => `${gekuerzt(e.feld, 60)}: «${gekuerzt(e.text, 80)}»`).join("; ")}`
+    : "";
+/** Seite und Eingaben als Text: daran erkennt die Klick-Freigabe, ob der Browser noch dort steht, wo sie angelegt wurde. */
+const browserStand = (): { url: string | null; eingaben: string } => ({ url: browser.aktuelleUrl() ?? null, eingaben: JSON.stringify(browserEingaben) });
 
 const web: Tool[] = [
   {
@@ -376,7 +386,8 @@ const web: Tool[] = [
     description: "Lädt eine Webseite und gibt ihren Text zurück (ohne Browser, schnell). Für Recherche und Nachlesen.",
     input_schema: { type: "object", properties: { url: str("Adresse der Seite") }, required: ["url"] },
     stufe: (i) => urlStufe(String(i.url)),
-    summary: (i) => `Seite laden (ungewöhnlich lange Adresse): ${String(i.url).slice(0, 200)}`,
+    // Die ganze Adresse: gerade ihr hinterer Teil kann Daten hinaustragen
+    summary: (i) => `Seite laden (ungewöhnlich lange Adresse): ${String(i.url)}`,
     run: (i) => browser.fetchPageText(String(i.url)),
   },
   {
@@ -384,7 +395,7 @@ const web: Tool[] = [
     description: "Öffnet eine Seite im echten Browser (für Seiten, die JavaScript brauchen) und zeigt Text und Links.",
     input_schema: { type: "object", properties: { url: str("Adresse der Seite") }, required: ["url"] },
     stufe: (i) => urlStufe(String(i.url)),
-    summary: (i) => `Seite im Browser öffnen (ungewöhnlich lange Adresse): ${String(i.url).slice(0, 200)}`,
+    summary: (i) => `Seite im Browser öffnen (ungewöhnlich lange Adresse): ${String(i.url)}`,
     run: async (i) => {
       const seite = await browser.open(String(i.url));
       browserEingaben.length = 0;
@@ -404,20 +415,39 @@ const web: Tool[] = [
     input_schema: { type: "object", properties: { text: str("Sichtbarer Text des Links oder Buttons") }, required: ["text"] },
     // Ob der Text ein Link oder ein Absende-Button ist, zeigt erst die Seite; die Stufe muss vorher feststehen
     stufe: "extern",
-    summary: (i) => `Im Browser klicken: «${String(i.text).slice(0, 200)}»${eingabenHinweis()}`,
-    run: (i) => browser.click(String(i.text)),
+    // Mit Seite: geklickt wird dort, wo der Browser bei der Freigabe steht; run lehnt ab, wenn das nicht mehr diese ist
+    summary: (i) => {
+      const url = browser.aktuelleUrl();
+      return `Im Browser klicken: «${String(i.text)}» ${url ? `auf ${url}` : "(keine Seite offen)"}${eingabenHinweis()}`;
+    },
+    festhalten: (i) => {
+      const stand = browserStand();
+      return { text: i.text, erwartet_url: stand.url, erwartet_eingaben: stand.eingaben };
+    },
+    run: async (i) => {
+      // Freigegeben sind Seite und Eingaben, die die Zusammenfassung nannte. Inzwischen per auto geöffnet oder getippt
+      // (andere Seite, IBAN im Feld): nichts klicken. Aufträge ohne festhalten (vor dieser Prüfung) ebenso nicht.
+      if (!Object.hasOwn(i, "erwartet_url") || typeof i.erwartet_eingaben !== "string") {
+        throw new Error("Die Klick-Freigabe stammt aus einer älteren Version, Sir. Ich klicke nichts – bitte neu beantragen.");
+      }
+      const stand = browserStand();
+      if (stand.url !== i.erwartet_url) throw new Error("Der Browser steht inzwischen auf einer anderen Seite, Sir. Ich klicke nichts – bitte neu beantragen.");
+      if (stand.eingaben !== i.erwartet_eingaben) throw new Error("Die Eingaben im Browser haben sich seit der Freigabe geändert, Sir. Ich klicke nichts – bitte neu beantragen.");
+      return browser.click(String(i.text));
+    },
   },
   {
     name: "browser_tippen",
     description: `Schreibt in ein Eingabefeld (z. B. Suche) und drückt optional Enter. Kurzer Text ohne Enter läuft sofort; Absenden (enter) oder mehr als ${TIPPEN_AUTO_MAX} Zeichen brauchen Freigabe. Nie für Logins, Bestellungen oder persönliche Daten.`,
     input_schema: { type: "object", properties: { feld: str("Beschriftung, Platzhalter oder name des Felds"), text: str("Eingabe"), enter: { type: "boolean", description: "Enter drücken" } }, required: ["feld", "text"] },
     stufe: (i) => tippenStufe(i),
-    summary: (i) => `Im Browser tippen${i.enter ? " und absenden" : ""}: «${String(i.text).slice(0, 200)}» in ${String(i.feld).slice(0, 100)}`,
+    // Text und Feld ungekürzt: getippt (und abgesendet) wird genau das
+    summary: (i) => `Im Browser tippen${i.enter ? " und absenden" : ""}: «${String(i.text)}» in ${String(i.feld)}`,
     run: async (i) => {
       const seite = await browser.type(String(i.feld), String(i.text), Boolean(i.enter));
       if (i.enter) browserEingaben.length = 0;
       else {
-        browserEingaben.push(`${String(i.feld).slice(0, 60)}: «${String(i.text).slice(0, 80)}»`);
+        browserEingaben.push({ feld: String(i.feld), text: String(i.text) });
         browserEingaben.splice(0, Math.max(0, browserEingaben.length - 5));
       }
       return seite;
@@ -637,7 +667,7 @@ const kameras: Tool[] = [
     stufe: "extern", // eine Wache abzuschalten ist sicherheitsrelevant, genau wie sie anzulegen
     summary: (i) => {
       const w = dynamicWachen.find((x) => x.id === Number(i.id));
-      return w ? `Wache #${w.id} löschen: ${feldOder(w.kamera, "ohne Kamera")} – ${feld(w.frage).slice(0, 200) || "ohne Frage"}` : `Wache #${i.id} löschen (nicht gefunden)`;
+      return w ? `Wache #${w.id} löschen: ${feldOder(w.kamera, "ohne Kamera")} – ${gekuerzt(feld(w.frage), 200) || "ohne Frage"}` : `Wache #${i.id} löschen (nicht gefunden)`;
     },
     festhalten: (i) => {
       const w = dynamicWachen.find((x) => x.id === Number(i.id));
@@ -911,9 +941,20 @@ const prot: Tool[] = [
     name: "protokoll_ausfuehren",
     description: "Führt ein Protokoll aus protokolle.json aus. Die Stufe des Protokolls entscheidet, ob es sofort läuft oder Freigabe braucht.",
     input_schema: { type: "object", properties: { name: str("Name des Protokolls") }, required: ["name"] },
-    stufe: (i) => protokolle[String(i.name)]?.stufe ?? "extern",
-    summary: (i) => `Protokoll «${i.name}»: ${protokolle[String(i.name)]?.beschreibung ?? "unbekannt"}`,
-    run: (i, ctx) => runProtokoll(String(i.name), ctx),
+    // Unbekannter Name: kein Auftrag (agent.ts gibt Claude den Fehler). Als «extern» liefe er sonst später ohne PIN,
+    // wenn protokolle.json den Namen inzwischen als sensibel führt.
+    stufe: (i) => {
+      const p = protokollNamens(String(i.name));
+      if (!p) throw new Error(`Protokoll «${String(i.name)}» gibt es nicht; protokolle_anzeigen zeigt die vorhandenen.`);
+      return p.stufe;
+    },
+    summary: (i) => `Protokoll «${i.name}»: ${protokollNamens(String(i.name))?.beschreibung ?? "unbekannt"}`,
+    festhalten: (i) => protokollFesthalten(String(i.name)),
+    run: (i, ctx) => {
+      // Ausgeführt wird nur das Protokoll, das die Freigabe nannte (Stufe, Beschreibung und Schritte von damals)
+      pruefeProtokollFreigabe(i);
+      return runProtokoll(String(i.name), ctx);
+    },
   },
 ];
 

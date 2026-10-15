@@ -85,6 +85,7 @@ const auditZeilen = (): { event: string; [k: string]: unknown }[] => {
 
 const echteTeile = briefingSatellit.teile;
 const echterVersand = briefingSatellit.versandLaeuft;
+const echtesWarten = briefingSatellit.warten;
 const echterEreignisText = briefingEreignis.text;
 const echteSprache = briefingEreignis.sprache;
 const PLATZHALTER = "Das Briefing ist gleich fertig, Sir. Eine Minute.";
@@ -95,6 +96,7 @@ beforeEach(() => {
   state.paused = false;
   briefingSatellit.teile = echteTeile;
   briefingSatellit.versandLaeuft = echterVersand;
+  briefingSatellit.warten = echtesWarten;
   briefingEreignis.text = echterEreignisText;
   briefingEreignis.sprache = echteSprache;
   state.notfall = undefined;
@@ -388,12 +390,19 @@ describe("Ereignis briefing_text (Satellit im Bad)", () => {
     const d = day();
     delete d.briefing;
     save();
-    briefingSatellit.pauseMs = 50; // Zeit, um den Notaus nach der Antwort auszulösen
+    // Die erste Pause endet erst, wenn der Notaus steht. Früher echte 50 ms: unter Last lief die Pause schon während
+    // sende() ab, und die Nachlieferung rief teile ein zweites Mal (2 !== 1).
+    let pauseVorbei!: () => void;
+    const pause = new Promise<void>((r) => { pauseVorbei = r; });
+    let pausen = 0;
+    briefingSatellit.warten = () => { pausen++; return pause; };
     let n = 0;
     briefingSatellit.teile = async () => { n++; return { text: PLATZHALTER, hinweis: "" }; };
     await sende({ event: "briefing_text" });
     assert.ok(briefingSatellit.laufend, "Nachlieferung läuft");
+    assert.equal(pausen, 1, "Nachlieferung wartet in der ersten Pause");
     state.paused = true;
+    pauseVorbei();
     await briefingSatellit.laufend;
     await durchlaufen();
     assert.equal(n, 1, "teile nur beim synchronen Abruf");

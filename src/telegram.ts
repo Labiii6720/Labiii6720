@@ -2,7 +2,7 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import { closeSync, constants, mkdirSync, openSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { audit, throttled } from "./audit.js";
 import { basename } from "node:path";
-import { addSystemNote, handleMessage, pausiertText, resetHistory, runAuftrag } from "./agent.js";
+import { addSystemNote, handleMessage, pausiertText, resetHistory, runAuftrag, stufeVerschaerft } from "./agent.js";
 import { config } from "./config.js";
 import { AUFTRAEGE_UNLESBAR, auftraegeNichtGeladen, getAuftrag, offeneAuftraege, saveAuftraege, setStatus, type Auftrag } from "./queue.js";
 import { save, state, zustandsHinweis, type Mode } from "./state.js";
@@ -15,7 +15,7 @@ import { listVorgaenge, startVorgang, VORGAENGE_UNLESBAR, vorgaengeNichtGeladen 
 import { verbrauchBericht } from "./claude.js";
 import { aufheben, ausloesen, notfallAktiv } from "./notfall.js";
 import { createAuftrag } from "./queue.js";
-import { protokolle, protokollGesperrt, runProtokoll } from "./protokolle.js";
+import { protokollFesthalten, protokolle, protokollGesperrt, runProtokoll } from "./protokolle.js";
 import { formatBefund, selbsttest } from "./check.js";
 import { abuseSignal } from "./notfall.js";
 import { HttpFehler, fehlerArt, fehlerDetail, gesundheit, mitWiederholung, nutzerText, schwaerze, voruebergehend, wartezeit } from "./robust.js";
@@ -463,33 +463,97 @@ const typing = () => api("sendChatAction", { chat_id: owner(), action: "typing" 
 
 // ---------- Freigaben ----------
 
-function freigabeText(a: Auftrag): string {
-  const icon = a.stufe === "sensibel" ? "🔴" : "🟠";
-  const pin = a.stufe === "sensibel" ? " · Freigabe mit PIN" : "";
-  return `${icon} Auftrag #${a.id} · Stufe ${a.stufe}${pin}\n\n${a.summary}`;
+/** Höchstlänge einer Freigabe-Nachricht samt Kopf (wie sendeTeile; Telegram erlaubt 4096). */
+const FREIGABE_TEIL_MAX = 4000;
+
+/**
+ * Kopf einer Freigabe-Nachricht, immer von Jarvis erzeugt, nie aus der Zusammenfassung. Bei mehreren Teilen trägt
+ * jeder Teil Nummer, Stufe und PIN-Hinweis; der letzte (mit den Knöpfen) verweist auf den Anfang oben.
+ */
+function freigabeKopf(a: Auftrag, teil?: { nr: number; von: number }): string {
+  const sensibel = a.stufe === "sensibel";
+  const pin = sensibel ? " · Freigabe mit PIN" : "";
+  const letzter = teil !== undefined && teil.nr === teil.von;
+  const icon = letzter ? "⬆️" : sensibel ? "🔴" : "🟠";
+  const nummer = teil ? ` (Teil ${teil.nr}/${teil.von}${letzter ? ", Anfang oben" : ""})` : "";
+  return `${icon} Auftrag #${a.id} · Stufe ${a.stufe}${pin}${nummer}`;
 }
 
-async function sendAuftrag(a: Auftrag): Promise<void> {
-  const text = freigabeText(a);
-  // Knöpfe nur unter dem letzten Teil: onCallback lässt nur die zuletzt gesendete Nachricht (a.messageId) gelten
-  const schnitt = Math.floor((text.length - 1) / 4000) * 4000;
-  if (schnitt > 0) await sendText(text.slice(0, schnitt));
-  const id = await sendText(text.slice(schnitt), {
-    reply_markup: { inline_keyboard: [[{ text: "✅ Freigeben", callback_data: `ok:${a.id}` }, { text: "❌ Ablehnen", callback_data: `nein:${a.id}` }]] },
-  });
-  if (id) {
-    a.messageId = id;
-    setStatus(a, a.status);
+/**
+ * Freigabe als Nachrichten zu höchstens 4000 Zeichen, jede mit eigenem Kopf. Sonst stünde unter den Knöpfen nur das
+ * Ende der Zusammenfassung, und Text von Claude (Befehl, Mail) könnte dort einen eigenen, harmlosen Kopf vortäuschen.
+ */
+function freigabeTeile(a: Auftrag): string[] {
+  const ganz = `${freigabeKopf(a)}\n\n${a.summary}`;
+  if (ganz.length <= FREIGABE_TEIL_MAX) return [ganz];
+  // Der Kopf wächst mit der Teilzahl: zerlegen, bis jeder Teil samt Kopf passt
+  for (let platz = FREIGABE_TEIL_MAX - freigabeKopf(a, { nr: 2, von: 2 }).length - 2; ; platz -= 4) {
+    const stuecke: string[] = [];
+    for (let i = 0; i < a.summary.length; ) {
+      let ende = Math.min(i + platz, a.summary.length);
+      // Nie ein Zeichen aus zwei Hälften (Emoji) zerteilen: Telegram wiese die Nachricht ab
+      if (ende < a.summary.length && /[\uD800-\uDBFF]/.test(a.summary[ende - 1]!)) ende--;
+      stuecke.push(a.summary.slice(i, ende));
+      i = ende;
+    }
+    const teile = stuecke.map((s, k) => `${freigabeKopf(a, { nr: k + 1, von: stuecke.length })}\n\n${s}`);
+    if (teile.every((t) => t.length <= FREIGABE_TEIL_MAX)) return teile;
   }
 }
 
-export const hooks = { sendFile, sendPhoto, sendVideo, onAuftrag: sendAuftrag };
+/** Neutral, ohne Inhalt: darf auch im Notfall hinaus (wie /auftraege im Notfall). */
+const wartetImNotfall = (ids: number[]): string =>
+  `🚨 Notfall aktiv. Offene Aufträge: ${ids.length} (${ids.map((id) => `#${id}`).join(", ")}). Inhalte erst nach /entwarnung, Sir.`;
+
+/**
+ * Sendet die Freigabe Teil für Teil. Vor jedem Teil und zwischen den Wiederholungen gilt: Notfall aktiv → kein weiterer
+ * Teil mit Inhalt (Mailtext, Befehl) in einen womöglich übernommenen Chat, keine Knöpfe, keine messageId. Rückgabe
+ * false, wenn deshalb zurückgehalten; mit `melden` geht dann nur die neutrale Meldung hinaus.
+ */
+async function sendAuftrag(a: Auftrag, melden = true): Promise<boolean> {
+  const teile = freigabeTeile(a);
+  const knoepfe = {
+    reply_markup: { inline_keyboard: [[{ text: "✅ Freigeben", callback_data: `ok:${a.id}` }, { text: "❌ Ablehnen", callback_data: `nein:${a.id}` }]] },
+  };
+  for (let k = 0; k < teile.length; k++) {
+    // Knöpfe nur unter dem letzten Teil: onCallback lässt nur die zuletzt gesendete Nachricht (a.messageId) gelten
+    const letzter = k === teile.length - 1;
+    const r = await sendeTeile(teile[k]!, letzter ? knoepfe : {}, notfallAktiv);
+    if (!r.ok) {
+      if (r.abgebrochen || notfallAktiv()) {
+        if (melden) await sendText(wartetImNotfall([a.id])).catch(log);
+        return false;
+      }
+      throw r.fehler;
+    }
+    if (letzter && r.messageId) {
+      a.messageId = r.messageId;
+      setStatus(a, a.status);
+    }
+  }
+  return true;
+}
+
+export const hooks = { sendFile, sendPhoto, sendVideo, onAuftrag: async (a: Auftrag): Promise<void> => void (await sendAuftrag(a)) };
 
 /** Aufträge, deren Werkzeug gerade läuft: der Status bleibt bis zum Ende «offen», darum braucht es diese Sperre. */
 const inArbeit = new Set<number>();
 const laeuftBereits = (a: Auftrag) => `#${a.id} wird bereits ausgeführt, Sir.`;
 /** Begonnen, aber nie abgeschlossen (Absturz mitten im Werkzeug): nicht nochmals ausführen, die Nebenwirkung kann schon eingetreten sein. */
 const ergebnisUnklar = (a: Auftrag) => `#${a.id} wurde bereits gestartet, Ergebnis unklar – bitte prüfen, Sir.`;
+/** Status-Text eines begonnenen Auftrags, den der Nutzer wegräumt (Telegram «Ablehnen», Dashboard «nein»). */
+export const WEGGERAEUMT = "begonnen, Ergebnis unklar – vom Nutzer weggeräumt";
+
+/**
+ * Begonnen heisst: die Nebenwirkung (Mail, Schalten) kann eingetreten sein. Wegräumen setzt darum «fehler» statt
+ * «abgelehnt», und Claude erfährt, dass er ihn nicht ungeprüft erneut vorschlagen soll (sonst doppelte Nebenwirkung).
+ */
+function wegraeumen(a: Auftrag, quelle: "telegram" | "dashboard"): string {
+  audit("auftrag_weggeraeumt", { id: a.id, tool: a.tool, quelle });
+  setStatus(a, "fehler", WEGGERAEUMT);
+  addSystemNote(`Auftrag #${a.id} (${a.tool}) wurde begonnen, das Ergebnis ist unklar; der Nutzer hat ihn weggeräumt. Nicht erneut vorschlagen, ohne dass der Nutzer geprüft hat, ob er ausgeführt wurde.`);
+  return `🗂 #${a.id} weggeräumt, nicht abgelehnt: Er wurde begonnen, das Ergebnis ist unklar. Bitte selbst prüfen, ob es geschehen ist, Sir.`;
+}
 
 /**
  * Prüft Status und Notaus und beansprucht den Auftrag – synchron, ohne await dazwischen. Sonst führen zwei Freigaben
@@ -502,6 +566,19 @@ function beanspruche(a: Auftrag): string | undefined {
   if (inArbeit.has(a.id)) return laeuftBereits(a);
   if (aktuell.gestartetAm) return ergebnisUnklar(a);
   if (state.paused) return notausHinweis(NOCHMAL_FREIGEBEN);
+  // Angelegt als extern, inzwischen sensibel: ein Tippen ohne PIN darf ihn nicht ausführen
+  const strenger = stufeVerschaerft(aktuell);
+  if (strenger) {
+    audit("auftrag_stufe_verschaerft", { id: a.id, tool: a.tool });
+    try {
+      setStatus(aktuell, "abgelehnt", "Stufe inzwischen sensibel – bitte neu beantragen");
+      if (a !== aktuell) a.status = aktuell.status;
+      addSystemNote(`Auftrag #${a.id} (${a.tool}) wurde nicht ausgeführt: Er gilt inzwischen als sensibel. Bei Bedarf neu beantragen.`);
+    } catch (e) {
+      log(e); // Nicht ausgeführt ist er so oder so
+    }
+    return strenger;
+  }
   inArbeit.add(a.id);
   return undefined;
 }
@@ -605,6 +682,12 @@ export async function approveAuftrag(a: Auftrag, pin?: string): Promise<string> 
 export async function denyAuftrag(a: Auftrag): Promise<string> {
   if (a.status !== "offen") return `#${a.id} ist bereits ${a.status}.`;
   if (inArbeit.has(a.id)) return laeuftBereits(a);
+  if ((getAuftrag(a.id) ?? a).gestartetAm) {
+    const text = wegraeumen(a, "dashboard");
+    if (a.messageId) knoepfeEntfernen(a.messageId);
+    void sendeSpaeter(`${text} (Dashboard)`).catch(log);
+    return text;
+  }
   audit("auftrag_abgelehnt", { id: a.id, tool: a.tool, quelle: "dashboard" });
   setStatus(a, "abgelehnt");
   addSystemNote(`Auftrag #${a.id} (${a.tool}) wurde vom Nutzer abgelehnt.`);
@@ -654,6 +737,7 @@ async function onCallback(cb: { id: string; data?: string; message?: { message_i
   if (state.paused && action === "ok") return void await sendText(notausHinweis(NOCHMAL_FREIGEBEN));
 
   if (action === "nein") {
+    if (a.gestartetAm) return void await sendText(wegraeumen(a, "telegram"));
     audit("auftrag_abgelehnt", { id: a.id, tool: a.tool });
     setStatus(a, "abgelehnt");
     addSystemNote(`Auftrag #${a.id} (${a.tool}) wurde vom Nutzer abgelehnt.`);
@@ -682,10 +766,13 @@ async function onCommand(cmd: string, arg: string): Promise<void> {
       // Leere Liste heisst hier nicht «keine Aufträge»: der Bestand liegt in der unlesbaren Datei
       if (offen.length === 0) return void await sendText(auftraegeNichtGeladen ? AUFTRAEGE_UNLESBAR : "Keine offenen Aufträge.");
       // Notfall: nur Anzahl und Nummern, keine Inhalte (Mailtexte, Termine) in einen womöglich kompromittierten Chat
-      if (notfallAktiv()) {
-        return void await sendText(`🚨 Notfall aktiv. Offene Aufträge: ${offen.length} (${offen.map((a) => `#${a.id}`).join(", ")}). Inhalte erst nach /entwarnung, Sir.`);
+      if (notfallAktiv()) return void await sendText(wartetImNotfall(offen.map((a) => a.id)));
+      for (let k = 0; k < offen.length; k++) {
+        // Vor jedem Auftrag erneut: ein Notfall mitten in der Liste hält die übrigen Inhalte zurück
+        if (notfallAktiv() || !(await sendAuftrag(offen[k]!, false))) {
+          return void await sendText(wartetImNotfall(offen.slice(k).map((a) => a.id)));
+        }
       }
-      for (const a of offen) await sendAuftrag(a);
       return;
     }
     case "/modus": {
@@ -732,13 +819,13 @@ async function onCommand(cmd: string, arg: string): Promise<void> {
       if (auftraegeNichtGeladen) return void await sendText(AUFTRAEGE_UNLESBAR);
       let a: Auftrag;
       try {
-        a = createAuftrag({ tool: "protokoll_ausfuehren", input: { name }, stufe: p.stufe, summary: `Protokoll «${name}»: ${p.beschreibung}` });
+        a = createAuftrag({ tool: "protokoll_ausfuehren", input: protokollFesthalten(name), stufe: p.stufe, summary: `Protokoll «${name}»: ${p.beschreibung}` });
       } catch (e) {
         // Etwa die Speicherkarte voll: nichts angelegt (createAuftrag nimmt alles zurück), und der Nutzer erfährt es
         log(e);
         return void await sendText(`Protokoll «${name}» nicht angelegt, Sir: ${schwaerze(e instanceof Error ? e.message : String(e))}`);
       }
-      return sendAuftrag(a);
+      return void await sendAuftrag(a);
     }
     case "/notfall":
       await ausloesen("Manuell über Telegram ausgelöst.");

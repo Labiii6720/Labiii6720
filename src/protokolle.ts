@@ -60,6 +60,36 @@ export const protokolle: Record<string, Protokoll> = (() => {
   return aus;
 })();
 
+/** Protokoll mit genau diesem Namen (nur eigene Einträge: «constructor» oder «__proto__» sind keine Protokolle). */
+export const protokollNamens = (name: string): Protokoll | undefined => (Object.hasOwn(protokolle, name) ? protokolle[name] : undefined);
+
+/** Beschreibung und Schritte als fester Text: daran erkennt die Freigabe, ob das Protokoll noch dasselbe ist. */
+const abdruck = (p: Protokoll): string => JSON.stringify({ beschreibung: p.beschreibung, schritte: p.schritte });
+
+/**
+ * Eingabe eines Protokoll-Auftrags: Name, dazu Stufe und Abdruck beim Anlegen. Freigegeben wird, was die Zusammenfassung
+ * damals nannte; ausgeführt werden aber die Schritte von jetzt. pruefeProtokollFreigabe gleicht darum vor dem Lauf ab.
+ */
+export function protokollFesthalten(name: string): Record<string, unknown> {
+  const p = protokollNamens(name);
+  return p ? { name, erwartet_stufe: p.stufe, erwartet: abdruck(p) } : { name, erwartet_stufe: null, erwartet: null };
+}
+
+/**
+ * Wirft, wenn das Protokoll seit dem Anlegen des Auftrags anders dasteht (Stufe, Beschreibung, Schritte), beim Anlegen
+ * unbekannt war oder der Auftrag aus einer älteren Version stammt (nur {name}). Sonst liefe etwa ein inzwischen
+ * sensibles Protokoll mit dem Tippen eines alten extern-Auftrags, ohne PIN.
+ */
+export function pruefeProtokollFreigabe(i: Record<string, unknown>): void {
+  const name = String(i.name);
+  if (!Object.hasOwn(i, "erwartet")) throw new Error(`Die Freigabe für Protokoll «${name}» stammt aus einer älteren Version, Sir. Ich führe nichts aus – bitte neu beantragen.`);
+  if (typeof i.erwartet !== "string") throw new Error(`Die Freigabe nennt kein bekanntes Protokoll «${name}», Sir. Ich führe nichts aus.`);
+  const p = protokollNamens(name);
+  if (!p || p.stufe !== i.erwartet_stufe || abdruck(p) !== i.erwartet) {
+    throw new Error(`Protokoll «${name}» wurde inzwischen geändert, Sir. Ich führe nichts aus – bitte neu beantragen.`);
+  }
+}
+
 export function describeProtokolle(): string {
   return (
     Object.entries(protokolle)

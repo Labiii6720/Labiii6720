@@ -2,6 +2,7 @@ import { google } from "googleapis";
 import ICAL from "ical.js";
 import { config, env, opt, TZ } from "./config.js";
 import { HttpFehler, mitWiederholung, retryAfterAusHeader, voruebergehend, type WiederholOptionen } from "./robust.js";
+import { istNurLesen } from "./datei.js";
 import { day, save, state, type Recovery, type Workout } from "./state.js";
 import { dayBounds, todayKey } from "./time.js";
 
@@ -260,10 +261,22 @@ export function storeWhoopTokens(t: TokenResponse, previousRefreshToken?: string
 
 let refreshing: Promise<string> | undefined;
 
+/** true, wenn der gespeicherte WHOOP-Zugangstoken noch mindestens eine Minute gilt (kein Refresh nötig). */
+export function whoopTokenGueltig(): boolean {
+  const w = state.whoop;
+  return Boolean(w?.accessToken && w.expiresAt && Date.now() < w.expiresAt - 60_000);
+}
+
+/** Meldung, wenn ein nur lesender Prozess (npm run check) den Token erneuern müsste. */
+export const WHOOP_NUR_LESEN = "WHOOP-Token abgelaufen; nur gelesen, ich erneuere ihn nicht (das macht der Dienst).";
+
 async function whoopToken(): Promise<string> {
   const w = state.whoop;
   if (!w?.refreshToken) throw new Error("WHOOP ist nicht verbunden. Führe zuerst scripts/whoop-auth.ts aus.");
-  if (w.accessToken && w.expiresAt && Date.now() < w.expiresAt - 60_000) return w.accessToken;
+  if (whoopTokenGueltig()) return w.accessToken!;
+  // WHOOP rotiert den Refresh-Token: Erneuerte ihn npm run check, hielte der laufende Dienst den alten, entwerteten
+  // im Speicher und schriebe ihn zurück – WHOOP wäre getrennt (npm run whoop:auth)
+  if (istNurLesen()) throw new Error(WHOOP_NUR_LESEN);
   // WHOOP rotiert Refresh-Tokens: nie zwei Refreshes gleichzeitig starten
   refreshing ??= refreshWhoopToken(w.refreshToken).finally(() => {
     refreshing = undefined;

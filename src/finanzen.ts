@@ -53,11 +53,35 @@ function pruefeSchreibbar(): void {
   if (rechnungenNichtGeladen) throw new Error(GESPERRT);
 }
 
+/** Höchstzahl in der Datei; offene Rechnungen zählen mit, fallen aber nie weg. */
+export const RECHNUNGEN_MAX = 300;
+
+/**
+ * Was gespeichert wird: über der Höchstzahl fallen nur abgeschlossene Rechnungen (bezahlt, ignoriert) weg, die ältesten
+ * zuerst. Offene bleiben immer, sonst wäre eine ältere offene Rechnung nach dem Neustart samt Frist verschwunden. Die
+ * Rechnung mit der höchsten Nummer bleibt ebenfalls, damit nach einem Neustart keine Nummer neu vergeben wird.
+ */
+function zuSpeichern(): Rechnung[] {
+  let weg = rechnungen.length - RECHNUNGEN_MAX;
+  if (weg <= 0) return rechnungen;
+  const hoechste = Math.max(...rechnungen.map((r) => r.id));
+  return rechnungen.filter((r) => {
+    if (weg > 0 && r.status !== "offen" && r.id !== hoechste) {
+      weg--;
+      return false;
+    }
+    return true;
+  });
+}
+
 export function saveRechnungen(): void {
   pruefeSchreibbar();
+  const liste = zuSpeichern();
   mkdirSync("data", { recursive: true, mode: 0o700 });
-  writeFileSync(`${FILE}.tmp`, JSON.stringify(rechnungen.slice(-300), null, 2), { mode: 0o600 });
+  writeFileSync(`${FILE}.tmp`, JSON.stringify(liste, null, 2), { mode: 0o600 });
   renameSync(`${FILE}.tmp`, FILE);
+  // Erst nach dem Schreiben: im Speicher genau die Liste aus der Datei (sonst laufen Anzeige und Datei auseinander)
+  if (liste !== rechnungen) rechnungen.splice(0, rechnungen.length, ...liste);
 }
 
 // ---------- Erkennung aus Text (Schweizer Formate) ----------

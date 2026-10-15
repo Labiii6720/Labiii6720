@@ -52,9 +52,9 @@ export interface State {
   paused?: boolean;
   notfall?: NotfallStatus;
   day?: DayState;
-  /** nächste freie ID, gelöschte werden nie neu vergeben */
+  /** Nächste freie Zeitplan-ID (zeitplaene.ts); gelöschte werden nie neu vergeben. */
   naechsteZeitplanId?: number;
-  /** nächste freie ID, gelöschte werden nie neu vergeben */
+  /** Nächste freie Wachen-ID (cameras.ts); gelöschte werden nie neu vergeben. */
   naechsteWacheId?: number;
   /**
    * Untergrenze für neue Auftragsnummern (queue.ts): nach jedem Anlegen die nächste Nummer, dazu beim Start die über
@@ -189,8 +189,11 @@ let sperreGemeldet = false;
  * Speichert atomar (nie eine halb geschriebene Datei) und nur für deinen Benutzer lesbar.
  * War state.json beim Start unlesbar, wird nichts geschrieben (nur gemeldet, nicht geworfen: Aufrufer wie der
  * Notfall-Alarm sollen weiterlaufen, der Zustand im Speicher bleibt gültig).
+ * Nur lesen (npm run check): nie schreiben. Sonst ersetzte der Selbsttest mit seinem Stand vom Prozessstart, was der
+ * laufende Dienst inzwischen gespeichert hat (Notfall, Notaus, Auftragszähler, WHOOP-Token).
  */
 export function save(): void {
+  if (istNurLesen()) return;
   if (stateNichtGeladen) {
     if (!sperreGemeldet) {
       sperreGemeldet = true;

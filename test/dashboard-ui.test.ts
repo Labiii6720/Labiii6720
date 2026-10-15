@@ -62,6 +62,18 @@ describe("Kommandozentrale im Browser", { skip: chrome ? false : "kein Chromium 
     const html = await page.content();
     assert.ok(html.includes(GEHEIM_CHAT) && html.includes(GEHEIM_TOAST), "Vorbedingung: beides steht im DOM");
   }
+  /**
+   * «close» eines Dialogs abwarten: es kommt eine Task nach dem Schliessen, erst dann setzt die Seite den Fokus zurück
+   * und leert die Ansage. Vor der schliessenden Aktion aufrufen, dann die gelieferte Funktion abwarten (statt echter Zeit).
+   */
+  async function closeAbwarten(id: string): Promise<() => Promise<void>> {
+    await page.evaluate((i) => {
+      const w = window as unknown as { __zu?: Record<string, Promise<void>> };
+      w.__zu ??= {};
+      w.__zu[i] = new Promise<void>((ok) => document.getElementById(i)!.addEventListener("close", () => ok(), { once: true }));
+    }, id);
+    return () => page.evaluate((i) => (window as unknown as { __zu: Record<string, Promise<void>> }).__zu[i], id);
+  }
   const ohneGeheimes = async (wann: string) => {
     const html = await page.content();
     assert.ok(!html.includes(GEHEIM_CHAT), `${wann}: Chat-Antwort nicht mehr im DOM`);
@@ -159,8 +171,11 @@ describe("Kommandozentrale im Browser", { skip: chrome ? false : "kein Chromium 
     // Abbrechen per Tastatur: der Auftrag bleibt offen, Fokus zurück auf «Freigeben»
     await page.focus("#pinFeld");
     await page.keyboard.press("Tab");
+    // Ein Neuaufbau (Status-Takt, Minutenwechsel) ersetzt den Knopf: den Ersatz fokussiert erst das close-Ereignis
+    let zu = await closeAbwarten("dlgPin");
     await page.keyboard.press("Enter");
     await page.waitForSelector("#dlgPin", { state: "hidden" });
+    await zu();
     assert.equal(await page.evaluate(() => (document.activeElement as HTMLElement | null)?.dataset.id), "202");
     assert.equal(await knopf.count(), 1, "nichts abgelehnt");
 
@@ -172,8 +187,10 @@ describe("Kommandozentrale im Browser", { skip: chrome ? false : "kein Chromium 
     await page.waitForSelector("#pinFehler:not([hidden])");
     assert.equal(await page.getAttribute("#pinFeld", "aria-invalid"), "true");
     assert.ok(await page.evaluate(() => (document.getElementById("dlgPin") as HTMLDialogElement).open), "Dialog bleibt offen");
+    zu = await closeAbwarten("dlgPin");
     await page.keyboard.press("Escape");
     await page.waitForSelector("#dlgPin", { state: "hidden" });
+    await zu();
     assert.equal(await page.evaluate(() => (document.activeElement as HTMLElement | null)?.dataset.id), "202");
   });
 
@@ -472,17 +489,21 @@ describe("Kommandozentrale im Browser", { skip: chrome ? false : "kein Chromium 
       const d = await echt.json();
       await route.fulfill({ response: echt, json: { ...d, notfall: true, offeneAuftraege: 3, auftraege: [], kameras: [], zeitplaene: [], wachen: [] } });
     });
-    await sofort(page);
-    await page.waitForFunction(() => !document.querySelector("#v-kameras img") && /Im Notfall gesperrt/.test(document.getElementById("v-kameras")?.textContent ?? ""), null, { timeout: 3000 });
-    // Freigegebene Object-URL lädt nicht mehr (img-src erlaubt blob:, fetch dürfte es wegen connect-src ohnehin nicht)
-    const freigegeben = await page.evaluate((u) => new Promise<boolean>((ok) => {
-      const img = new Image();
-      img.addEventListener("load", () => ok(false));
-      img.addEventListener("error", () => ok(true));
-      img.src = u!;
-    }), alt);
-    assert.equal(freigegeben, true, "alte Object-URL ist freigegeben");
-    await page.unroute("**/status.json");
+    // Nachgestellter Notfall immer zurücknehmen: sonst schlügen alle folgenden Tests mit fehl
+    try {
+      await sofort(page);
+      await page.waitForFunction(() => !document.querySelector("#v-kameras img") && /Im Notfall gesperrt/.test(document.getElementById("v-kameras")?.textContent ?? ""), null, { timeout: 3000 });
+      // Freigegebene Object-URL lädt nicht mehr (img-src erlaubt blob:, fetch dürfte es wegen connect-src ohnehin nicht)
+      const freigegeben = await page.evaluate((u) => new Promise<boolean>((ok) => {
+        const img = new Image();
+        img.addEventListener("load", () => ok(false));
+        img.addEventListener("error", () => ok(true));
+        img.src = u!;
+      }), alt);
+      assert.equal(freigegeben, true, "alte Object-URL ist freigegeben");
+    } finally {
+      await page.unroute("**/status.json");
+    }
     await sofort(page);
     await page.waitForSelector('#v-kameras img[data-kam="eingang"][src^="blob:"]', { timeout: 3000 });
     assert.notEqual(await page.getAttribute('#v-kameras img[data-kam="eingang"]', "src"), alt);
@@ -1250,10 +1271,11 @@ describe("Kommandozentrale im Browser", { skip: chrome ? false : "kein Chromium 
       await page.keyboard.press("Enter");
       await page.waitForSelector("#dlgPin[open]");
       await page.keyboard.type(DEMO_PIN);
+      const zu = await closeAbwarten("dlgPin");
       await page.keyboard.press("Enter");
       await page.waitForSelector("#dlgPin", { state: "hidden" });
       await page.waitForFunction(() => document.getElementById("zustandText")?.textContent === "Bereit", null, { timeout: 3000 });
-      await page.waitForTimeout(100); // close-Ereignis (spätere Task) und Neuaufbau abwarten
+      await zu(); // close-Ereignis (spätere Task) abwarten; der Neuaufbau kam mit «Bereit»
       assert.equal(await page.isDisabled('#v-sicherheit button[data-merk="s-weiter"]'), true, "Vorbedingung: Auslöser gesperrt");
       assert.equal(await fokus(), "s-notaus");
       // Auch der nächste Neuaufbau (Status-Abfrage) behält ihn
@@ -1313,11 +1335,12 @@ describe("Kommandozentrale im Browser", { skip: chrome ? false : "kein Chromium 
       await page.focus("#notausKnopf");
       await page.keyboard.press("Enter");
       await page.waitForSelector("#dlgPin[open]");
+      const zu = await closeAbwarten("dlgPin");
       await notfallAn();
       await sofort(page);
       await page.waitForSelector("#dlgPin", { state: "hidden" });
       await page.waitForFunction(() => document.getElementById("zustandText")?.textContent === "Notfall", null, { timeout: 3000 });
-      await page.waitForTimeout(100); // close-Ereignis (spätere Task) abwarten
+      await zu(); // close-Ereignis (spätere Task) abwarten
       assert.equal(await fokus(), "notausKnopf", "Fokus nach dem Schliessen auf dem gesperrten Knopf, nie auf <body>");
       await notfallAus();
     } finally {
@@ -1355,9 +1378,10 @@ describe("Kommandozentrale im Browser", { skip: chrome ? false : "kein Chromium 
       assert.equal(lage.fokus, "planOk");
       assert.deepEqual(lage.ueberdeckt, [], `Toast über den Knöpfen: ${JSON.stringify(lage)}`);
       assert.equal(lage.imBild, true);
+      const zu = await closeAbwarten("dlgPlan");
       await page.click("#dlgPlan [data-schliessen]");
       await page.waitForSelector("#dlgPlan", { state: "hidden" });
-      await page.waitForTimeout(100); // close-Ereignis (spätere Task) abwarten
+      await zu(); // close-Ereignis (spätere Task) abwarten
       // Dialog zu, Toast noch sichtbar: er gehört wieder nach unten und verdeckt weder Notaus noch Zustand noch Thema
       const danach = await page.evaluate(() => {
         const el = document.getElementById("toast")!;
@@ -1405,9 +1429,10 @@ describe("Kommandozentrale im Browser", { skip: chrome ? false : "kein Chromium 
       await page.click(knopf);
       await page.waitForSelector("#dlgPin[open]");
       await page.keyboard.type("9999");
+      const zu = await closeAbwarten("dlgPin");
       await page.keyboard.press("Enter");
       await page.waitForSelector("#dlgPin", { state: "hidden" });
-      await page.waitForTimeout(100); // close-Ereignis (spätere Task) abwarten
+      await zu(); // close-Ereignis (spätere Task) abwarten
       const a = await ansage();
       assert.match(a.seite, /Falsche PIN\. #202 abgelehnt\./, JSON.stringify(a));
       assert.equal(a.dialog, "");
@@ -1427,9 +1452,10 @@ describe("Kommandozentrale im Browser", { skip: chrome ? false : "kein Chromium 
       await page.click(knopf);
       await page.waitForSelector("#dlgPin[open]");
       await page.keyboard.type(DEMO_PIN);
+      const zu = await closeAbwarten("dlgPin");
       await page.keyboard.press("Enter");
       await page.waitForSelector("#dlgPin", { state: "hidden", timeout: 3000 });
-      await page.waitForTimeout(100);
+      await zu();
       const a = await ansage();
       assert.match(a.seite, /Das dauert länger, Sir\. Der Auftrag läuft weiter/, JSON.stringify(a));
       assert.doesNotMatch(a.seite + ((await page.textContent("#toast")) ?? ""), /Ich erreiche den Dienst nicht/);
@@ -1742,6 +1768,87 @@ describe("Kommandozentrale im Browser", { skip: chrome ? false : "kein Chromium 
     await page.evaluate(() => { location.hash = "uebersicht"; });
     await sofort(page);
     await page.waitForSelector("#v-uebersicht .auftraege", { timeout: 3000 });
+  });
+
+  it("eine ältere Antwort überschreibt keine neuere: Zeitpläne und Status bleiben beim zuletzt angefragten Stand", async () => {
+    // Antworten kommen nicht in Startreihenfolge an (Takt, Bereichswechsel, Neuladen nach dem Speichern). Früher galt die
+    // zuletzt eingetroffene: eine langsame, ältere Antwort stellte den alten Stand bis zum nächsten Takt wieder her.
+    await page.evaluate(() => { location.hash = "zeitplaene"; });
+    await page.waitForSelector("#v-zeitplaene:not([hidden]) .plan");
+    // Gelesene veraltete Antworten zählen: ist die Zahl gestiegen, hat die Seite sie übernommen oder verworfen
+    await page.evaluate(() => {
+      const w = window as unknown as { __alt: { plan: number; status: number }; __jsonOrig?: () => Promise<unknown> };
+      w.__alt = { plan: 0, status: 0 };
+      w.__jsonOrig = Response.prototype.json;
+      Response.prototype.json = function (this: Response) {
+        return (w.__jsonOrig!.call(this) as Promise<{ zeitplaene?: { id: number }[]; pausiert?: boolean }>).then((d) => {
+          if (Array.isArray(d?.zeitplaene) && d.zeitplaene.some((z) => z.id === 97)) w.__alt.plan++;
+          if (d?.pausiert === true) w.__alt.status++;
+          return d;
+        });
+      };
+    });
+    let loslassen!: () => void;
+    const tor = new Promise<void>((ok) => { loslassen = ok; });
+    const angekommen = { zeitplaene: false, status: false };
+    let gemeldet!: () => void;
+    const beideDa = new Promise<void>((ok) => { gemeldet = ok; });
+    const ankunft = (k: keyof typeof angekommen) => { angekommen[k] = true; if (angekommen.zeitplaene && angekommen.status) gemeldet(); };
+    // 1. Ältere Abfragen: echte Antwort mit veraltetem Inhalt, zurückgehalten bis nach den neueren
+    await page.route("**/api/zeitplaene", async (r) => {
+      if (r.request().method() !== "GET") return r.fallback();
+      const echt = await r.fetch();
+      const d = await echt.json();
+      ankunft("zeitplaene");
+      await tor;
+      await r.fulfill({ response: echt, json: { ...d, zeitplaene: [{ id: 97, name: "Veralteter Plan", zeit: "05:00", tage: "taeglich", auftrag: "Alt." }] } }).catch(() => undefined);
+    });
+    await page.route("**/status.json", async (route) => {
+      const echt = await route.fetch();
+      const d = await echt.json();
+      ankunft("status");
+      await tor;
+      await route.fulfill({ response: echt, json: { ...d, pausiert: true } }).catch(() => undefined);
+    });
+    try {
+      await sofort(page);
+      await beideDa;
+      // 2. Neuere Abfragen (zuletzt angelegte Route gilt zuerst): aktueller Stand, sofort beantwortet
+      await page.route("**/api/zeitplaene", async (r) => {
+        if (r.request().method() !== "GET") return r.fallback();
+        const echt = await r.fetch();
+        const d = await echt.json();
+        await r.fulfill({ response: echt, json: { ...d, zeitplaene: [{ id: 98, name: "Aktueller Plan", zeit: "06:00", tage: "taeglich", auftrag: "Neu." }] } }).catch(() => undefined);
+      });
+      await page.route("**/status.json", async (route) => {
+        const echt = await route.fetch();
+        const d = await echt.json();
+        await route.fulfill({ response: echt, json: { ...d, pausiert: false } }).catch(() => undefined);
+      });
+      await sofort(page);
+      await page.waitForFunction(() => /Aktueller Plan/.test(document.getElementById("v-zeitplaene")?.textContent ?? ""), null, { timeout: 3000 });
+      assert.equal(await page.textContent("#zustandText"), "Bereit");
+      // 3. Jetzt treffen die älteren Antworten ein: sie ändern nichts mehr
+      loslassen();
+      await page.waitForFunction(() => {
+        const a = (window as unknown as { __alt: { plan: number; status: number } }).__alt;
+        return a.plan > 0 && a.status > 0;
+      }, null, { timeout: 3000 });
+      const text = (await page.textContent("#v-zeitplaene")) ?? "";
+      assert.match(text, /Aktueller Plan/);
+      assert.doesNotMatch(text, /Veralteter Plan/, "ältere Zeitplan-Antwort verworfen");
+      assert.equal(await page.textContent("#zustandText"), "Bereit", "ältere Status-Antwort (pausiert) verworfen");
+    } finally {
+      loslassen();
+      await page.unroute("**/api/zeitplaene");
+      await page.unroute("**/status.json");
+      await page.evaluate(() => {
+        const w = window as unknown as { __jsonOrig?: () => Promise<unknown> };
+        if (w.__jsonOrig) { Response.prototype.json = w.__jsonOrig as typeof Response.prototype.json; delete w.__jsonOrig; }
+      });
+    }
+    await sofort(page);
+    await page.waitForFunction(() => !/Aktueller Plan|Veralteter Plan/.test(document.getElementById("v-zeitplaene")?.textContent ?? ""), null, { timeout: 3000 });
   });
 
   it("über alle Abläufe: keine Skriptfehler und keine CSP-Verletzung", async () => {

@@ -171,12 +171,12 @@ describe("Browser: nichts verlässt den Pi per Formular ohne Freigabe", () => {
   it("klicken braucht immer Freigabe und zeigt, was ein Formular absenden würde", async () => {
     assert.equal(stufeOf(werkzeug("browser_klicken"), { text: "Weiter" }), "extern");
     await werkzeug("browser_oeffnen").run({ url: "https://beispiel.test/" }, ctx);
-    assert.equal(werkzeug("browser_klicken").summary!({ text: "Senden" }), "Im Browser klicken: «Senden»");
+    assert.equal(werkzeug("browser_klicken").summary!({ text: "Senden" }), "Im Browser klicken: «Senden» auf https://beispiel.test/");
     await werkzeug("browser_tippen").run({ feld: "Suche", text: "Muttenz" }, ctx);
     assert.deepEqual(getippt.at(-1), { wert: "Muttenz", enter: false });
-    assert.equal(werkzeug("browser_klicken").summary!({ text: "Senden" }), "Im Browser klicken: «Senden»\nKann ein Formular mit diesen Eingaben absenden: Suche: «Muttenz»");
+    assert.equal(werkzeug("browser_klicken").summary!({ text: "Senden" }), "Im Browser klicken: «Senden» auf https://beispiel.test/\nKann ein Formular mit diesen Eingaben absenden: Suche: «Muttenz»");
     await werkzeug("browser_oeffnen").run({ url: "https://beispiel.test/neu" }, ctx);
-    assert.equal(werkzeug("browser_klicken").summary!({ text: "Senden" }), "Im Browser klicken: «Senden»");
+    assert.equal(werkzeug("browser_klicken").summary!({ text: "Senden" }), "Im Browser klicken: «Senden» auf https://beispiel.test/");
   });
 });
 

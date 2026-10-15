@@ -4,7 +4,7 @@ import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { audit } from "./audit.js";
 import { config } from "./config.js";
 import { state } from "./state.js";
-import { createAuftrag, offeneAuftraege, type Auftrag } from "./queue.js";
+import { createAuftrag, offeneAuftraege, type Auftrag, type Stufe } from "./queue.js";
 import { activeTools, currentMode, stufeOf, type ToolContext, type ToolOutput } from "./tools.js";
 import { ROOT } from "./workspace.js";
 import { persona } from "./persona.js";
@@ -213,11 +213,20 @@ async function execute(use: Anthropic.ToolUseBlock, hooks: AgentHooks): Promise<
   const tool = activeTools().find((t) => t.name === use.name);
   if (!tool) return { content: `Unbekanntes Werkzeug ${use.name}`, is_error: true };
   const input = (use.input ?? {}) as Record<string, unknown>;
-  const stufe = stufeOf(tool, input);
-
   const brief = JSON.stringify(input).slice(0, 300);
+  let stufe: Stufe;
+  try {
+    stufe = stufeOf(tool, input);
+  } catch (e) {
+    // Etwa ein unbekanntes Protokoll: weder Auftrag noch Ausführung, Claude erfährt den Grund
+    const msg = schwaerze(e instanceof Error ? e.message : String(e));
+    audit("werkzeug", { tool: tool.name, input: brief, ok: false, fehler: msg.slice(0, 200) });
+    return { content: `Fehler: ${msg}`, is_error: true };
+  }
+
   if (stufe !== "auto") {
-    const summary = tool.summary ? tool.summary(input) : `${tool.name} ${brief}`;
+    // Ohne eigene Zusammenfassung die ganze Eingabe (brief ist fürs Audit gekürzt): freigegeben ist nur, was gezeigt wurde
+    const summary = tool.summary ? tool.summary(input) : `${tool.name} ${JSON.stringify(input)}`;
     // Kopie: das Original steht in der Chat-Historie und geht so an die API zurück
     const gespeichert = tool.festhalten ? tool.festhalten({ ...input }) : input;
     let auftrag: Auftrag;
@@ -234,7 +243,8 @@ async function execute(use: Anthropic.ToolUseBlock, hooks: AgentHooks): Promise<
     return { content: `Auftrag #${auftrag.id} angelegt (Stufe ${stufe}). Wartet auf Freigabe des Nutzers, ist noch NICHT ausgeführt.` };
   }
   try {
-    const out = await tool.run(input, hooks);
+    // Wie in Protokoll-Schritten: den Stand von jetzt festhalten, run gleicht damit ab (es läuft ja sofort)
+    const out = await tool.run(tool.festhalten ? tool.festhalten({ ...input }) : input, hooks);
     audit("werkzeug", { tool: tool.name, input: brief, ok: true });
     return { content: toContent(out) };
   } catch (e) {
@@ -245,10 +255,31 @@ async function execute(use: Anthropic.ToolUseBlock, hooks: AgentHooks): Promise<
   }
 }
 
+/**
+ * Hinderungsgrund, wenn ein Auftrag heute strenger gälte als beim Anlegen (extern → sensibel): Ob die PIN verlangt
+ * wird, richtet sich nach der gespeicherten a.stufe, ausgeführt wird aber mit der Lage von jetzt (etwa ein inzwischen
+ * sensibles Protokoll). Dann nicht ausführen, sondern neu beantragen lassen. Wirft die Stufe, gilt sie als sensibel.
+ */
+export function stufeVerschaerft(a: Auftrag): string | undefined {
+  if (a.stufe === "sensibel") return undefined;
+  const tool = activeTools().find((t) => t.name === a.tool);
+  if (!tool) return undefined; // runAuftrag meldet das selbst
+  let jetzt: Stufe;
+  try {
+    jetzt = stufeOf(tool, { ...a.input });
+  } catch {
+    jetzt = "sensibel";
+  }
+  return jetzt === "sensibel" ? `#${a.id} gilt inzwischen als sensibel (Freigabe mit PIN), Sir. Ich führe ihn nicht aus – bitte neu beantragen.` : undefined;
+}
+
 /** Führt einen freigegebenen Auftrag aus (vom Telegram-Button aufgerufen). */
 export async function runAuftrag(a: Auftrag, ctx: ToolContext): Promise<string> {
   const tool = activeTools().find((t) => t.name === a.tool);
   if (!tool) throw new Error(`Werkzeug ${a.tool} ist nicht mehr verfügbar.`);
+  // Zweite Verteidigung; die Freigabe-Pfade (beanspruche in telegram.ts) prüfen das schon vorher
+  const strenger = stufeVerschaerft(a);
+  if (strenger) throw new Error(strenger);
   audit("auftrag_ausgefuehrt", { id: a.id, tool: a.tool, stufe: a.stufe });
   const out = await tool.run(a.input, ctx);
   return typeof out === "string" ? out : out.text;

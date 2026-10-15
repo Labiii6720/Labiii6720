@@ -10,7 +10,7 @@ import { finanzUebersicht, offeneRechnungen, RECHNUNGEN_UNLESBAR, rechnungenNich
 import { haStates } from "./homeassistant.js";
 import { ausloesen, notfallAktiv } from "./notfall.js";
 import { profil } from "./profil.js";
-import { protokolle, protokollGesperrt, runProtokoll } from "./protokolle.js";
+import { protokollFesthalten, protokolle, protokollGesperrt, runProtokoll } from "./protokolle.js";
 import { AUFTRAEGE_UNLESBAR, auftraege, auftraegeNichtGeladen, createAuftrag, getAuftrag, offeneAuftraege, type Auftrag, type Status } from "./queue.js";
 import { gesundheit, schwaerze } from "./robust.js";
 import { save, state, type Mode } from "./state.js";
@@ -245,7 +245,7 @@ export async function protokollAction(req: Request, res: Response): Promise<void
   if (auftraegeNichtGeladen) return void res.status(503).json({ ok: false, error: "auftraege_unlesbar", text: AUFTRAEGE_UNLESBAR });
   let a: Auftrag;
   try {
-    a = createAuftrag({ tool: "protokoll_ausfuehren", input: { name }, stufe: p.stufe, summary: `Protokoll «${name}»: ${p.beschreibung}` });
+    a = createAuftrag({ tool: "protokoll_ausfuehren", input: protokollFesthalten(name), stufe: p.stufe, summary: `Protokoll «${name}»: ${p.beschreibung}` });
   } catch (e) {
     // Etwa die Speicherkarte voll: createAuftrag hat nichts angelegt; der Grund geschwärzt ins Dashboard
     console.error("Protokoll-Auftrag nicht angelegt:", schwaerze(e instanceof Error ? e.message : String(e)));

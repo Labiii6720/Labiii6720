@@ -185,7 +185,8 @@ export function ladeListe<T>(datei: string, name: string, pruefe?: Eintragspruef
   }
   if (gelesen.zustand === "kaputt") {
     if (nurLesenAktiv) return { liste: [], nichtGeladen: true, verworfen: 0, hoechsteId: 0 };
-    const kopie = sichereDefekt(datei);
+    // Gleiche Sicherung wiederverwenden: sonst legte jeder Neustart (Restart=on-failure alle 10 s) eine weitere Kopie an
+    const kopie = sichereDefekt(datei, { gleicheWiederverwenden: true });
     console.error(
       `${name} unlesbar – ${kopie ? `Kopie unter ${kopie}` : "Sicherung fehlgeschlagen"}. Jarvis startet ohne ${datei} und speichert die Datei nicht, bis sie repariert ist und Jarvis neu startet.`,
     );
@@ -220,6 +221,16 @@ export function untersucheListe(datei: string, pruefe: Eintragspruefung<unknown>
   if (gelesen.zustand !== "ok") return { zustand: "unlesbar", eintraege: 0, verworfen: 0 };
   const { gueltig, verworfen } = gueltigeEintraege(gelesen.roh, pruefe);
   return { zustand: "ok", eintraege: gueltig.length, verworfen };
+}
+
+/** true, wenn zu dieser Datei eine Sicherung `<datei>.defekt` oder `<datei>.defekt-…` existiert (nur lesen). */
+export function sicherungVorhanden(datei: string): boolean {
+  const praefix = `${basename(datei)}.defekt`;
+  try {
+    return readdirSync(dirname(datei)).some((name) => name === praefix || name.startsWith(`${praefix}-`));
+  } catch {
+    return false;
+  }
 }
 
 /** Fehlertext für gesperrtes Speichern (Jarvis-Ton). */
@@ -303,14 +314,20 @@ const AUFTRAG_STUFE: readonly unknown[] = ["extern", "sensibel"];
 
 /**
  * data/auftraege.json: id ganzzahlig > 0, tool, summary und createdAt als Text, stufe extern|sensibel, status bekannt,
- * input als Objekt; result und gestartetAm, falls vorhanden, als Text. Sonst würfen /status.json, /api/auftraege,
- * /auftraege, die Freigabe-Knöpfe und der Systemprompt (a.status auf null, schwaerze(a.summary)) – oder ein Auftrag
- * ohne Stufe liefe ohne PIN.
+ * input als Objekt; result, falls vorhanden, als Text. Sonst würfen /status.json, /api/auftraege, /auftraege, die
+ * Freigabe-Knöpfe und der Systemprompt (a.status auf null, schwaerze(a.summary)) – oder ein Auftrag ohne Stufe liefe
+ * ohne PIN.
+ * gestartetAm vorhanden heisst gestartet (Ergebnis unklar), auch wenn der Wert leer, unlesbar oder kein Text ist: Die
+ * Freigabe-Pfade prüfen auf Wahrheitswert, ein «» liesse den Auftrag sonst erneut laufen. Darum gilt dann der
+ * Ladezeitpunkt (spätestens da war er gestartet), und der Auftrag läuft nie ein zweites Mal.
  */
 export function auftragEintrag(roh: unknown): Auftrag | undefined {
   if (!istObjekt(roh) || !istId(roh.id) || !istText(roh.tool) || !istText(roh.summary) || !istText(roh.createdAt)) return undefined;
   if (!AUFTRAG_STUFE.includes(roh.stufe) || !AUFTRAG_STATUS.includes(roh.status) || !istObjekt(roh.input)) return undefined;
-  if ((roh.result !== undefined && !istText(roh.result)) || (roh.gestartetAm !== undefined && !istText(roh.gestartetAm))) return undefined;
+  if (roh.result !== undefined && !istText(roh.result)) return undefined;
+  if (roh.gestartetAm !== undefined && !istZeitpunkt(roh.gestartetAm)) {
+    return { ...roh, gestartetAm: new Date().toISOString() } as unknown as Auftrag;
+  }
   return roh as unknown as Auftrag;
 }
 

@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { describe, it } from "node:test";
 
 // npm run check verspricht «nur lesen»: Früher legte schon der Import von cameras.js (Befunde «Wachen» und «Listen»)
@@ -14,7 +15,7 @@ process.chdir(temp);
 // Im Temp-Ordner bleiben bis zum Prozessende (spätes Schreiben landet nie im Projekt), dann aufräumen
 process.once("exit", () => rmSync(temp, { recursive: true, force: true }));
 
-const { listenBefund } = await import("../src/check.js");
+const { listenBefund, sicherungsVermerk } = await import("../src/check.js");
 
 /** Alle Dateien unter dir mit Inhalt und Änderungszeit (Schnappschuss vor und nach dem Lauf). */
 function stand(dir: string): Record<string, string> {
@@ -27,10 +28,14 @@ function stand(dir: string): Record<string, string> {
   return aus;
 }
 
-/** scripts/check.ts als Kindprozess wie npm run check, ohne .env und ohne Zugangsdaten in der Umgebung. */
-function check(dir: string, nur?: string): { code: number | null; out: string } {
-  const r = spawnSync(process.execPath, ["--import", import.meta.resolve("tsx"), join(projekt, "scripts", "check.ts"), ...(nur ? ["--nur", nur] : [])], {
-    cwd: dir, encoding: "utf8", timeout: 120_000, env: { PATH: process.env.PATH, HOME: process.env.HOME },
+/**
+ * scripts/check.ts als Kindprozess wie npm run check, ohne .env und ohne Zugangsdaten in der Umgebung.
+ * `mit`: zusätzliche Umgebung und ein Vorlader (fetch-Attrappe), damit nie ein echter Dienst gefragt wird.
+ */
+function check(dir: string, nur?: string, mit: { env?: Record<string, string>; vorlader?: string } = {}): { code: number | null; out: string } {
+  const vorlader = mit.vorlader ? ["--import", pathToFileURL(mit.vorlader).href] : [];
+  const r = spawnSync(process.execPath, ["--import", import.meta.resolve("tsx"), ...vorlader, join(projekt, "scripts", "check.ts"), ...(nur ? ["--nur", nur] : [])], {
+    cwd: dir, encoding: "utf8", timeout: 120_000, env: { PATH: process.env.PATH, HOME: process.env.HOME, ...mit.env },
   });
   return { code: r.status, out: `${r.stdout}${r.stderr}` };
 }
@@ -48,11 +53,30 @@ describe("npm run check: nur lesen", () => {
     const r = check(dir, "Listen,Wachen,Finanzen");
     assert.equal(r.code, 0, r.out);
     assert.deepEqual(stand(dir), vorher, "kein .defekt, kein neuer Ordner, keine geänderte Datei");
-    assert.match(r.out, /❌ Finanzen: data\/rechnungen\.json unlesbar/);
+    // Keine Sicherung angelegt, also auch keine genannt (früher «Sicherung je .defekt» bzw. «(Sicherung .defekt)»)
+    assert.match(r.out, /❌ Finanzen: data\/rechnungen\.json unlesbar \(ungesichert, nur gelesen\), bitte reparieren und neu starten\n/);
     assert.match(r.out, /✅ Wachen: 2 Wache\(n\) aktiv/);
-    assert.match(r.out, /❌ Listen: unlesbar: Rechnungen; ungültig: Zeitpläne 1, Wachen 1, Aufträge 1; Sicherung je \.defekt; cameras\.json 1 ungültig \(von Hand reparieren\)\n/);
+    assert.match(r.out, /❌ Listen: unlesbar: Rechnungen; ungültig: Zeitpläne 1, Wachen 1, Aufträge 1; ungesichert, nur gelesen; cameras\.json 1 ungültig \(von Hand reparieren\)\n/);
+    assert.doesNotMatch(r.out, /Sicherung (je )?\.defekt/);
     assert.doesNotMatch(r.out, /übersprungen \(Sicherung unter/, "kein Sicherungs-Log");
     assert.doesNotMatch(r.out, /geheim/);
+  });
+
+  it("Sicherung aus einem früheren Dienststart: nur die vorhandene wird genannt", () => {
+    const dir = mkdtempSync(join(temp, "gesichert-"));
+    mkdirSync(join(dir, "data"));
+    writeFileSync(join(dir, "data", "rechnungen.json"), '[{"id": 1,');
+    writeFileSync(join(dir, "data", "rechnungen.json.defekt"), '[{"id": 1,');
+    writeFileSync(join(dir, "data", "wachen.json"), "{kaputt");
+    writeFileSync(join(dir, "data", "zeitplaene.json"), JSON.stringify([5]));
+    writeFileSync(join(dir, "data", "zeitplaene.json.defekt-2026-10-15T08-00-00-000Z"), JSON.stringify([5]));
+    const vorher = stand(dir);
+    const r = check(dir, "Listen,Wachen,Finanzen");
+    assert.equal(r.code, 0, r.out);
+    assert.deepEqual(stand(dir), vorher, "nichts angelegt oder geändert");
+    assert.match(r.out, /❌ Finanzen: data\/rechnungen\.json unlesbar \(Sicherung \.defekt\), bitte reparieren/);
+    assert.match(r.out, /❌ Wachen: data\/wachen\.json unlesbar \(ungesichert, nur gelesen\), Wachen aus/);
+    assert.match(r.out, /❌ Listen: unlesbar: Wachen, Rechnungen; ungültig: Zeitpläne 1; teils gesichert \(\.defekt\)\n/);
   });
 
   it("voller Lauf mit unlesbarer state.json und profil.json, zweimal: keine Sicherung, kein workspace/, Hinweis ohne Inhalt", () => {
@@ -89,6 +113,72 @@ describe("npm run check: nur lesen", () => {
     assert.equal(r.code, 0, r.out);
     assert.deepEqual(readdirSync(dir), [], r.out);
     assert.match(r.out, /✅ Listen: 7 Listen in data\/ lesbar, 0 gültige Einträge/);
+  });
+});
+
+describe("npm run check: WHOOP schreibt nichts und erneuert keinen Token", () => {
+  // Früher schrieb der Befund «WHOOP» data/state.json gleich dreifach: day() bei neuem Tag, der Token-Refresh (WHOOP
+  // rotiert den Refresh-Token, der laufende Dienst schriebe danach seinen alten, entwerteten zurück) und die Recovery.
+  // Dazu ersetzte der Check mit seinem Stand vom Prozessstart, was der Dienst inzwischen gespeichert hatte.
+  const protokoll = join(temp, "whoop-aufrufe.log");
+  const vorlader = join(temp, "whoop-attrappe.mjs");
+  writeFileSync(
+    vorlader,
+    `import { appendFileSync } from "node:fs";\n` +
+      `const json = (wert) => new Response(JSON.stringify(wert), { status: 200, headers: { "content-type": "application/json" } });\n` +
+      `globalThis.fetch = async (eingabe) => {\n` +
+      `  const url = String(eingabe instanceof Request ? eingabe.url : eingabe);\n` +
+      `  appendFileSync(${JSON.stringify(protokoll)}, url + "\\n");\n` +
+      `  if (url.includes("/oauth/oauth2/token")) return json({ access_token: "neu-at", refresh_token: "neu-rt", expires_in: 3600 });\n` +
+      `  if (url.includes("/v2/recovery")) return json({ records: [{ created_at: new Date().toISOString(), score_state: "SCORED", score: { recovery_score: 61, resting_heart_rate: 52, hrv_rmssd_milli: 70, user_calibrating: false } }] });\n` +
+      `  throw new TypeError("fetch failed: kein Netz im Test");\n};\n`,
+  );
+  const env = { WHOOP_CLIENT_ID: "attrappe-id", WHOOP_CLIENT_SECRET: "attrappe-secret" };
+  const aufrufe = (): string => (existsSync(protokoll) ? readFileSync(protokoll, "utf8") : "");
+  const zustand = (whoop: Record<string, unknown>) => JSON.stringify({ whoop: { refreshToken: "alt-rt", accessToken: "alt-at", ...whoop }, day: { date: "2020-01-01" }, mode: "fokus", naechsteAuftragId: 42 });
+
+  it("abgelaufener Token, alter Tag: kein Refresh, state.json unverändert, Befund sagt es", () => {
+    const dir = mkdtempSync(join(temp, "whoop-abgelaufen-"));
+    mkdirSync(join(dir, "data"));
+    writeFileSync(join(dir, "data", "state.json"), zustand({ expiresAt: 1 }));
+    rmSync(protokoll, { force: true });
+    const vorher = stand(dir);
+    const r = check(dir, "WHOOP", { env, vorlader });
+    assert.equal(r.code, 0, r.out);
+    assert.deepEqual(stand(dir), vorher, "kein neuer Token, kein neuer Tag in data/state.json");
+    assert.match(r.out, /✅ WHOOP: verbunden \(Token abgelaufen, der Dienst erneuert ihn; nicht live geprüft\)\n/);
+    assert.doesNotMatch(aufrufe(), /oauth2\/token/, "kein Token-Refresh");
+    assert.doesNotMatch(r.out, /alt-rt|neu-rt|alt-at|neu-at/);
+  });
+
+  it("gültiger Token, alter Tag: Recovery live gelesen, state.json trotzdem unverändert", () => {
+    const dir = mkdtempSync(join(temp, "whoop-gueltig-"));
+    mkdirSync(join(dir, "data"));
+    writeFileSync(join(dir, "data", "state.json"), zustand({ expiresAt: Date.now() + 3_600_000 }));
+    rmSync(protokoll, { force: true });
+    const vorher = stand(dir);
+    const r = check(dir, "WHOOP", { env, vorlader });
+    assert.equal(r.code, 0, r.out);
+    assert.match(r.out, /✅ WHOOP: verbunden, Recovery heute 61 %\n/);
+    assert.match(aufrufe(), /\/v2\/recovery/);
+    assert.doesNotMatch(aufrufe(), /oauth2\/token/);
+    assert.deepEqual(stand(dir), vorher, "weder day() noch die Recovery schreiben");
+  });
+});
+
+describe("sicherungsVermerk: eine Sicherung nur nennen, wenn sie existiert", () => {
+  it("alle, einzelne, teilweise, keine (im Dienst, nicht nur lesend)", () => {
+    const dir = mkdtempSync(join(temp, "vermerk-"));
+    mkdirSync(join(dir, "data"));
+    writeFileSync(join(dir, "data", "a.json.defekt"), "x");
+    writeFileSync(join(dir, "data", "b.json.defekt-2026-10-15T08-00-00-000Z"), "x");
+    writeFileSync(join(dir, "data", "c.json.defekt.alt"), "x"); // kein Sicherungsname
+    const p = (n: string) => join(dir, "data", n);
+    assert.equal(sicherungsVermerk([p("a.json")]), "Sicherung .defekt");
+    assert.equal(sicherungsVermerk([p("a.json"), p("b.json")]), "Sicherung je .defekt");
+    assert.equal(sicherungsVermerk([p("a.json"), p("c.json")]), "teils gesichert (.defekt)");
+    assert.equal(sicherungsVermerk([p("c.json")]), "ungesichert");
+    assert.equal(sicherungsVermerk([join(dir, "fehlt", "x.json")]), "ungesichert");
   });
 });
 

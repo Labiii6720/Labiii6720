@@ -160,6 +160,19 @@
   const inArbeit = new Set();
   /** Steigt bei jedem Leeren: Antworten auf vorher gestartete Abfragen füllen den Speicher nicht wieder */
   let quellenGen = 0;
+  /**
+   * Laufende Nummer je Quelle (und für /status.json): Antworten kommen nicht in Startreihenfolge an (Takt, Bereichswechsel,
+   * Neuladen nach dem Speichern). Eine Antwort, die vor der zuletzt übernommenen gestartet wurde, ist veraltet und wird
+   * verworfen – sonst stellte eine langsame, ältere Antwort den alten Stand bis zum nächsten Takt wieder her.
+   */
+  const abfrage = { gestartet: {}, uebernommen: {} };
+  const abfrageStart = (k) => (abfrage.gestartet[k] = (abfrage.gestartet[k] || 0) + 1);
+  /** true, wenn die Antwort zur Abfrage nr übernommen werden darf (und merkt sie dann als neueste) */
+  function abfrageNeu(k, nr) {
+    if (nr < (abfrage.uebernommen[k] || 0)) return false;
+    abfrage.uebernommen[k] = nr;
+    return true;
+  }
   let aktuell = "uebersicht";
   let letzteSig = {};
 
@@ -179,10 +192,12 @@
   async function holeQuelle(name) {
     const pfad = pfadVon(name);
     const gen = quellenGen;
+    const nr = abfrageStart(name);
     const r = await api(pfad);
     // Abgemeldet, inzwischen geleert (Notfall, Entwarnung) oder im Notfall: die Antwort kommt nicht mehr in den Speicher
     if (!angemeldet || gen !== quellenGen || (Q.status && Q.status.notfall)) return;
     if (pfadVon(name) !== pfad) return; // Zeitraum inzwischen gewechselt: alte Antwort verwerfen
+    if (!abfrageNeu(name, nr)) return; // eine neuere Antwort steht schon im Speicher
     if (r.status === 200 && r.daten && r.daten.ok) { Q[name] = { daten: r.daten }; fehler.quellen.delete(name); }
     else if (r.status === 0 || (r.status >= 500 && r.status !== 503)) fehler.quellen.add(name);
     else if (r.status !== 401) { Q[name] = { fehler: r.status, text: r.daten && typeof r.daten.text === "string" ? r.daten.text : "" }; fehler.quellen.delete(name); }
@@ -203,8 +218,9 @@
   }
 
   async function holeStatus() {
+    const nr = abfrageStart("/status.json");
     const r = await api("/status.json");
-    if (!angemeldet) return;
+    if (!angemeldet || !abfrageNeu("/status.json", nr)) return;
     if (r.status === 200 && r.daten && r.daten.ok) { fehler.status = false; uebernehmeStatus(r.daten); }
     else if (r.status !== 401) fehler.status = true;
     stoerungZeigen();

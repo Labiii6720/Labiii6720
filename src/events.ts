@@ -24,6 +24,8 @@ const budgetMs = (wert: unknown): number => Math.min(Math.max(Number(wert) || 25
 export const briefingSatellit = {
   teile: briefingTeile as (opts?: { telegramKopie?: boolean }) => Promise<BriefingTeile>,
   pauseMs: 60_000,
+  /** Pause zwischen zwei Versuchen; Tests binden sie an ein Ereignis statt an echte Zeit. */
+  warten: (ms: number): Promise<void> => new Promise<void>((r) => setTimeout(r, ms)),
   versuche: 10,
   /** laufende Nachlieferung (höchstens eine gleichzeitig) */
   laufend: undefined as Promise<void> | undefined,
@@ -61,7 +63,7 @@ async function briefingNachliefern(schonZugestellt: boolean): Promise<void> {
     // Ein Durchgang mehr nur, um abzuwarten, ob die zuletzt angestossene Kopie ankam
     const nachlauf = versuch > s.versuche;
     if (nachlauf && !bereitIm) break;
-    await new Promise<void>((r) => setTimeout(r, s.pauseMs));
+    await s.warten(s.pauseMs);
     if (gesperrt()) {
       audit("briefing_satellit_nachgeliefert", { versuch, abgebrochen: "notaus" });
       return;

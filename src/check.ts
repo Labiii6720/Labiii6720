@@ -1,9 +1,10 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { existsSync } from "node:fs";
 import { config, opt } from "./config.js";
+import { istNurLesen, sicherungVorhanden } from "./datei.js";
 import { gesundheit, schwaerze } from "./robust.js";
 import { pruefeZeitfenster } from "./setup.js";
-import { state } from "./state.js";
+import { day, state } from "./state.js";
 
 /**
  * Selbsttest: prüft jede eingerichtete Anbindung mit einem echten, billigen Aufruf und sagt klar,
@@ -72,7 +73,10 @@ export async function selbsttest(nur?: string[], beiBefund?: (b: Befund) => void
 
   await lauf("WHOOP", Boolean(opt("WHOOP_CLIENT_ID")), async () => {
     if (!state.whoop?.refreshToken) throw new Error("nicht verbunden: npm run whoop:auth");
-    const r = await (await sources()).recoveryToday(PRUEF_MS);
+    const s = await sources();
+    // npm run check erneuert keinen Token (WHOOP rotiert ihn, der laufende Dienst hielte sonst einen entwerteten)
+    if (istNurLesen() && !s.whoopTokenGueltig() && !day().recovery) return "verbunden (Token abgelaufen, der Dienst erneuert ihn; nicht live geprüft)";
+    const r = await s.recoveryToday(PRUEF_MS);
     return r ? `verbunden, Recovery heute ${r.score} %` : "verbunden, Recovery heute noch nicht berechnet";
   });
 
@@ -149,12 +153,12 @@ export async function selbsttest(nur?: string[], beiBefund?: (b: Befund) => void
   });
   await lauf("Finanzen", true, async () => {
     const f = await import("./finanzen.js");
-    if (f.rechnungenNichtGeladen) throw new Error("data/rechnungen.json unlesbar (Sicherung .defekt), bitte reparieren und neu starten");
+    if (f.rechnungenNichtGeladen) throw new Error(`data/rechnungen.json unlesbar (${sicherungsVermerk(["data/rechnungen.json"])}), bitte reparieren und neu starten`);
     return `${f.rechnungen.length} Rechnung(en) erfasst`;
   });
   await lauf("Wachen", true, async () => {
     const k = await import("./cameras.js");
-    if (k.wachenNichtGeladen) throw new Error("data/wachen.json unlesbar (Sicherung .defekt), Wachen aus – bitte reparieren und neu starten");
+    if (k.wachenNichtGeladen) throw new Error(`data/wachen.json unlesbar (${sicherungsVermerk(["data/wachen.json"])}), Wachen aus – bitte reparieren und neu starten`);
     if (k.camerasNichtGeladen) throw new Error("cameras.json unlesbar, Kameras, Meldungen und Wachen aus der Datei sind aus");
     // Wie der Takt in watch.ts (wacheZustand): ohne gültiges «alle_minuten», auf fehlender bzw. verworfener Kamera oder
     // mit ungültigem «nur_wenn» schaut eine Wache nicht hin, zählt also nicht als aktiv. Fehlt beides, zählt sie bei beiden Gründen.
@@ -173,15 +177,18 @@ export async function selbsttest(nur?: string[], beiBefund?: (b: Befund) => void
     await import("./cameras.js");
     const unlesbar: string[] = [];
     const ungueltig: { name: string; anzahl: number }[] = [];
+    const betroffen: string[] = [];
     let eintraege = 0;
     for (const l of d.LISTEN) {
       const u = d.untersucheListe(l.datei, l.pruefe);
       eintraege += u.eintraege;
       if (u.zustand === "unlesbar") unlesbar.push(l.name);
       else if (u.verworfen) ungueltig.push({ name: l.name, anzahl: u.verworfen });
+      else continue;
+      betroffen.push(l.datei);
     }
     const kameras = d.uebersprungenAnzahl("cameras.json");
-    if (unlesbar.length || ungueltig.length || kameras) throw new Error(listenBefund(unlesbar, ungueltig, kameras));
+    if (unlesbar.length || ungueltig.length || kameras) throw new Error(listenBefund(unlesbar, ungueltig, kameras, sicherungsVermerk(betroffen)));
     return `${d.LISTEN.length} Listen in data/ lesbar, ${eintraege} gültige Einträge`;
   });
   await lauf("Protokolle", true, async () => `${Object.keys((await import("./protokolle.js")).protokolle).length} Protokoll(e)`);
@@ -206,12 +213,23 @@ export async function selbsttest(nur?: string[], beiBefund?: (b: Befund) => void
 }
 
 /**
- * Befund «Listen» lesbar in BEFUND_MAX Zeichen, statt mitten im Wort abgeschnitten: zuerst mit Anzahl je Liste, sonst nur
- * die Namen, sonst nur die Zahl der Listen. Eine Sicherung (.defekt) legt nur der Dienst für data/ an, nie für cameras.json.
+ * Sicherungs-Vermerk für unlesbare oder verdorbene Dateien: eine Sicherung nur nennen, wenn sie existiert. npm run check
+ * liest nur und legt keine an, und eine Datei ohne Leserechte kann auch der Dienst nicht sichern.
  */
-export function listenBefund(unlesbar: string[], ungueltig: { name: string; anzahl: number }[], kameras: number): string {
+export function sicherungsVermerk(dateien: readonly string[]): string {
+  const gesichert = dateien.filter((d) => sicherungVorhanden(d)).length;
+  if (dateien.length && gesichert === dateien.length) return dateien.length > 1 ? "Sicherung je .defekt" : "Sicherung .defekt";
+  if (gesichert) return "teils gesichert (.defekt)";
+  return istNurLesen() ? "ungesichert, nur gelesen" : "ungesichert";
+}
+
+/**
+ * Befund «Listen» lesbar in BEFUND_MAX Zeichen, statt mitten im Wort abgeschnitten: zuerst mit Anzahl je Liste, sonst nur
+ * die Namen, sonst nur die Zahl der Listen. `sicherungText` aus sicherungsVermerk; cameras.json sichert Jarvis nie.
+ */
+export function listenBefund(unlesbar: string[], ungueltig: { name: string; anzahl: number }[], kameras: number, sicherungText = "Sicherung je .defekt"): string {
   const cam = kameras ? [`cameras.json ${kameras} ungültig (von Hand reparieren)`] : [];
-  const sicherung = unlesbar.length || ungueltig.length ? ["Sicherung je .defekt"] : [];
+  const sicherung = unlesbar.length || ungueltig.length ? [sicherungText] : [];
   const text = (u: string | undefined, g: string | undefined) =>
     [...(u ? [`unlesbar: ${u}`] : []), ...(g ? [`ungültig: ${g}`] : []), ...sicherung, ...cam].join("; ");
   const anzahl = (n: number) => (n ? `${n} ${n === 1 ? "Liste" : "Listen"}` : undefined);

@@ -177,7 +177,10 @@ describe("Freigabe-Knopf: nur unter der zuletzt gesendeten Nachricht", () => {
     const teile = gesendet.filter((g) => g.method === "sendMessage");
     assert.equal(teile.length, 2);
     assert.deepEqual(teile.map((t) => t.knoepfe), [false, true]);
-    assert.equal(teile.map((t) => t.text).join(""), `🟠 Auftrag #${a.id} · Stufe extern\n\n${"x".repeat(5000)}`);
+    // Jeder Teil mit eigenem Kopf; unter den Knöpfen nie nur das Ende der Zusammenfassung (siehe freigabe-volltext)
+    assert.ok(teile[0]!.text!.startsWith(`🟠 Auftrag #${a.id} · Stufe extern (Teil 1/2)\n\n`));
+    assert.ok(teile[1]!.text!.startsWith(`⬆️ Auftrag #${a.id} · Stufe extern (Teil 2/2, Anfang oben)\n\n`));
+    assert.equal(teile.map((t) => t.text!.replace(/^[^\n]*\n\n/, "")).join(""), "x".repeat(5000));
     await knopf(`nein:${a.id}`, a.messageId!);
     assert.equal(queue.getAuftrag(a.id)?.status, "abgelehnt");
   });

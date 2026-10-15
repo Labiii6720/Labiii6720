@@ -145,7 +145,13 @@ app.use((err: unknown, _req: express.Request, res: express.Response, _next: expr
 });
 
 // Standard: nur lokal lauschen (Alexa kommt über den Cloudflare Tunnel). LISTEN_HOST=0.0.0.0 öffnet das Heimnetz für /events.
-app.listen(config.port, config.listenHost, () => {
+// Express 5 ruft den Callback auch bei einem Fehler (Port belegt): dann beenden statt still ohne /alexa, /notfall und
+// Dashboard weiterzulaufen – systemd (Restart=on-failure) sieht den Fehler, und kein zweiter Scheduler läuft mit.
+app.listen(config.port, config.listenHost, (err?: Error) => {
+  if (err) {
+    console.error(`Port ${config.port} auf ${config.listenHost} nicht verfügbar (${schwaerze(err.message)}). Jarvis beendet sich, Sir.`);
+    process.exit(1);
+  }
   console.log(`Jarvis läuft auf http://${config.listenHost}:${config.port}${config.eventToken ? " (Ereignisse aktiv)" : ""}`);
 });
 
