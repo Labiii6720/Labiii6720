@@ -1148,6 +1148,64 @@ describe("Kommandozentrale im Browser", { skip: chrome ? false : "kein Chromium 
     assert.deepEqual(z, { body: false, karte: "Zeitpläne", aktion: "plan-edit" }, "Fokus auf dem nächsten Zeitplan");
   });
 
+  it("Begonnen, aber nicht mehr in Arbeit (laeuft false): Karte «Ergebnis unklar» mit Wegräumen, ohne Freigeben und Laufband", async () => {
+    // Nur in der Anzeige: #401 nach einem Absturz begonnen (laeuft false), #402 läuft gerade
+    const begonnen = new Date(Date.now() - 5 * 60000).toISOString();
+    const extra = [
+      { id: 401, tool: "gmail_senden", stufe: "extern", summary: "Unklar <b>A</b>", gestartetAm: begonnen, laeuft: false },
+      { id: 402, tool: "gmail_senden", stufe: "extern", summary: "Läuft B", gestartetAm: begonnen, laeuft: true },
+    ];
+    let weg = false;
+    const gesendet: unknown[] = [];
+    await page.route("**/status.json", async (route) => {
+      const echt = await route.fetch();
+      const d = (await echt.json()) as { auftraege?: unknown[] } & Record<string, unknown>;
+      const neu = extra.filter((a) => !(weg && a.id === 401)).map((a) => ({ ...a, seit: new Date(Date.now() - 60000).toISOString() }));
+      await route.fulfill({ response: echt, json: { ...d, auftraege: [...(d.auftraege ?? []), ...neu] } }).catch(() => undefined);
+    });
+    await page.route("**/api/auftrag", async (r) => {
+      const b = r.request().postDataJSON() as { id: number; aktion: string };
+      if (!extra.some((a) => a.id === b.id)) return r.fallback();
+      gesendet.push(b);
+      weg = true;
+      await r.fulfill({ json: { ok: true, text: `🗂 #${b.id} weggeräumt.`, status: "fehler" } }).catch(() => undefined);
+    });
+    try {
+      await page.evaluate(() => { location.hash = "uebersicht"; });
+      await sofort(page);
+      await page.waitForSelector('#v-uebersicht .auftrag.unklar button[data-aktion="ablehnen"][data-id="401"]');
+      const karte = await page.evaluate(() => {
+        const knopf = document.querySelector('#v-uebersicht button[data-aktion="ablehnen"][data-id="401"]')!;
+        const k = knopf.closest("article")!;
+        const lauf = document.querySelector('#v-uebersicht button[data-aktion="ablehnen"][data-id="402"]');
+        const k402 = [...document.querySelectorAll("#v-uebersicht .auftrag")].find((a) => a.querySelector(".mono")?.textContent === "#402");
+        return {
+          text: k.querySelector(".laufzeit")?.textContent ?? "",
+          knopf: knopf.textContent,
+          freigeben: Boolean(k.querySelector('[data-aktion="freigeben"]')),
+          laufband: Boolean(k.querySelector(".laufband")),
+          was: k.querySelector(".was")?.innerHTML ?? "",
+          lauf402: Boolean(k402?.classList.contains("laeuft") && k402.querySelector(".laufband")),
+          knopf402: Boolean(lauf),
+        };
+      });
+      assert.match(karte.text, /Ergebnis unklar – bitte prüfen, Sir/);
+      assert.equal(karte.knopf, "Wegräumen");
+      assert.equal(karte.freigeben, false, "kein Freigeben-Knopf");
+      assert.equal(karte.laufband, false, "kein Laufband");
+      assert.equal(karte.was, "Unklar &lt;b&gt;A&lt;/b&gt;", "Text nur über textContent");
+      assert.equal(karte.lauf402, true, "laufender Auftrag behält Laufband");
+      assert.equal(karte.knopf402, false, "laufender Auftrag ohne Knopf");
+      await page.click('#v-uebersicht button[data-aktion="ablehnen"][data-id="401"]');
+      await page.waitForFunction(() => !document.querySelector('#v-uebersicht [data-id="401"]'), null, { timeout: 4000 });
+      assert.deepEqual(gesendet, [{ id: 401, aktion: "nein" }]);
+    } finally {
+      await page.unroute("**/status.json");
+      await page.unroute("**/api/auftrag");
+      await sofort(page);
+    }
+  });
+
   it("Gespräch: nach «Senden» per Tastatur oder Klick liegt der Fokus im Eingabefeld, nie auf <body>", async () => {
     // Jede Anfrage wartet, bis der Test sie loslässt: so lässt sich der Fokus während «läuft …» prüfen
     const tore: (() => void)[] = [];

@@ -32,6 +32,13 @@ export interface Protokoll {
 const STUFEN: readonly unknown[] = ["auto", "extern", "sensibel"];
 
 /**
+ * Ein Protokoll ruft keine Protokolle auf: sonst liefe ein sensibles inneres Protokoll mit der Stufe des äusseren
+ * (auto ohne Tippen, extern ohne PIN), und sein Inhalt stünde nicht im Abdruck der Freigabe. Selbstaufruf endete im Stapelüberlauf.
+ */
+const VERSCHACHTELT = "protokoll_ausfuehren";
+const ruftProtokoll = (p: Protokoll): boolean => Array.isArray(p.schritte) && p.schritte.some((s) => s?.tool === VERSCHACHTELT);
+
+/**
  * Stufe eines Protokolls aus protokolle.json: nur genau auto, extern oder sensibel. Alles andere («Sensibel»,
  * «sensibel », fehlend) gilt als sensibel, also Tippen plus PIN: Ein Tippfehler bei einem Protokoll, das Schlösser oder
  * den Alarm schaltet, darf nie ohne PIN laufen (die PIN prüfen Telegram und Dashboard nur bei genau «sensibel»).
@@ -48,15 +55,18 @@ export const protokolle: Record<string, Protokoll> = (() => {
   if (!roh || typeof roh !== "object" || Array.isArray(roh)) return {};
   const aus: Record<string, Protokoll> = {};
   let strenger = 0;
+  let verschachtelt = 0;
   for (const [name, p] of Object.entries(roh as Record<string, unknown>)) {
     if (!p || typeof p !== "object" || Array.isArray(p)) continue;
     const eintrag = p as Protokoll;
     const stufe = protokollStufe(eintrag.stufe);
     if (stufe !== eintrag.stufe) strenger++;
     aus[name] = { ...eintrag, stufe };
+    if (ruftProtokoll(aus[name])) verschachtelt++;
   }
   // Nur die Anzahl, kein Inhalt der Datei
   if (strenger) console.error(`protokolle.json: ${strenger === 1 ? "1 Protokoll" : `${strenger} Protokolle`} ohne gültige Stufe (auto, extern, sensibel) – gilt als sensibel, Freigabe mit PIN.`);
+  if (verschachtelt) console.error(`protokolle.json: ${verschachtelt === 1 ? "1 Protokoll ruft" : `${verschachtelt} Protokolle rufen`} ein anderes Protokoll auf – diese Schritte werden übersprungen.`);
   return aus;
 })();
 
@@ -107,7 +117,7 @@ export function protokollGesperrt(): string | undefined {
 }
 
 export async function runProtokoll(name: string, ctx: ToolContext): Promise<string> {
-  const p = protokolle[name];
+  const p = protokollNamens(name);
   if (!p) throw new Error(`Protokoll «${name}» gibt es nicht.`);
   const gesperrt = protokollGesperrt();
   if (gesperrt) return `Protokoll «${name}» nicht ausgeführt. ${gesperrt}`;
@@ -122,6 +132,7 @@ export async function runProtokoll(name: string, ctx: ToolContext): Promise<stri
     }
     try {
       if (s.tool) {
+        if (s.tool === VERSCHACHTELT) throw new Error("Ein Protokoll ruft keine anderen Protokolle auf, Sir. Schritt übersprungen.");
         const t = toolByName(s.tool);
         if (!t) throw new Error(`Werkzeug ${s.tool} nicht verfügbar`);
         // Das Protokoll ist eine feste, vom Nutzer geschriebene Anweisung und über seine Stufe freigegeben: den Stand

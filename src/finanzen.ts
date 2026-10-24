@@ -1,5 +1,6 @@
 import { mkdirSync, renameSync, writeFileSync } from "node:fs";
 import { ladeListe, rechnungEintrag } from "./datei.js";
+import { save, state } from "./state.js";
 import { todayKey } from "./time.js";
 
 /**
@@ -43,6 +44,37 @@ export const rechnungen: Rechnung[] = geladen.liste;
 /** Höchste Nummer beim Start, verworfene Einträge eingeschlossen: eine neue Rechnung bekommt keine davon wieder. */
 const hoechsteIdBeimStart = geladen.hoechsteId;
 
+/**
+ * Untergrenze für neue Rechnungsnummern in state.json (wie naechsteAuftragId in queue.ts): nach jedem Erfassen die
+ * nächste Nummer, dazu beim Speichern die über verworfenen Einträgen. saveRechnungen() schreibt die verworfenen nicht
+ * zurück; ohne die Untergrenze vergäbe addRechnung() deren Nummern nach dem Neustart neu, und «#9» träfe eine andere
+ * Rechnung.
+ */
+
+const hoechsteGueltigeId = (): number => Math.max(0, ...rechnungen.map((r) => r.id));
+
+/** Liegt beim Start eine verworfene Nummer über allen gültigen, wird sie vor dem Schreiben in state.json gesichert. */
+function rechnungZaehlerNachziehen(): void {
+  if (hoechsteIdBeimStart <= hoechsteGueltigeId()) return;
+  const mindestens = hoechsteIdBeimStart + 1;
+  const gemerkt = state.naechsteRechnungId;
+  if (Number.isSafeInteger(gemerkt) && gemerkt! >= mindestens) return;
+  state.naechsteRechnungId = mindestens;
+  try {
+    save();
+  } catch (e) {
+    if (gemerkt === undefined) delete state.naechsteRechnungId;
+    else state.naechsteRechnungId = gemerkt;
+    throw e;
+  }
+}
+
+/** Nächste Nummer: über allen gültigen, allen beim Start verworfenen und der gemerkten Untergrenze. */
+function neueRechnungId(): number {
+  const gemerkt = state.naechsteRechnungId;
+  return Math.max(hoechsteGueltigeId() + 1, hoechsteIdBeimStart + 1, Number.isSafeInteger(gemerkt) ? gemerkt! : 1);
+}
+
 /** Meldung für alle Anzeigen und Erinnerungen, solange die Datei beim Start unlesbar war */
 export const RECHNUNGEN_UNLESBAR =
   "⚠️ data/rechnungen.json war beim Start unlesbar, Sir (Sicherung, sofern möglich, unter data/rechnungen.json.defekt). Bis die Datei repariert ist und ich neu gestartet bin, zeige ich keine Rechnungen und erinnere an keine.";
@@ -80,6 +112,7 @@ function zuSpeichern(heute = todayKey()): Rechnung[] {
 
 export function saveRechnungen(): void {
   pruefeSchreibbar();
+  rechnungZaehlerNachziehen(); // vor dem Schreiben: danach fehlen die verworfenen Nummern in der Datei
   const liste = zuSpeichern();
   mkdirSync("data", { recursive: true, mode: 0o700 });
   writeFileSync(`${FILE}.tmp`, JSON.stringify(liste, null, 2), { mode: 0o600 });
@@ -157,8 +190,19 @@ export function erkenneRechnung(text: string): Erkannt {
 
 export function addRechnung(r: Omit<Rechnung, "id" | "erkanntAm" | "status"> & { status?: Rechnung["status"] }): Rechnung {
   pruefeSchreibbar(); // vor dem push: sonst stünde im Speicher eine Rechnung, die nie gespeichert wird
-  const id = Math.max(hoechsteIdBeimStart, ...rechnungen.map((x) => x.id)) + 1;
+  const id = neueRechnungId();
+  if (!Number.isSafeInteger(id)) throw new Error("Nummernraum erschöpft, Sir – data/rechnungen.json prüfen.");
   const rechnung: Rechnung = { id, erkanntAm: new Date().toISOString(), status: "offen", ...r };
+  // Untergrenze zuerst sichern; scheitert das, wird nichts erfasst
+  const gemerkt = state.naechsteRechnungId;
+  state.naechsteRechnungId = id + 1;
+  try {
+    save();
+  } catch (e) {
+    if (gemerkt === undefined) delete state.naechsteRechnungId;
+    else state.naechsteRechnungId = gemerkt;
+    throw e;
+  }
   rechnungen.push(rechnung);
   saveRechnungen();
   return rechnung;

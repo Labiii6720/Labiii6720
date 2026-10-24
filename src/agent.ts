@@ -258,7 +258,7 @@ async function execute(use: Anthropic.ToolUseBlock, hooks: AgentHooks): Promise<
 /**
  * Hinderungsgrund, wenn ein Auftrag heute strenger gälte als beim Anlegen (extern → sensibel): Ob die PIN verlangt
  * wird, richtet sich nach der gespeicherten a.stufe, ausgeführt wird aber mit der Lage von jetzt (etwa ein inzwischen
- * sensibles Protokoll). Dann nicht ausführen, sondern neu beantragen lassen. Wirft die Stufe, gilt sie als sensibel.
+ * sensibles Protokoll). Dann nicht ausführen, sondern neu beantragen lassen. Wirft die Stufe, ebenso – mit dem Grund.
  */
 export function stufeVerschaerft(a: Auftrag): string | undefined {
   if (a.stufe === "sensibel") return undefined;
@@ -267,8 +267,9 @@ export function stufeVerschaerft(a: Auftrag): string | undefined {
   let jetzt: Stufe;
   try {
     jetzt = stufeOf(tool, { ...a.input });
-  } catch {
-    jetzt = "sensibel";
+  } catch (e) {
+    // Etwa ein inzwischen entferntes Protokoll: nicht ausführen und den wahren Grund nennen, nicht «sensibel»
+    return `#${a.id} lässt sich nicht mehr prüfen (${schwaerze(e instanceof Error ? e.message : String(e)).slice(0, 120)}), Sir. Ich führe ihn nicht aus – bitte neu beantragen.`;
   }
   return jetzt === "sensibel" ? `#${a.id} gilt inzwischen als sensibel (Freigabe mit PIN), Sir. Ich führe ihn nicht aus – bitte neu beantragen.` : undefined;
 }

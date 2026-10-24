@@ -4,7 +4,7 @@ import { config, opt } from "./config.js";
 import { istNurLesen, sicherungVorhanden } from "./datei.js";
 import { gesundheit, schwaerze } from "./robust.js";
 import { pruefeZeitfenster } from "./setup.js";
-import { day, state } from "./state.js";
+import { day, state, stateNichtGeladen, zustandDefekt } from "./state.js";
 
 /**
  * Selbsttest: prüft jede eingerichtete Anbindung mit einem echten, billigen Aufruf und sagt klar,
@@ -56,6 +56,18 @@ export async function selbsttest(nur?: string[], beiBefund?: (b: Befund) => void
     beiBefund?.(befund);
   };
 
+  // Zuerst: mit unlesbarer state.json startet der Dienst im Notfall, und WHOOP/Gmail wirken bloss «nicht verbunden».
+  await lauf("Zustand", true, async () => {
+    if (stateNichtGeladen) throw new Error(`data/state.json unlesbar (${zustandDefekt?.ursache ?? "?"}, ${sicherungsVermerk(["data/state.json"])}) – Dienst startet im Notfall; reparieren oder entfernen, neu starten`);
+    return existsSync("data/state.json") ? "data/state.json lesbar" : "data/state.json noch nicht angelegt";
+  });
+  // Unlesbar startet der Dienst still mit leerem Profil, und erst das nächste Speichern (Werkzeug, Verdichtung) scheitert.
+  await lauf("Profil", true, async () => {
+    const p = await import("./profil.js");
+    if (p.profilNichtGeladen) throw new Error(`data/profil.json unlesbar (${sicherungsVermerk(["data/profil.json"])}) – leeres Profil, nichts wird gespeichert; reparieren, neu starten`);
+    return existsSync("data/profil.json") ? "data/profil.json lesbar" : "data/profil.json noch nicht angelegt";
+  });
+
   // Genau ein Versuch wie bei allen anderen Prüfungen; sonst wiederholt das SDK Zeitüberschreitungen zweimal (3 × 15 s).
   await lauf("Claude-API", Boolean(opt("ANTHROPIC_API_KEY")), async () => {
     const list = await new Anthropic({ maxRetries: 0 }).models.list({ limit: 50 }, { timeout: TEST_MS > 0 ? PRUEF_MS : 15_000 });
@@ -72,6 +84,8 @@ export async function selbsttest(nur?: string[], beiBefund?: (b: Befund) => void
   });
 
   await lauf("WHOOP", Boolean(opt("WHOOP_CLIENT_ID")), async () => {
+    // Neu anmelden hilft dann nicht: das Auth-Skript speichert nichts (pruefeZustandSpeicherbar)
+    if (stateNichtGeladen) throw new Error("state.json unlesbar – erst reparieren, dann npm run whoop:auth");
     if (!state.whoop?.refreshToken) throw new Error("nicht verbunden: npm run whoop:auth");
     const s = await sources();
     // npm run check erneuert keinen Token (WHOOP rotiert ihn, der laufende Dienst hielte sonst einen entwerteten)
@@ -89,6 +103,7 @@ export async function selbsttest(nur?: string[], beiBefund?: (b: Befund) => void
   await lauf("Outlook-Kalender", Boolean(opt("OUTLOOK_ICS_URL")), async () => `lesbar, heute ${(await (await sources()).outlookEvents()).length} Termin(e) (${config.outlookMode})`);
 
   await lauf("Gmail", Boolean(config.gmail), async () => {
+    if (stateNichtGeladen) throw new Error("state.json unlesbar – erst reparieren, dann npm run google:auth");
     if (!state.google?.refreshToken) throw new Error("nicht verbunden: npm run google:auth");
     const { searchMails } = await import("./gmail.js");
     await searchMails("newer_than:1d", 1);
@@ -179,9 +194,11 @@ export async function selbsttest(nur?: string[], beiBefund?: (b: Befund) => void
     const ungueltig: { name: string; anzahl: number }[] = [];
     const betroffen: string[] = [];
     let eintraege = 0;
+    let fehlen = 0;
     for (const l of d.LISTEN) {
       const u = d.untersucheListe(l.datei, l.pruefe);
       eintraege += u.eintraege;
+      if (u.zustand === "fehlt") { fehlen++; continue; }
       if (u.zustand === "unlesbar") unlesbar.push(l.name);
       else if (u.verworfen) ungueltig.push({ name: l.name, anzahl: u.verworfen });
       else continue;
@@ -189,7 +206,7 @@ export async function selbsttest(nur?: string[], beiBefund?: (b: Befund) => void
     }
     const kameras = d.uebersprungenAnzahl("cameras.json");
     if (unlesbar.length || ungueltig.length || kameras) throw new Error(listenBefund(unlesbar, ungueltig, kameras, sicherungsVermerk(betroffen)));
-    return `${d.LISTEN.length} Listen in data/ lesbar, ${eintraege} gültige Einträge`;
+    return `${d.LISTEN.length - fehlen} Listen in data/ lesbar${fehlen ? `, ${fehlen} noch nicht angelegt` : ""}, ${eintraege} gültige Einträge`;
   });
   await lauf("Protokolle", true, async () => `${Object.keys((await import("./protokolle.js")).protokolle).length} Protokoll(e)`);
   await lauf("Sicherheit", true, async () => {

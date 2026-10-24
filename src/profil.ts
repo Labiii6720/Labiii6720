@@ -141,6 +141,10 @@ function sichere(nach: string): void {
  */
 export let profilNichtGeladen = false;
 
+/** Hinweis für Startmeldung, /status, Dashboard und npm run check, solange profilNichtGeladen gilt (ohne Dateiinhalt) */
+export const PROFIL_UNLESBAR =
+  "⚠️ data/profil.json war beim Start unlesbar, Sir (Sicherung, sofern möglich, unter data/profil.json.defekt). Ich arbeite mit leerem Profil und speichere nichts daran, bis die Datei repariert ist und ich neu gestartet bin.";
+
 export const profil: Profil = (() => {
   let text: string;
   try {

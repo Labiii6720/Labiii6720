@@ -2,6 +2,16 @@
 
 Kurz und nur das Wichtigste. Details stehen im README.
 
+## 0.22.2
+- Kommandozentrale: Ein begonnener Auftrag, der nach einem Absturz nicht mehr läuft (`laeuft: false` in `/status.json` und `/api/auftraege`), erscheint als «Ergebnis unklar – bitte prüfen» mit «Wegräumen» statt dauerhaft als «läuft».
+- Aufträge: Kürzen auf 200 schont offene und begonnene; der Zähler wird beim Start aus dem Altbestand in `state.json` gesichert (einmal nach dem Update von 0.21, auch über `scripts/try.ts`); ein Knopf zu einem Auftrag ohne gesendete Freigabe gilt als veraltet.
+- Nummern: Zeitpläne, Wachen und Vorgänge vergeben auch die Nummern verworfener Einträge nicht neu (Vorgänge unabhängig von der Reihenfolge), Rechnungen merken ihren Zähler in `state.json`. Bei erschöpftem Nummernraum wird nichts angelegt.
+- `/api/protokoll` und Protokoll-Läufe nehmen keine Prototyp-Namen wie «constructor» an (404 statt 500).
+- PIN: Wird ein Auftrag anderswo entschieden, während Telegram auf die PIN wartet, löscht Jarvis die nächste PIN-artige Eingabe (vertippte PIN) und Sprachnachrichten weiter, statt sie an Claude, in die Historie oder ans STT zu geben; Sätze laufen normal.
+- PIN über den Chat nicht mehr erratbar: Ohne wartende Abfrage bekommt alles, was die PIN sein könnte (bei einer Ziffern-PIN jede Zahl von 4 bis 12 Stellen), dieselbe Antwort wie die PIN selbst, wird gelöscht und zählt als unbefugter Zugriff (fünf in fünf Minuten → Notfall); ebenso gesprochen und nach einer verfallenen Abfrage. Eine abgelaufene Abfrage schützt die nächste PIN-artige Eingabe noch zwei Minuten (vertippt, verspätet), eine anderswo entschiedene zwei Minuten ab der Entscheidung.
+- Vorgänge, die ein Neustart oder Absturz unterbrochen hat, stehen nach dem Start nicht mehr dauerhaft als «läuft»: Der Dienst setzt sie auf «fehler» (Ergebnis unklar), meldet sie einmal und hinterlegt Claude eine Systemnotiz.
+- Eine unlesbare `data/profil.json` steht jetzt in Startmeldung, `/status`, `/status.json` (`profilUnlesbar`), Kommandozentrale und `npm run check` (Befund «Profil»).
+
 ## 0.22.1
 - Browser-Schritte laufen nacheinander (eine Sperre für Öffnen, Tippen, Klicken, Lesen, Zurück, Screenshot): Ein freigegebener Klick prüft Seite und Eingaben erst, wenn kein anderer Schritt (Zeitplan, Vorgang, Chat) mehr läuft, und klickt unter derselben Sperre. Getippte Eingaben stehen schon vor dem Ausfüllen im Vermerk und bleiben bei einem Fehler stehen.
 - `mail_senden`: offene Aufträge aus älteren Versionen (Text in der Freigabe auf 700 Zeichen gekürzt) senden nichts mehr, sondern verlangen einen neuen Antrag.

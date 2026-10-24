@@ -9,12 +9,12 @@ import { config } from "./config.js";
 import { finanzUebersicht, offeneRechnungen, RECHNUNGEN_UNLESBAR, rechnungenNichtGeladen, type Rechnung } from "./finanzen.js";
 import { haStates } from "./homeassistant.js";
 import { ausloesen, notfallAktiv } from "./notfall.js";
-import { profil } from "./profil.js";
-import { protokollFesthalten, protokolle, protokollGesperrt, runProtokoll } from "./protokolle.js";
+import { profil, profilNichtGeladen } from "./profil.js";
+import { protokollFesthalten, protokolle, protokollGesperrt, protokollNamens, runProtokoll } from "./protokolle.js";
 import { AUFTRAEGE_UNLESBAR, auftraege, auftraegeNichtGeladen, createAuftrag, getAuftrag, offeneAuftraege, type Auftrag, type Status } from "./queue.js";
 import { gesundheit, schwaerze } from "./robust.js";
 import { save, state, type Mode } from "./state.js";
-import { approveAuftrag, denyAuftrag, hooks, notausAn, notausAus, pinGesperrtText, pinPruefen, pinSperreRest, sendText } from "./telegram.js";
+import { approveAuftrag, auftragLaeuft, denyAuftrag, hooks, notausAn, notausAus, pinGesperrtText, pinPruefen, pinSperreRest, sendText } from "./telegram.js";
 import { vorgaenge, vorgaengeNichtGeladen } from "./vorgaenge.js";
 import { naechsterLauf, neueZeitplanId, normaleTage, pruefeZeitplan, saveZeitplaene, ZEITPLAENE_UNLESBAR, zeitplaene, zeitplaeneNichtGeladen, zeitplanZustand, type Zeitplan } from "./zeitplaene.js";
 
@@ -112,7 +112,7 @@ export function statusJson(_req: Request, res: Response): void {
     modus: state.mode ?? "normal",
     pausiert: Boolean(state.paused),
     notfall: notfallAktiv(),
-    auftraege: offeneAuftraege().map((a) => ({ id: a.id, tool: a.tool, stufe: a.stufe, summary: a.summary, seit: a.createdAt, gestartetAm: a.gestartetAm })),
+    auftraege: offeneAuftraege().map((a) => ({ id: a.id, tool: a.tool, stufe: a.stufe, summary: a.summary, seit: a.createdAt, gestartetAm: a.gestartetAm, ...(a.gestartetAm ? { laeuft: auftragLaeuft(a.id) } : {}) })),
     rechnungen: offeneRechnungen().slice(0, 10).map((r) => ({ id: r.id, empfaenger: r.empfaenger, betrag: r.betrag, waehrung: r.waehrung, faellig: r.faellig })),
     // Leere Liste heisst dann nicht «keine offenen Rechnungen»
     rechnungenUnlesbar: rechnungenNichtGeladen,
@@ -121,6 +121,8 @@ export function statusJson(_req: Request, res: Response): void {
     camerasUnlesbar: camerasNichtGeladen,
     zeitplaeneUnlesbar: zeitplaeneNichtGeladen,
     vorgaengeUnlesbar: vorgaengeNichtGeladen,
+    // Leere Ziele und Werte heissen dann nicht «noch keine»
+    profilUnlesbar: profilNichtGeladen,
     vorgaenge: vorgaenge.slice(-8).map((v) => ({ id: v.id, status: v.status, steps: v.steps, auftrag: v.auftrag.slice(0, 90) })),
     zeitplaene: zeitplaene.map((z) => ({ id: z.id, name: textAnzeige(z.name), zeit: zeitAnzeige(z.zeit), tage: tageAnzeige(z.tage) })),
     wachen: allWachen().map((w) => ({ kamera: textAnzeige(w.kamera), frage: frageAnzeige(w.frage).slice(0, 80), ...taktAnzeige(w) })),
@@ -160,8 +162,10 @@ export async function auftragAction(req: Request, res: Response): Promise<void> 
   if (aktion === "ok" && a.stufe === "sensibel" && a.status === "offen" && pinSperreRest() > 0) {
     return void res.status(429).json({ ok: false, error: "pin_gesperrt", text: pinGesperrtText(), status: a.status });
   }
+  const vorher = a.status;
   const text = aktion === "ok" ? await approveAuftrag(a, typeof pin === "string" ? pin : undefined) : await denyAuftrag(a);
-  if (aktion === "ok") audit("auftrag_freigabe", { id: a.id, tool: a.tool, status: a.status, quelle: "dashboard" });
+  // Nur protokollieren, wenn dieses «ok» den Auftrag abgeschlossen hat (nicht bei «bereits erledigt», «läuft», «unklar», Notaus)
+  if (aktion === "ok" && vorher === "offen" && a.status !== "offen") audit("auftrag_freigabe", { id: a.id, tool: a.tool, status: a.status, quelle: "dashboard" });
   res.json({ ok: true, text, status: a.status });
 }
 
@@ -227,7 +231,7 @@ export function auditTail(_req: Request, res: Response): void {
 
 export async function protokollAction(req: Request, res: Response): Promise<void> {
   const name = String((req.body ?? {}).name ?? "");
-  const p = protokolle[name];
+  const p = protokollNamens(name); // nie Prototyp-Namen wie «constructor»
   if (!p) return void res.status(404).json({ ok: false, error: "nicht_gefunden", text: "Dieses Protokoll gibt es nicht, Sir." });
   // Text im Feld `text` (wie überall): das Dashboard zeigt ihn an. Ohne ihn meldete es bei 423 fest einen Notfall,
   // auch wenn nur der Notaus aktiv ist (dann gilt «Weiter mit PIN» bzw. /weiter, nicht /entwarnung).
@@ -318,7 +322,8 @@ export function auftraegeJson(req: Request, res: Response): void {
       stufe: a.stufe,
       summary: schwaerze(a.summary),
       status: a.status,
-      ...(a.gestartetAm ? { gestartetAm: a.gestartetAm } : {}),
+      // laeuft: false heisst begonnen, aber nicht mehr in Arbeit (Absturz) – Ergebnis unklar
+      ...(a.gestartetAm ? { gestartetAm: a.gestartetAm, laeuft: auftragLaeuft(a.id) } : {}),
       ...(a.result !== undefined ? { result: schwaerze(a.result).slice(0, 300) } : {}),
     })),
   });

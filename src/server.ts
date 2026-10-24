@@ -16,6 +16,7 @@ import {
   protokollAction, statusJson, wacheAendern, wacheAnlegen, wacheLoeschen, wachenJson, zeitplaeneJson, zeitplanAendern, zeitplanAnlegen, zeitplanLoeschen,
 } from "./dashboard.js";
 import { gesundheit, schwaerze } from "./robust.js";
+import { vorgaengeNachNeustart } from "./vorgaenge.js";
 
 const app = express();
 app.disable("x-powered-by");
@@ -144,6 +145,26 @@ app.use((err: unknown, _req: express.Request, res: express.Response, _next: expr
   res.status(Number.isInteger(code) && code >= 400 && code < 600 ? code : 500).json({ ok: false });
 });
 
+// Hintergrundläufe erst, wenn der Port steht: bei belegtem Port sonst Telegram-Poll, MQTT und Wetter bei jedem
+// Neustart-Versuch von systemd angestossen, kurz bevor exit(1) greift.
+function hintergrundStarten(): void {
+  startTelegram();
+  // Vorgänge, die ein Neustart oder Absturz unterbrochen hat: auf «fehler», Systemnotiz, Meldung (ohne Telegram nur Status und Notiz)
+  void vorgaengeNachNeustart().catch((e: unknown) => console.error("Vorgänge nach Neustart:", e instanceof Error ? schwaerze(e.message) : e));
+  // Unlesbare Dateien (Zustand, Wachen, Kameras, Zeitpläne …) einmal melden; ohne Telegram bleibt es bei console.error und /check
+  if (config.telegramToken && config.telegramOwner) void dateiHinweiseMelden();
+  if (config.telegramToken && config.telegramOwner) startScheduler();
+  if (config.frigateUrl && config.telegramToken) startWatch();
+
+  // morningTick meldet Fehler je Quelle an die Gesundheit; hier landet nur, was dort durchrutscht
+  const tick = () => morningTick().catch((e) => console.error("Hintergrund-Fehler:", e instanceof Error ? schwaerze(e.message) : e));
+  tick();
+  setInterval(tick, 5 * 60_000);
+
+  // Watchdog: dauerhafte Störungen einmal melden, Erholung melden (Meldungen laufen über den Postausgang in telegram.ts)
+  setInterval(() => gesundheit.tick().catch((e) => console.error("Watchdog:", e instanceof Error ? schwaerze(e.message) : e)), 60_000);
+}
+
 // Standard: nur lokal lauschen (Alexa kommt über den Cloudflare Tunnel). LISTEN_HOST=0.0.0.0 öffnet das Heimnetz für /events.
 // Express 5 ruft den Callback auch bei einem Fehler (Port belegt): dann beenden statt still ohne /alexa, /notfall und
 // Dashboard weiterzulaufen – systemd (Restart=on-failure) sieht den Fehler, und kein zweiter Scheduler läuft mit.
@@ -153,22 +174,9 @@ app.listen(config.port, config.listenHost, (err?: Error) => {
     process.exit(1);
   }
   console.log(`Jarvis läuft auf http://${config.listenHost}:${config.port}${config.eventToken ? " (Ereignisse aktiv)" : ""}`);
+  hintergrundStarten();
 });
-
-startTelegram();
-// Unlesbare Dateien (Zustand, Wachen, Kameras, Zeitpläne …) einmal melden; ohne Telegram bleibt es bei console.error und /check
-if (config.telegramToken && config.telegramOwner) void dateiHinweiseMelden();
-if (config.telegramToken && config.telegramOwner) startScheduler();
-if (config.frigateUrl && config.telegramToken) startWatch();
 
 for (const sig of ["SIGINT", "SIGTERM"] as const) {
   process.on(sig, () => void closeBrowser().finally(() => process.exit(0)));
 }
-
-// morningTick meldet Fehler je Quelle an die Gesundheit; hier landet nur, was dort durchrutscht
-const tick = () => morningTick().catch((e) => console.error("Hintergrund-Fehler:", e instanceof Error ? schwaerze(e.message) : e));
-tick();
-setInterval(tick, 5 * 60_000);
-
-// Watchdog: dauerhafte Störungen einmal melden, Erholung melden (Meldungen laufen über den Postausgang in telegram.ts)
-setInterval(() => gesundheit.tick().catch((e) => console.error("Watchdog:", e instanceof Error ? schwaerze(e.message) : e)), 60_000);

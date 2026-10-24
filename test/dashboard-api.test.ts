@@ -197,13 +197,24 @@ describe("GET /api/auftraege: Freigabe-Historie", () => {
     for (const geheim of ["GEHEIMER-MAILTEXT", "GEHEIMER-TERMIN", "lock.haustuer", "abcdefghijklmnop0123", "geheim123"]) assert.ok(!roh.includes(geheim), geheim);
     for (const a of liste) {
       assert.ok(!("input" in a), "nie input");
-      assert.deepEqual(Object.keys(a).filter((k) => !["id", "createdAt", "tool", "stufe", "summary", "status", "gestartetAm", "result"].includes(k)), []);
+      assert.deepEqual(Object.keys(a).filter((k) => !["id", "createdAt", "tool", "stufe", "summary", "status", "gestartetAm", "laeuft", "result"].includes(k)), []);
     }
     const eins = liste.find((a) => a.id === 1)!;
     assert.equal(String(eins.result).length, 300);
     assert.match(String(eins.result), /Bearer <token>/);
     assert.equal(liste.find((a) => a.id === 4)!.gestartetAm, "2026-10-04T08:01:00.000Z");
+    // Begonnen, aber in diesem Prozess nicht in Arbeit: laeuft false (Ergebnis unklar); ohne gestartetAm kein Feld
+    assert.equal(liste.find((a) => a.id === 4)!.laeuft, false);
+    for (const a of liste) if (!a.gestartetAm) assert.ok(!("laeuft" in a));
     assert.equal(liste.find((a) => a.id === 3)!.summary, "Termin <img src=x onerror=alert(1)>", "Text bleibt Text, das UI setzt ihn per textContent");
+  });
+
+  it("Lage (/api/status): begonnener Auftrag ohne laufendes Werkzeug trägt laeuft false", async () => {
+    const r = await rufe(dashboard.statusJson);
+    assert.equal(r.statusCode, 200);
+    const vier = (r.body.auftraege as Record<string, unknown>[]).find((a) => a.id === 4)!;
+    assert.equal(vier.gestartetAm, "2026-10-04T08:01:00.000Z");
+    assert.equal(vier.laeuft, false);
   });
 
   it("Filter nach Status und Stufe, Limit 1..200, ungültiger Status 400", async () => {
@@ -790,6 +801,18 @@ describe("POST /api/auftrag: Ablehnen ohne Hängen", () => {
     }
     await ruhe();
     assert.ok(telegram.includes(`❌ #${a.id} abgelehnt (Dashboard).`), "die Meldung kommt nach, sobald Telegram antwortet");
+  });
+});
+
+describe("POST /api/protokoll: nur eigene Namen", () => {
+  it("Prototyp-Namen wie «constructor» und «__proto__» sind unbekannt: 404, kein Auftrag", async () => {
+    const vorher = auftraege.length;
+    for (const name of ["constructor", "__proto__", "toString"]) {
+      const r = await rufe(dashboard.protokollAction, { body: { name } });
+      assert.equal(r.statusCode, 404, name);
+      assert.equal(r.body.error, "nicht_gefunden", name);
+    }
+    assert.equal(auftraege.length, vorher);
   });
 });
 

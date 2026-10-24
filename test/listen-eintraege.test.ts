@@ -166,8 +166,8 @@ describe("Listen in data/ mit ungültigen Einträgen beim Start", () => {
     for (const datei of ["zeitplaene.json", "wachen.json"]) {
       assert.equal(readFileSync(join(temp, "data", `${datei}.defekt`), "utf8"), ORIGINAL[datei], "die Sicherung bewahrt die verworfenen");
     }
-    // Neue IDs überspringen auch die verworfenen nicht: höchste gültige + 1
-    assert.equal(zeitplanMod.neueZeitplanId(), 2);
-    assert.equal(kameras.neueWacheId(), 2);
+    // Neue IDs überspringen auch die verworfenen: höchste Nummer in der Datei (verworfene eingeschlossen) + 1
+    assert.equal(zeitplanMod.neueZeitplanId(), 3);
+    assert.equal(kameras.neueWacheId(), 3);
   });
 });

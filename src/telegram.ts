@@ -15,7 +15,7 @@ import { listVorgaenge, startVorgang, VORGAENGE_UNLESBAR, vorgaengeNichtGeladen 
 import { verbrauchBericht } from "./claude.js";
 import { aufheben, ausloesen, notfallAktiv } from "./notfall.js";
 import { createAuftrag } from "./queue.js";
-import { protokollFesthalten, protokolle, protokollGesperrt, runProtokoll } from "./protokolle.js";
+import { protokollFesthalten, protokolle, protokollGesperrt, protokollNamens, runProtokoll } from "./protokolle.js";
 import { formatBefund, selbsttest } from "./check.js";
 import { abuseSignal } from "./notfall.js";
 import { HttpFehler, fehlerArt, fehlerDetail, gesundheit, mitWiederholung, nutzerText, schwaerze, voruebergehend, wartezeit } from "./robust.js";
@@ -23,8 +23,12 @@ import { clock } from "./time.js";
 import { berichtText, verdichteJetzt, vorschauText } from "./verdichtung.js";
 import { eintragsHinweise, ladeListe, postausgangEintrag } from "./datei.js";
 import { finanzUebersicht, RECHNUNGEN_UNLESBAR, rechnungen, rechnungenNichtGeladen, wochenberichtText } from "./finanzen.js";
+import { PROFIL_UNLESBAR, profilNichtGeladen } from "./profil.js";
 
 const API = () => `https://api.telegram.org/bot${config.telegramToken}`;
+/** Ohne Token und Chat-ID geht nichts hinaus (sonst Aufrufe an …/botundefined) und nichts in den Postausgang. */
+const eingerichtet = (): boolean => Boolean(config.telegramToken && config.telegramOwner);
+const nichtEingerichtet = () => new HttpFehler("Telegram nicht eingerichtet (TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID)", 400);
 /** Claude und die Verdichtung sind hier ersetzbar (Tests mit Attrappen); im Betrieb die echten Funktionen. */
 export const abhaengigkeiten = { handleMessage, verdichteJetzt };
 const owner = () => config.telegramOwner ?? "";
@@ -151,6 +155,8 @@ interface TelegramAntwort<T> {
 
 /** Ein Aufruf der Bot-API. Fehler als HttpFehler mit Status (und Retry-After bei 429), damit robust.ts sie einordnen kann. */
 async function api<T = unknown>(method: string, body: Record<string, unknown> | FormData): Promise<T> {
+  // client-Fehler: kein Wiederholen, keine Störungsmeldung
+  if (!eingerichtet()) throw nichtEingerichtet();
   const isForm = body instanceof FormData;
   const res = await fetch(`${API()}/${method}`, {
     method: "POST",
@@ -338,6 +344,8 @@ export async function sendeSpaeter(text: string, optionen: SpaeterOptionen = {})
  * Ohne Vorrang geht im Notfall nichts direkt hinaus, auch kein weiterer Teil: es bleibt bis /entwarnung im Postausgang.
  */
 async function zustellen(text: string, optionen: SpaeterOptionen): Promise<boolean> {
+  // Ohne Telegram weder senden noch ablegen: nachgereicht würde ohnehin nie (postausgangTick läuft nur mit Telegram)
+  if (!eingerichtet()) return false;
   const faellig = new Date().toISOString();
   const zurueckhalten = optionen.imNotfallZurueckhalten ? notfallAktiv : undefined;
   if (zurueckhalten?.()) return false;
@@ -360,7 +368,8 @@ let nachreichenLaeuft = false;
 
 /** Alle 60 s: Liegengebliebenes in Reihenfolge nachreichen, sobald Telegram wieder antwortet. */
 export async function postausgangTick(): Promise<void> {
-  if (nachreichenLaeuft || postausgang.length === 0) return;
+  // Ohne Telegram nichts verwerfen: der Eintrag wartet, bis Token und Chat-ID gesetzt sind
+  if (nachreichenLaeuft || postausgang.length === 0 || !eingerichtet()) return;
   nachreichenLaeuft = true;
   try {
     while (postausgang.length > 0) {
@@ -521,7 +530,12 @@ async function sendAuftrag(a: Auftrag, melden = true): Promise<boolean> {
     const r = await sendeTeile(teile[k]!, letzter ? knoepfe : {}, notfallAktiv);
     if (!r.ok) {
       if (r.abgebrochen || notfallAktiv()) {
-        if (melden) await sendText(wartetImNotfall([a.id])).catch(log);
+        if (melden) {
+          // Alle offenen nennen, nicht nur diesen (wie /auftraege im Notfall)
+          const ids = offeneAuftraege().map((x) => x.id);
+          if (!ids.includes(a.id)) ids.push(a.id);
+          await sendText(wartetImNotfall(ids)).catch(log);
+        }
         return false;
       }
       throw r.fehler;
@@ -538,6 +552,8 @@ export const hooks = { sendFile, sendPhoto, sendVideo, onAuftrag: async (a: Auft
 
 /** Aufträge, deren Werkzeug gerade läuft: der Status bleibt bis zum Ende «offen», darum braucht es diese Sperre. */
 const inArbeit = new Set<number>();
+/** Läuft das Werkzeug dieses Auftrags gerade? Begonnen (gestartetAm) und nicht in Arbeit heisst: Ergebnis unklar. */
+export const auftragLaeuft = (id: number): boolean => inArbeit.has(id);
 const laeuftBereits = (a: Auftrag) => `#${a.id} wird bereits ausgeführt, Sir.`;
 /** Begonnen, aber nie abgeschlossen (Absturz mitten im Werkzeug): nicht nochmals ausführen, die Nebenwirkung kann schon eingetreten sein. */
 const ergebnisUnklar = (a: Auftrag) => `#${a.id} wurde bereits gestartet, Ergebnis unklar – bitte prüfen, Sir.`;
@@ -549,6 +565,7 @@ export const WEGGERAEUMT = "begonnen, Ergebnis unklar – vom Nutzer weggeräumt
  * «abgelehnt», und Claude erfährt, dass er ihn nicht ungeprüft erneut vorschlagen soll (sonst doppelte Nebenwirkung).
  */
 function wegraeumen(a: Auftrag, quelle: "telegram" | "dashboard"): string {
+  pinVerwerfen(a.id);
   audit("auftrag_weggeraeumt", { id: a.id, tool: a.tool, quelle });
   setStatus(a, "fehler", WEGGERAEUMT);
   addSystemNote(`Auftrag #${a.id} (${a.tool}) wurde begonnen, das Ergebnis ist unklar; der Nutzer hat ihn weggeräumt. Nicht erneut vorschlagen, ohne dass der Nutzer geprüft hat, ob er ausgeführt wurde.`);
@@ -645,8 +662,64 @@ function knoepfeEntfernen(messageId: number): void {
   void apiRobust("editMessageReplyMarkup", { chat_id: owner(), message_id: messageId, reply_markup: { inline_keyboard: [] } }).catch(() => undefined);
 }
 
+/** Frist der PIN-Abfrage, ebenso der Schutz danach (verfallene Abfrage) */
+const PIN_FRIST_MS = 2 * 60_000;
 /** Wartet auf die PIN für einen sensiblen Auftrag */
 let pendingPin: { id: number; until: number } | undefined;
+/**
+ * Abfrage verfallen (anderswo entschieden oder Frist abgelaufen): Die nächste Nachricht innert einer neuen Frist kann
+ * trotzdem die (vertippte, verspätete) PIN sein. Sie gehört weder in den Chat noch an Claude oder zum STT-Anbieter.
+ */
+let pinVerfallen: { id: number; until: number; grund: "entschieden" | "abgelaufen" } | undefined;
+/** Entschieden anderswo (Dashboard): die wartende PIN-Abfrage verfällt, sonst verschluckte sie die nächste Nachricht. */
+function pinVerwerfen(id: number): void {
+  if (pendingPin?.id !== id) return;
+  // Neue Frist ab der Entscheidung, nicht die Restzeit der Abfrage
+  pinVerfallen = { id, until: Date.now() + PIN_FRIST_MS, grund: "entschieden" };
+  pendingPin = undefined;
+}
+/**
+ * Frist abgelaufen: wie verfallen behandeln, damit eine verspätete (auch vertippte) PIN nicht an Claude geht. Geprüft
+ * erst bei der nächsten Nachricht, darum gilt der Schutz ab dem Ablauf, nicht ab jetzt (Stunden später nicht mehr).
+ */
+function pinAblaufen(): void {
+  if (!pendingPin || Date.now() <= pendingPin.until) return;
+  pinVerfallen = { id: pendingPin.id, until: pendingPin.until + PIN_FRIST_MS, grund: "abgelaufen" };
+  pendingPin = undefined;
+}
+/** Antwort auf eine PIN-artige Eingabe nach verfallener Abfrage; hängt nie davon ab, ob die Eingabe stimmt. */
+function verfallenText(v: NonNullable<typeof pinVerfallen>, sprache: boolean): string {
+  const nieSprechen = "Sprachnachricht gelöscht; die PIN bitte nie sprechen.";
+  if (v.grund === "abgelaufen" && getAuftrag(v.id)?.status === "offen") {
+    return sprache ? `Zeit abgelaufen, Sir. ${nieSprechen} /auftraege zeigt #${v.id} nochmal.` : `Zeit abgelaufen. /auftraege zeigt #${v.id} nochmal.`;
+  }
+  return `#${v.id} ist nicht mehr offen, Sir. ${sprache ? nieSprechen : "Nachricht gelöscht."}`;
+}
+
+/** Sieht die Eingabe nach einer (vertippten) PIN aus? Kein Befehl, kein Satz, kaum länger als die PIN. */
+function pinAehnlich(eingabe: string): boolean {
+  return eingabe.length > 0 && pinVersuch(eingabe) && eingabe.length <= Math.max(12, (config.pin ?? "").length + 2);
+}
+
+/**
+ * Könnte die Eingabe die PIN sein? PIN-ähnlich, mindestens 4 Zeichen und von derselben Art (nur Ziffern; mit Ziffern;
+ * ohne Ziffern). Die PIN selbst gehört immer dazu. Ohne wartende Abfrage bekommt alles davon dieselbe Antwort und
+ * wird gleich gezählt; sonst verriete die Antwort, welche Eingabe die PIN ist.
+ */
+function pinFoermig(eingabe: string): boolean {
+  const pin = config.pin;
+  if (!pin || !pinAehnlich(eingabe) || eingabe.length < Math.min(4, pin.length)) return false;
+  if (/^\d+$/.test(pin)) return /^\d+$/.test(eingabe);
+  return /\d/.test(pin) === /\d/.test(eingabe);
+}
+
+/**
+ * PIN-förmige Eingabe ohne wartende Abfrage: zählt als Missbrauch (5 in 5 Minuten → Notfall), richtig oder falsch.
+ * Nicht bei einer PIN ohne Ziffern: sonst zählte jedes «Danke». Die gleiche Antwort verrät dort trotzdem nichts.
+ */
+function pinRatenZaehlen(eingabe: string): void {
+  if (pinFoermig(eingabe) && /\d/.test(config.pin ?? "")) abuseSignal("pin");
+}
 
 /** Freigabe von einer anderen Oberfläche (Dashboard). Sensible Aufträge brauchen die PIN im selben Schritt. */
 export async function approveAuftrag(a: Auftrag, pin?: string): Promise<string> {
@@ -662,6 +735,7 @@ export async function approveAuftrag(a: Auftrag, pin?: string): Promise<string> 
       // Wie in Telegram: eine falsche PIN lehnt den Auftrag ab, sonst liesse sich die PIN durchprobieren.
       audit("pin_falsch", { id: a.id, tool: a.tool, quelle: "dashboard" });
       setStatus(a, "abgelehnt", "falsche PIN");
+      pinVerwerfen(a.id);
       abuseSignal("pin");
       if (a.messageId) knoepfeEntfernen(a.messageId);
       void sendeSpaeter(`⚠️ Falsche PIN im Dashboard. #${a.id} abgelehnt, Sir.`).catch(log);
@@ -671,11 +745,12 @@ export async function approveAuftrag(a: Auftrag, pin?: string): Promise<string> 
     pinFehler.length = 0;
   }
   // Zwischen Prüfung und Ausführung kein await: execute beansprucht den Auftrag synchron.
+  pinVerwerfen(a.id);
   if (a.messageId) knoepfeEntfernen(a.messageId);
   const hindernis = await execute(a, DASHBOARD_MELDUNG_FRIST_MS);
   if (hindernis) return hindernis;
   if (notfallAktiv()) return zurueckgehalten(a);
-  const nachher = getAuftrag(a.id)!; // execute hat den Status gesetzt
+  const nachher = getAuftrag(a.id) ?? a; // execute hat den Status gesetzt
   return nachher.status === "erledigt" ? `✅ #${a.id} erledigt: ${nachher.result ?? ""}` : `⚠️ #${a.id}: ${nachher.result ?? "Fehler"}`;
 }
 
@@ -690,6 +765,7 @@ export async function denyAuftrag(a: Auftrag): Promise<string> {
   }
   audit("auftrag_abgelehnt", { id: a.id, tool: a.tool, quelle: "dashboard" });
   setStatus(a, "abgelehnt");
+  pinVerwerfen(a.id);
   addSystemNote(`Auftrag #${a.id} (${a.tool}) wurde vom Nutzer abgelehnt.`);
   // Wie beim Freigeben ohne Warten: bei gestörtem Telegram dauerten die Wiederholungen Minuten, und die Antwort ans
   // Dashboard bliebe so lange aus. Die Meldung geht über den Postausgang, also auch nach einer Störung noch hinaus.
@@ -727,7 +803,8 @@ async function onCallback(cb: { id: string; data?: string; message?: { message_i
   if (cb.message) knoepfeEntfernen(cb.message.message_id);
   // Knopf unter einer anderen Nachricht als der zuletzt gesendeten Freigabe: veraltet (etwa ein Auftrag mit derselben
   // Nummer vor dem Ersetzen von data/auftraege.json). Nie freigeben, was unter einer anderen Zusammenfassung stand.
-  if (cb.message && a.messageId !== undefined && cb.message.message_id !== a.messageId) {
+  // Ohne gemerkte messageId (Freigabe nie mit Knöpfen gesendet) gilt jeder Knopf als veraltet.
+  if (cb.message && cb.message.message_id !== a.messageId) {
     audit("knopf_veraltet", { id: a.id, aktion: action });
     return void await sendText(VERALTETER_KNOPF);
   }
@@ -745,7 +822,8 @@ async function onCallback(cb: { id: string; data?: string; message?: { message_i
   }
   if (a.stufe === "sensibel") {
     if (!config.pin) return void await sendText("Für sensible Aufträge fehlt eine PIN: JARVIS_PIN in .env setzen.");
-    pendingPin = { id: a.id, until: Date.now() + 2 * 60_000 };
+    pendingPin = { id: a.id, until: Date.now() + PIN_FRIST_MS };
+    pinVerfallen = undefined;
     return void await sendText(`#${a.id} ist sensibel. PIN bitte, innerhalb von zwei Minuten.`);
   }
   const hindernis = await execute(a);
@@ -807,7 +885,8 @@ async function onCommand(cmd: string, arg: string): Promise<void> {
       return void await sendText(wochenberichtText(finanzUebersicht()));
     case "/protokoll": {
       const name = arg.trim().toLowerCase();
-      const p = protokolle[name];
+      // Nur eigene Einträge: «constructor» oder «__proto__» sind kein Protokoll
+      const p = protokollNamens(name);
       if (!p) return void await sendText(`Protokolle: ${Object.keys(protokolle).join(", ") || "keine (protokolle.json)"}`);
       // Notaus: auch kein auto-Protokoll (dessen Werkzeuge liefen sonst an jeder Freigabe vorbei)
       if (state.paused) return void await sendText(notausHinweis());
@@ -937,6 +1016,17 @@ export async function handleUpdate(u: Update): Promise<void> {
   }
   // synchron beim Aufruf (vor jedem await), damit eingereihte Aufhebe-Befehle es sicher sehen
   if (istDringend(u)) letzterDringend = Math.max(letzterDringend, ankunftsnummer(u));
+  // Inzwischen anderswo entschieden (Dashboard, «Ablehnen», gelöscht): die Abfrage verfällt. Ein Satz läuft normal
+  // weiter; die PIN selbst oder eine PIN-artige Eingabe fangen die Abschnitte unten ab (verfallen).
+  if (pendingPin && getAuftrag(pendingPin.id)?.status !== "offen") pinVerwerfen(pendingPin.id);
+  // Abgelaufen verfällt ebenso: eine verspätete, vertippte PIN geht so weder an Claude noch in den Chat.
+  pinAblaufen();
+  // Gilt nur für die nächste Nachricht innert der Frist; /pause und /notfall laufen daneben und verbrauchen nichts.
+  let verfallen: NonNullable<typeof pinVerfallen> | undefined;
+  if (pinVerfallen && !istDringend(u)) {
+    if (Date.now() <= pinVerfallen.until) verfallen = pinVerfallen;
+    pinVerfallen = undefined;
+  }
 
   let spoken = false;
   let text = (m.text ?? "").trim();
@@ -949,6 +1039,11 @@ export async function handleUpdate(u: Update): Promise<void> {
       await apiRobust("deleteMessage", { chat_id: owner(), message_id: m.message_id }).catch(() => undefined);
       return void await sendText(`Die PIN bitte tippen, Sir, nie sprechen. #${id} wartet nicht mehr; /auftraege zeigt ihn wieder.`);
     }
+    // Abfrage eben verfallen: vermutlich die PIN dafür, also auch nicht zum STT-Anbieter
+    if (verfallen !== undefined) {
+      await apiRobust("deleteMessage", { chat_id: owner(), message_id: m.message_id }).catch(() => undefined);
+      return void await sendText(verfallenText(verfallen, true));
+    }
     if (m.voice.duration > 120) return void await sendText("Das ist mir zu lang, bitte unter zwei Minuten.");
     await typing();
     try {
@@ -958,18 +1053,19 @@ export async function handleUpdate(u: Update): Promise<void> {
     }
     if (!text) return void await sendText("Da habe ich nichts verstanden.");
     spoken = true;
-    // Die PIN als Sprachnachricht (ohne wartende Freigabe): kein Echo, nie an Claude
-    if (pinStimmt(text)) {
+    // Etwas PIN-Förmiges gesprochen (ohne wartende Freigabe), richtig oder falsch: kein Echo, nie an Claude, gleiche
+    // Antwort und gleich gezählt. Ein Satzzeichen am Ende (Spracherkennung) ändert daran nichts.
+    const gesprochen = [text, text.replace(/[.!?,;:]+$/, "")].find(pinFoermig);
+    if (gesprochen !== undefined) {
       pendingPin = undefined;
       await apiRobust("deleteMessage", { chat_id: owner(), message_id: m.message_id }).catch(() => undefined);
       audit("pin_gesprochen", {});
+      pinRatenZaehlen(gesprochen);
       return void await sendText("Die PIN bitte tippen, Sir, nie sprechen. Sprachnachricht gelöscht.");
     }
     await sendText(`🎙 ${text}`);
   }
 
-  // Abgelaufen: nur die PIN selbst wird noch abgefangen (gelöscht statt an Claude), alles andere läuft normal.
-  if (pendingPin && Date.now() > pendingPin.until && !pinStimmt(text)) pendingPin = undefined;
   // /weiter bzw. /entwarnung im Notaus ist nie die PIN: die wartende Freigabe verfällt (sie muss nach dem Notaus
   // ohnehin neu kommen), der Befehl läuft normal – sonst würde er gelöscht und der Notaus bliebe stehen.
   const ersterBefehl = text.split(/\s+/)[0]?.toLowerCase() ?? "";
@@ -1011,10 +1107,21 @@ export async function handleUpdate(u: Update): Promise<void> {
     return;
   }
 
-  // Die PIN ohne wartende Freigabe (etwa nach einem Neustart erneut geliefert): löschen, nie an Claude und in die Historie.
-  if (pinStimmt(text)) {
+  // Ab hier wartet keine Abfrage. Die Antwort hängt nie davon ab, ob die Eingabe die PIN ist: sonst liesse sich die PIN
+  // über den Chat ungezählt durchprobieren, bis die Antwort wechselt.
+  // Abfrage eben verfallen und jetzt etwas PIN-Artiges (richtig, vertippt, verspätet): löschen, nie an Claude.
+  if (verfallen !== undefined && pinAehnlich(text)) {
+    await apiRobust("deleteMessage", { chat_id: owner(), message_id: m.message_id }).catch(() => undefined);
+    audit("pin_verfallen", { id: verfallen.id, grund: verfallen.grund });
+    pinRatenZaehlen(text);
+    return void await sendText(verfallenText(verfallen, false));
+  }
+  // Ohne Abfrage etwas, das die PIN sein könnte (etwa die PIN nach einem Neustart erneut geliefert): löschen, nie an
+  // Claude und in die Historie, gleich gezählt.
+  if (pinFoermig(text)) {
     await apiRobust("deleteMessage", { chat_id: owner(), message_id: m.message_id }).catch(() => undefined);
     audit("pin_ohne_freigabe", {});
+    pinRatenZaehlen(text);
     return void await sendText("Keine Freigabe wartet auf eine PIN, Sir. Nachricht gelöscht.");
   }
 
@@ -1337,12 +1444,14 @@ export function dateiHinweise(): string[] {
   const zustand = zustandsHinweis();
   return [
     ...(zustand ? [zustand] : []),
+    ...(profilNichtGeladen ? [PROFIL_UNLESBAR] : []),
     ...(wachenNichtGeladen ? [WACHEN_UNLESBAR] : []),
     ...(camerasNichtGeladen ? [CAMERAS_UNLESBAR] : []),
     ...(zeitplaeneNichtGeladen ? [ZEITPLAENE_UNLESBAR] : []),
     ...(erinnerungenNichtGeladen ? [ERINNERUNGEN_UNLESBAR] : []),
     ...(vorgaengeNichtGeladen ? [VORGAENGE_UNLESBAR] : []),
     ...(postausgangNichtGeladen ? [POSTAUSGANG_UNLESBAR] : []),
+    ...(rechnungenNichtGeladen ? [RECHNUNGEN_UNLESBAR] : []),
     ...(auftraegeNichtGeladen ? [AUFTRAEGE_UNLESBAR] : []),
     ...eintragsHinweise(),
   ];

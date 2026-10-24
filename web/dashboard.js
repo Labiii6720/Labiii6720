@@ -591,7 +591,7 @@
 
   /* ---------- Bausteine ---------- */
   const STATUS = {
-    offen: ["kreis", "z-warn", "offen"], laeuft: ["lauf", "z-neutral", "läuft"], erledigt: ["check", "z-gut", "erledigt"],
+    offen: ["kreis", "z-warn", "offen"], laeuft: ["lauf", "z-neutral", "läuft"], unklar: ["warn", "z-ernst", "unklar"], erledigt: ["check", "z-gut", "erledigt"],
     abgelehnt: ["x", "z-neutral", "abgelehnt"], fehler: ["warn", "z-krit", "Fehler"],
   };
   const SCHWERE = { krit: ["krit", "z-krit"], ernst: ["warn", "z-ernst"], warn: ["kreis", "z-warn"] };
@@ -822,6 +822,7 @@
     ["wachenUnlesbar", "data/wachen.json", "Wachen", "#zeitplaene"],
     ["camerasUnlesbar", "cameras.json", "Kameras", "#kameras"],
     ["vorgaengeUnlesbar", "data/vorgaenge.json", "Vorgänge", null],
+    ["profilUnlesbar", "data/profil.json", "Übersicht", "#uebersicht"],
   ];
   function lagePunkte() {
     const st = Q.status; const p = [];
@@ -834,6 +835,8 @@
       for (const r of ue) if (istZahl(r.betrag)) summe[r.waehrung] = (summe[r.waehrung] || 0) + r.betrag;
       p.push({ k: "ueberfaellig", s: "ernst", t: ue.length === 1 ? "Eine Rechnung überfällig" : ue.length + " Rechnungen überfällig", d: summeText(summe) + " · älteste seit " + datum(ue[0].faellig), w: "Finanzen", href: "#finanzen" });
     }
+    const u = unklare();
+    if (u.length) p.push({ k: "unklar", s: "ernst", t: u.length === 1 ? "Ein Auftrag mit unklarem Ergebnis" : u.length + " Aufträge mit unklarem Ergebnis", d: "begonnen, nicht abgeschlossen – bitte prüfen", w: "Prüfen", ziel: "auftrAnker" });
     const w = wartende();
     if (w.length) {
       const sens = w.filter((a) => a.stufe === "sensibel").length;
@@ -846,12 +849,18 @@
 
   /* ---------- Bereiche ---------- */
   const V = (id) => $("v-" + id);
-  /** Offene Aufträge: wartende zuerst (neueste oben), laufende darunter – sie brauchen keinen Klick. */
+  /** Begonnen und noch in Arbeit (laeuft fehlt bei älteren Servern: dann wie bisher «läuft»). */
+  const laeuftJetzt = (a) => Boolean(a.gestartetAm) && a.laeuft !== false;
+  /** Begonnen, aber nicht mehr in Arbeit (Absturz mitten im Werkzeug): Ergebnis unklar, der Nutzer muss prüfen. */
+  const istUnklar = (a) => Boolean(a.gestartetAm) && a.laeuft === false;
+  /** Offene Aufträge: wartende zuerst (neueste oben), dann unklare, laufende zuletzt – sie brauchen keinen Klick. */
   const offene = () => {
     const l = Q.status && Array.isArray(Q.status.auftraege) ? [...Q.status.auftraege] : [];
-    return l.sort((a, b) => Number(Boolean(a.gestartetAm)) - Number(Boolean(b.gestartetAm)) || Number(b.id) - Number(a.id));
+    const rang = (a) => (laeuftJetzt(a) ? 2 : istUnklar(a) ? 1 : 0);
+    return l.sort((a, b) => rang(a) - rang(b) || Number(b.id) - Number(a.id));
   };
   const wartende = () => offene().filter((a) => !a.gestartetAm);
+  const unklare = () => offene().filter(istUnklar);
 
   /** Knopf während seiner Aktion: aria-disabled statt disabled – ein gesperrter Knopf verliert den Tastaturfokus (Aussehen wie .knopf[disabled]) */
   function besetzt(el, an) {
@@ -860,6 +869,12 @@
   }
   function auftragKarte(a) {
     const meta = h("div", { class: "meta" }, stufeEl(a.stufe), h("span", { class: "mono", text: "#" + a.id }), h("span", { class: "mono", text: a.tool }), h("span", { text: vorZeit(a.seit) }));
+    if (istUnklar(a)) {
+      const weg = h("button", { class: "knopf", type: "button", "data-aktion": "ablehnen", "data-id": a.id, "aria-label": "Auftrag #" + a.id + " wegräumen" }, "Wegräumen");
+      return h("article", { class: "auftrag unklar" }, meta, h("div", { class: "was", text: a.summary }),
+        h("div", { class: "laufzeit" }, ikon("warn", true), "Begonnen " + seit(a.gestartetAm) + ", Ergebnis unklar – bitte prüfen, Sir"),
+        h("div", { class: "aktion" }, besetzt(weg, inArbeit.has(String(a.id)))));
+    }
     if (a.gestartetAm) {
       return h("article", { class: "auftrag laeuft" }, meta, h("div", { class: "was", text: a.summary }),
         h("div", { class: "laufzeit" }, ikon("lauf", true), "läuft " + seit(a.gestartetAm)),
@@ -926,13 +941,13 @@
     }
 
     /* Stat-Kacheln */
-    const offen = offene(); const warten = wartende();
+    const offen = offene(); const warten = wartende(); const unklar = unklare();
     const aelteste = warten.reduce((m, a) => (!m || String(a.seit) < String(m) ? a.seit : m), null);
     // Unlesbare data/auftraege.json: die leere Liste heisst dann nicht «nichts wartet»
     const auftrUnlesbar = Boolean(st.auftraegeUnlesbar) && !offen.length;
     const auftrKpi = auftrUnlesbar
       ? kpi("Offene Aufträge", "–", null, h("div", { class: "unter zustand z-ernst" }, ikon("warn", true), "data/auftraege.json unlesbar"))
-      : kpi("Offene Aufträge", String(offen.length), null, offen.length ? `${warten.length} warten · ${offen.length - warten.length} läuft` : "nichts wartet",
+      : kpi("Offene Aufträge", String(offen.length), null, offen.length ? `${warten.length} warten${unklar.length ? ` · ${unklar.length} zu prüfen` : ""} · ${offen.length - warten.length - unklar.length} läuft` : "nichts wartet",
         aelteste ? h("div", { class: "zweit-t", text: "älteste wartet " + seit(aelteste) }) : null);
 
     const kd = Q.kosten14 && Q.kosten14.daten;
@@ -971,7 +986,8 @@
 
     const ziele = Array.isArray(st.ziele) ? st.ziele : [];
     const zieleK = h("div", { class: "karte" }, h("h2", { class: "etikett", text: "Ziele" }),
-      ziele.length ? h("ul", { class: "liste" }, ziele.map((z) => h("li", null, h("div", { class: "haupt" }, h("b", { text: z.text }),
+      st.profilUnlesbar && !ziele.length ? h("p", { class: "ruhig", text: "data/profil.json ist unlesbar. Ziele und Gedächtnis fehlen, bis sie repariert ist und ich neu gestartet bin, Sir." })
+      : ziele.length ? h("ul", { class: "liste" }, ziele.map((z) => h("li", null, h("div", { class: "haupt" }, h("b", { text: z.text }),
         h("span", { text: z.frist ? "bis " + (/^\d{4}-\d{2}-\d{2}$/.test(z.frist) ? datum(z.frist) : z.frist) : "ohne Frist" })))))
         : h("p", { class: "ruhig", text: "Noch keine Ziele. Nennen Sie mir eines im Gespräch, Sir." }));
     const vorgaenge = Array.isArray(st.vorgaenge) ? [...st.vorgaenge].reverse() : [];
@@ -1051,7 +1067,7 @@
       box.append(alle.length ? leer("leer", "Nichts dergleichen, Sir.", "Für diese Auswahl gibt es keine Einträge.") : leer("leer", "Noch keine Freigaben, Sir.", "Sobald ich etwas nach aussen tun will, steht es hier."));
       return;
     }
-    const st = (a) => (a.status === "offen" && a.gestartetAm ? "laeuft" : a.status);
+    const st = (a) => (a.status === "offen" && a.gestartetAm ? (a.laeuft === false ? "unklar" : "laeuft") : a.status);
     const ergebnis = (a, wo) => (typeof a.result === "string" && a.result
       ? h("details", { "data-merk": wo + "-erg:" + a.id }, h("summary", { "data-merk": wo + "-erg-s:" + a.id, "aria-label": "Ergebnis von #" + a.id }, "Ergebnis"), h("p", { text: a.result }))
       : null);
@@ -1847,7 +1863,7 @@
       el.hidden = !n;
     };
     if (st.notfall) zahl($("zahlFreigaben"), istZahl(st.offeneAuftraege) ? st.offeneAuftraege : 0, "offen");
-    else zahl($("zahlFreigaben"), wartende().length, "warten");
+    else zahl($("zahlFreigaben"), wartende().length + unklare().length, "zu prüfen");
     const fd = !st.notfall && Q.finanzen && Q.finanzen.daten;
     zahl($("zahlFinanzen"), fd && Array.isArray(fd.ueberfaellig) ? fd.ueberfaellig.length : 0, "überfällig");
   }

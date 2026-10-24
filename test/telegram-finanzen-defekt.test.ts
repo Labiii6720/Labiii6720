@@ -25,8 +25,8 @@ globalThis.fetch = (async (eingabe: string | URL | Request, init?: RequestInit) 
 
 const origErr = console.error;
 console.error = () => undefined;
-const { handleUpdate } = await import("../src/telegram.js");
-const { rechnungenNichtGeladen } = await import("../src/finanzen.js");
+const { dateiHinweise, handleUpdate } = await import("../src/telegram.js");
+const { RECHNUNGEN_UNLESBAR, rechnungenNichtGeladen } = await import("../src/finanzen.js");
 const { state } = await import("../src/state.js");
 console.error = origErr;
 
@@ -50,6 +50,30 @@ describe("/finanzen bei unlesbarem data/rechnungen.json", () => {
       gesendet.length = 0;
       await handleUpdate(nachricht(2, "/finanzen"));
       assert.deepEqual(gesendet, ["Im Notfall gebe ich keine Finanzdaten heraus, Sir. Erst /entwarnung."]);
+    } finally {
+      state.notfall = { aktiv: false };
+      state.paused = false;
+    }
+  });
+});
+
+describe("Startmeldung und /status bei unlesbarem data/rechnungen.json", () => {
+  it("dateiHinweise() nennt die Datei", () => {
+    assert.ok(dateiHinweise().includes(RECHNUNGEN_UNLESBAR));
+  });
+
+  it("/status nennt den Hinweis, auch im Notfall", async () => {
+    gesendet.length = 0;
+    await handleUpdate(nachricht(3, "/status"));
+    assert.equal(gesendet.length, 1);
+    assert.ok(gesendet[0].includes(RECHNUNGEN_UNLESBAR));
+    state.notfall = { aktiv: true, seit: new Date().toISOString(), grund: "Test" };
+    state.paused = true;
+    try {
+      gesendet.length = 0;
+      await handleUpdate(nachricht(4, "/status"));
+      assert.match(gesendet[0], /^🚨 NOTFALL AKTIV/);
+      assert.ok(gesendet[0].includes(RECHNUNGEN_UNLESBAR));
     } finally {
       state.notfall = { aktiv: false };
       state.paused = false;

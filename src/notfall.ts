@@ -73,6 +73,11 @@ export function abuseSignal(quelle: string): void {
   }
 }
 
+/** Nur für Tests: das Zählfenster leeren, damit Fälle einer Datei einander nicht in den Notfall zählen. */
+export function missbrauchZuruecksetzen(): void {
+  treffer.length = 0;
+}
+
 /** HTTP-Panikauslöser fürs Handy. */
 export async function handlePanic(req: Request, res: Response): Promise<void> {
   const token = config.panicToken;

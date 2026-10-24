@@ -223,14 +223,13 @@ export function untersucheListe(datei: string, pruefe: Eintragspruefung<unknown>
   return { zustand: "ok", eintraege: gueltig.length, verworfen };
 }
 
-/** true, wenn zu dieser Datei eine Sicherung `<datei>.defekt` oder `<datei>.defekt-…` existiert (nur lesen). */
+/**
+ * true, wenn eine Sicherung `<datei>.defekt` oder `<datei>.defekt-…` mit genau dem jetzigen Inhalt existiert (nur lesen).
+ * Eine ältere Sicherung mit anderem Inhalt zählt nicht: der jetzige Stand wäre sonst als gesichert gemeldet. Ist die
+ * Datei selbst nicht lesbar, ist sie auch nicht gesichert.
+ */
 export function sicherungVorhanden(datei: string): boolean {
-  const praefix = `${basename(datei)}.defekt`;
-  try {
-    return readdirSync(dirname(datei)).some((name) => name === praefix || name.startsWith(`${praefix}-`));
-  } catch {
-    return false;
-  }
+  return gleicheSicherung(datei) !== undefined;
 }
 
 /** Fehlertext für gesperrtes Speichern (Jarvis-Ton). */
@@ -337,12 +336,15 @@ const RECHNUNG_STATUS: readonly unknown[] = ["offen", "bezahlt", "ignoriert"];
  * data/rechnungen.json: id ganzzahlig > 0, empfaenger als Text, status bekannt; betrag, falls vorhanden, als endliche
  * Zahl (toFixed), faellig als Text (Sortierung mit localeCompare). Sonst würfen /status.json, /api/finanzen, /finanzen,
  * die Erinnerung und rechnungen_offen schon an einem einzigen null-Eintrag.
+ * waehrung wird normalisiert statt verworfen (gleiche Regel wie waehrungVon in finanzen.ts): fehlt sie oder ist sie
+ * kein Text, gilt CHF, sonst getrimmt in Grossbuchstaben – sonst zeigten Telegram, Werkzeuge und Dashboard «12.00 undefined».
  */
 export function rechnungEintrag(roh: unknown): Rechnung | undefined {
   if (!istObjekt(roh) || !istId(roh.id) || !istText(roh.empfaenger) || !RECHNUNG_STATUS.includes(roh.status)) return undefined;
   if (roh.betrag !== undefined && roh.betrag !== null && !(typeof roh.betrag === "number" && Number.isFinite(roh.betrag))) return undefined;
   if (roh.faellig !== undefined && roh.faellig !== null && !istText(roh.faellig)) return undefined;
-  return roh as unknown as Rechnung;
+  const w = istText(roh.waehrung) && roh.waehrung.trim() ? roh.waehrung.trim().toUpperCase() : "CHF";
+  return (w === roh.waehrung ? roh : { ...roh, waehrung: w }) as unknown as Rechnung;
 }
 
 /** Alle Listen mit ihrer Prüfung (Selbsttest). Die Module laden mit denselben Pfaden und Prüfungen. */

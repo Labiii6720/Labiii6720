@@ -41,11 +41,23 @@ describe("selbsttest(nur)", () => {
     assert.equal(aufrufe, 0);
   });
 
+  it("Profil ohne profil.json: ok, noch nicht angelegt, ohne Netz", async () => {
+    aufrufe = 0;
+    const b = await selbsttest(["Profil"]);
+    assert.deepEqual(b, [{ name: "Profil", status: "ok", info: "data/profil.json noch nicht angelegt" }]);
+    assert.equal(aufrufe, 0);
+  });
+
   it("Listen ohne Dateien in data/: ok mit Anzahl, ohne Netz und ohne Sicherung", async () => {
     aufrufe = 0;
     const b = await selbsttest(["Listen"]);
-    assert.deepEqual(b, [{ name: "Listen", status: "ok", info: "7 Listen in data/ lesbar, 0 gültige Einträge" }]);
+    // Früher «7 Listen in data/ lesbar», obwohl keine einzige Datei existierte
+    assert.deepEqual(b, [{ name: "Listen", status: "ok", info: "0 Listen in data/ lesbar, 7 noch nicht angelegt, 0 gültige Einträge" }]);
     assert.equal(aufrufe, 0);
+  });
+
+  it("Zustand ohne state.json: ok, noch nicht angelegt", async () => {
+    assert.deepEqual(await selbsttest(["Zustand"]), [{ name: "Zustand", status: "ok", info: "data/state.json noch nicht angelegt" }]);
   });
 
   it("nur Telegram: ein Befund, ok, genau ein fetch-Aufruf", async () => {

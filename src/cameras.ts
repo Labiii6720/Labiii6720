@@ -374,11 +374,12 @@ function wachenIds(): number[] {
 }
 
 /**
- * Höchste ID im Bestand beim Start (0 ohne Bestand). Beim Import wird bewusst nichts gespeichert: cameras.js laden auch
+ * Höchste ID im Bestand beim Start (0 ohne Bestand), verworfene Einträge eingeschlossen (wachenGeladen.hoechsteId): Ihre
+ * Nummer steht noch in der Sicherung und in alten Freigaben und wird nicht neu vergeben. Beim Import wird bewusst nichts gespeichert: cameras.js laden auch
  * `npm run check` und das Setup, und ein save() dort schriebe den beim Prozessstart gelesenen Zustand zurück – ein
  * inzwischen vom Dienst ausgelöster Notfall oder Notaus wäre auf der Platte weg.
  */
-const hoechsteWacheIdBeimStart = Math.max(0, ...wachenIds());
+const hoechsteWacheIdBeimStart = wachenNichtGeladen ? 0 : Math.max(wachenGeladen.hoechsteId, 0, ...wachenIds());
 
 /**
  * Ein Bestand aus 0.21 hat keinen Zähler in state.json, und die Löschpfade rücken ihn nicht vor. Darum zieht jedes
@@ -420,6 +421,7 @@ export function neueWacheId(): number {
   const gemerkt = state.naechsteWacheId;
   const vorhanden = wachenIds().map((id) => id + 1);
   const id = Math.max(1, hoechsteWacheIdBeimStart + 1, Number.isSafeInteger(gemerkt) ? gemerkt! : 1, ...vorhanden);
+  if (!Number.isSafeInteger(id)) throw new Error("Nummernraum erschöpft, Sir – data/wachen.json prüfen.");
   state.naechsteWacheId = id + 1;
   save();
   return id;

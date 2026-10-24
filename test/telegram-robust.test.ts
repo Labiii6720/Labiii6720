@@ -42,6 +42,7 @@ const { reminders } = await import("../src/tools.js");
 const { createAuftrag, getAuftrag } = await import("../src/queue.js");
 const { config } = await import("../src/config.js");
 const { protokolle } = await import("../src/protokolle.js");
+const { missbrauchZuruecksetzen } = await import("../src/notfall.js");
 
 const POSTAUSGANG = join(temp, "data", "postausgang.json");
 const netzfehler = () => Object.assign(new TypeError("fetch failed"), { cause: Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" }) });
@@ -65,6 +66,8 @@ beforeEach(async () => {
   gewartet = [];
   setzeWarten(async (ms) => { gewartet.push(ms); }, () => 0.5);
   gesundheit._reset();
+  // PIN-förmige Eingaben zählen als Missbrauch: kein Fall soll die übrigen in den Notfall zählen
+  missbrauchZuruecksetzen();
 });
 
 describe("sendText mit Wiederholung", () => {
@@ -882,6 +885,7 @@ describe("Freigabe: genau einmal ausführen, ohne langes Warten zwischen Prüfun
   it("begonnen, aber nie abgeschlossen (Absturz): erneute Freigabe führt nicht nochmals aus", async () => {
     const a = erinnerung();
     a.gestartetAm = new Date().toISOString(); // Stand nach einem Absturz mitten in runAuftrag
+    a.messageId = 5; // der Knopf stammt aus der zuletzt gesendeten Freigabe-Nachricht
     const unklar = `#${a.id} wurde bereits gestartet, Ergebnis unklar – bitte prüfen, Sir.`;
     assert.equal(await approveAuftrag(a), unklar);
     aufrufe = [];
@@ -1334,6 +1338,7 @@ describe("Nachprüfung Runde 3: Notaus über den Neustart, Notfall während der 
       return fetchAttrappe(eingabe, init);
     }) as typeof fetch;
     const a = erinnerung();
+    a.messageId = 5; // der Knopf stammt aus der zuletzt gesendeten Freigabe-Nachricht
     await handleUpdate({ update_id: 9561, callback_query: { id: "cb9561", data: `ok:${a.id}`, from: { id: 12345 }, message: { message_id: 5 } } });
     assert.equal(haengend, 2); // beide hängen noch
     assert.equal(getAuftrag(a.id)?.status, "erledigt");

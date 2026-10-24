@@ -61,6 +61,11 @@ export interface State {
    * verworfenen Einträgen. Hält die Nummern auch dann eindeutig, wenn data/auftraege.json entfernt oder ersetzt wurde.
    */
   naechsteAuftragId?: number;
+  /**
+   * Untergrenze für neue Rechnungsnummern (finanzen.ts): nach jedem Erfassen die nächste Nummer, dazu beim Speichern die über
+   * verworfenen Einträgen. Hält die Nummern auch dann eindeutig, wenn data/rechnungen.json entfernt oder ersetzt wurde.
+   */
+  naechsteRechnungId?: number;
 }
 
 /** Vorhandene Sicherung mit genau diesem Inhalt (jeder Prozessstart – Dienst, check, setup, Auth-Skripte – lädt neu). */
@@ -182,6 +187,9 @@ export function zustandsHinweis(): string | undefined {
 export function pruefeZustandSpeicherbar(): void {
   if (stateNichtGeladen) throw new Error(`${FILE} ist unlesbar, ich speichere keinen Zustand. Erst die Datei reparieren oder entfernen.`);
 }
+
+/** save() schreibt still nichts bei unlesbarer state.json oder im Nur-lesen-Prozess (npm run check). */
+export const zustandWirdGespeichert = (): boolean => !istNurLesen() && !stateNichtGeladen;
 
 let sperreGemeldet = false;
 

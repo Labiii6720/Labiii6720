@@ -90,6 +90,17 @@ export const vorgaengeNichtGeladen = geladen.nichtGeladen;
 export const VORGAENGE_UNLESBAR =
   "⚠️ data/vorgaenge.json war beim Start unlesbar, Sir (Sicherung, sofern möglich, unter data/vorgaenge.json.defekt). Ich starte keine Vorgänge, bis die Datei repariert ist und ich neu gestartet bin.";
 
+/**
+ * Höchste Nummer beim Start, verworfene Einträge eingeschlossen: deren Nummer steht noch in der Sicherung und in
+ * Systemnotizen und wird nicht neu vergeben.
+ */
+const hoechsteVorgangIdBeimStart = vorgaengeNichtGeladen ? 0 : geladen.hoechsteId;
+
+/** Nächste Nummer: über allen vorhandenen (unabhängig von der Reihenfolge in der Datei) und allen beim Start verworfenen. */
+function neueVorgangId(): number {
+  return vorgaenge.reduce((max, v) => (Number.isSafeInteger(v.id) ? Math.max(max, v.id) : max), Math.max(0, hoechsteVorgangIdBeimStart)) + 1;
+}
+
 let nachNeustartErledigt = false;
 /** In diesem Prozess gestartet: gehört nie zu den Unterbrochenen, auch wenn der Aufruf erst später kommt (eigene PID). */
 const hierGestartet = new Set<Vorgang>();
@@ -124,7 +135,9 @@ function save(): void {
 export function startVorgang(auftrag: string, hooks: AgentHooks): Vorgang {
   // Vor dem push: sonst liefe ein Vorgang, den keine Datei kennt
   if (vorgaengeNichtGeladen) throw new Error(VORGAENGE_UNLESBAR);
-  const v: Vorgang = { id: (vorgaenge.at(-1)?.id ?? 0) + 1, auftrag, status: "läuft", startedAt: new Date().toISOString(), steps: 0, pid: process.pid };
+  const id = neueVorgangId();
+  if (!Number.isSafeInteger(id)) throw new Error("Nummernraum erschöpft, Sir – data/vorgaenge.json prüfen.");
+  const v: Vorgang = { id, auftrag, status: "läuft", startedAt: new Date().toISOString(), steps: 0, pid: process.pid };
   vorgaenge.push(v);
   hierGestartet.add(v);
   save();

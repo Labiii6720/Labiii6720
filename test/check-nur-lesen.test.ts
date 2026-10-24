@@ -92,6 +92,7 @@ describe("npm run check: nur lesen", () => {
       assert.deepEqual(stand(dir), vorher, `Lauf ${lauf}: kein .defekt, kein workspace/, keine geänderte Datei`);
       assert.match(r.out, /Zustand unlesbar \(kein gültiges JSON\) – nur gelesen, keine Sicherung angelegt/);
       assert.match(r.out, /Profil unlesbar – nur gelesen, keine Sicherung angelegt/);
+      assert.match(r.out, /❌ Zustand: data\/state\.json unlesbar \(kein gültiges JSON, ungesichert, nur gelesen\) – Dienst startet im Notfall/);
       assert.match(r.out, /✅ Protokolle: /);
       assert.doesNotMatch(r.out, /geheim/);
     }
@@ -112,7 +113,7 @@ describe("npm run check: nur lesen", () => {
     const r = check(dir, "Listen,Wachen,Finanzen,Sicherheit");
     assert.equal(r.code, 0, r.out);
     assert.deepEqual(readdirSync(dir), [], r.out);
-    assert.match(r.out, /✅ Listen: 7 Listen in data\/ lesbar, 0 gültige Einträge/);
+    assert.match(r.out, /✅ Listen: 0 Listen in data\/ lesbar, 7 noch nicht angelegt, 0 gültige Einträge/);
   });
 });
 
@@ -173,6 +174,8 @@ describe("sicherungsVermerk: eine Sicherung nur nennen, wenn sie existiert", () 
     writeFileSync(join(dir, "data", "a.json.defekt"), "x");
     writeFileSync(join(dir, "data", "b.json.defekt-2026-10-15T08-00-00-000Z"), "x");
     writeFileSync(join(dir, "data", "c.json.defekt.alt"), "x"); // kein Sicherungsname
+    // Gezählt wird nur eine Sicherung mit dem jetzigen Inhalt der Datei (sicherungVorhanden)
+    for (const n of ["a.json", "b.json", "c.json"]) writeFileSync(join(dir, "data", n), "x");
     const p = (n: string) => join(dir, "data", n);
     assert.equal(sicherungsVermerk([p("a.json")]), "Sicherung .defekt");
     assert.equal(sicherungsVermerk([p("a.json"), p("b.json")]), "Sicherung je .defekt");

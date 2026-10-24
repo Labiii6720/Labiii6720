@@ -43,11 +43,13 @@ function zeitplanIds(): number[] {
 }
 
 /**
- * Höchste ID im Bestand beim Start (0 ohne Bestand). Beim Import wird bewusst nichts gespeichert: zeitplaene.js laden
- * auch `npm run check` und das Setup, und ein save() dort schriebe den beim Prozessstart gelesenen Zustand zurück – ein
- * inzwischen vom Dienst ausgelöster Notfall oder Notaus wäre auf der Platte weg.
+ * Höchste ID im Bestand beim Start (0 ohne Bestand), verworfene Einträge eingeschlossen (geladen.hoechsteId): Ihre
+ * Nummer steht noch in der Sicherung und in alten Freigaben und wird nicht neu vergeben. Beim Import wird bewusst
+ * nichts gespeichert: zeitplaene.js laden auch `npm run check` und das Setup, und ein save() dort schriebe den beim
+ * Prozessstart gelesenen Zustand zurück – ein inzwischen vom Dienst ausgelöster Notfall oder Notaus wäre auf der
+ * Platte weg.
  */
-const hoechsteZeitplanIdBeimStart = zeitplaeneNichtGeladen ? 0 : Math.max(0, ...zeitplanIds());
+const hoechsteZeitplanIdBeimStart = zeitplaeneNichtGeladen ? 0 : Math.max(geladen.hoechsteId, 0, ...zeitplanIds());
 
 /**
  * Ein Bestand aus 0.21 hat keinen Zähler in state.json, und die Löschpfade rücken ihn nicht vor. Darum zieht jedes
@@ -100,6 +102,7 @@ export function neueZeitplanId(): number {
   const gemerkt = state.naechsteZeitplanId;
   const vorhanden = zeitplanIds().map((x) => x + 1);
   const id = Math.max(1, hoechsteZeitplanIdBeimStart + 1, Number.isSafeInteger(gemerkt) ? gemerkt! : 1, ...vorhanden);
+  if (!Number.isSafeInteger(id)) throw new Error("Nummernraum erschöpft, Sir – data/zeitplaene.json prüfen.");
   state.naechsteZeitplanId = id + 1;
   save();
   return id;
