@@ -2,6 +2,12 @@
 
 Kurz und nur das Wichtigste. Details stehen im README.
 
+## 0.24.1
+- PIN-Altbestand: Züge in `data/chat.json`, deren Nutzer-Text nach der PIN aussieht (bis 0.23.1 gespeichert), ersetzt Jarvis beim Start ganz, samt Antwort und Werkzeug-Schritten, durch «[Entfernt: sah aus wie eine PIN]» und speichert einmal (nicht in `npm run check`).
+- PIN-Form: Leerraum jeder Art zählt als ein Leerzeichen, « - » und «, » trennen Gruppen («4, 7, 1, 1»); Punkt, Doppelpunkt und «1,5» weiterhin nicht. Nach «PIN»/«Code» zählt jedes Wort in PIN-Form für sich («PIN Tür 2 4711»), dazu eine Zifferngruppe und ihre Anfangsstücke («PIN 4711 0815», «PIN (47) 11» blockiert), nie ein mehrwortiges Stück ab der Mitte: «Schick den Code an 079 123 45 67» geht durch.
+- Sprachantwort (TTS) ohne Token und Schlüssel, auch bei Aufrufern ohne eigene Schwärzung; wieder mit Test.
+- Setup und `npm run check` warnen auch bei einer PIN nur aus Sonderzeichen («####»).
+
 ## 0.24
 - PIN-Schutz vereinfacht: Was nach der PIN aussieht (nur die Form: Ziffernzahl, auch «47 11»; im Satz nach «PIN», «Code» & Co.), geht in keinem Kanal an Claude, in den Verlauf oder als Echo zurück. Alle bekommen dieselbe Antwort «Das sieht aus wie eine PIN, Sir. Ich schicke es nicht weiter.», gezählt wird nichts (kein Notfall durch gesprochene Zahlen). «14.30», «12.50», Datum und Telefonnummer gehen durch. Eine PIN ohne Ziffern wird am Wert erkannt; Setup und `npm run check` (Befund «PIN») warnen davor.
 - Keine Schwärzung der PIN in Antworten, Echos und Verlauf mehr (Token und Schlüssel bleiben geschwärzt). Der PIN-Dialog bei sensiblen Freigaben bleibt unverändert.

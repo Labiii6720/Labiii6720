@@ -67,7 +67,8 @@ export function pruefePin(wert: string): string | undefined {
 
 /**
  * Eine PIN ohne Ziffern erkennt der Eingangsfilter (pin.ts) nicht an der Form, nur am Wert: dann verrät die Antwort im
- * Chat, ob ein Wort die PIN ist. Warnung im Setup (PIN-Feld) und im Befund «PIN» von npm run check.
+ * Chat, ob ein Wort die PIN ist. Eine PIN nur aus Sonderzeichen («####») bleibt nach der Normalisierung leer, der Filter
+ * wirkt dann gar nicht. Beides: Warnung im Setup (PIN-Feld) und im Befund «PIN» von npm run check.
  */
 export function pinWarnung(wert: string): string | undefined {
   return wert && !/\d/.test(wert) ? "PIN ohne Ziffern – bitte eine Ziffern-PIN wählen" : undefined;

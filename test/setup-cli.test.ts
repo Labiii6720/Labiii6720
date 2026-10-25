@@ -199,6 +199,15 @@ describe("scripts/setup.ts (End-zu-End)", () => {
     assert.ok(!ziffern.out.includes("PIN ohne Ziffern"), ziffern.out);
   });
 
+  it("PIN nur aus Sonderzeichen («####»): dieselbe Warnung beim Feld und im Befund «PIN», gequotet gespeichert", async () => {
+    const dir = neuesVerzeichnis();
+    const lauf = await fahreRoh(dir, ["####", "", "", "", "", "", ""], ["--abschnitt", "sicherheit", "--env", join(dir, ".env")]);
+    assert.equal(lauf.code, 0, lauf.out + lauf.err);
+    assert.ok(lauf.out.includes("⚠ PIN ohne Ziffern – bitte eine Ziffern-PIN wählen"), lauf.out);
+    assert.ok(lauf.out.includes("❌ PIN: PIN ohne Ziffern – bitte eine Ziffern-PIN wählen"), lauf.out);
+    assert.equal(parseEnv(readFileSync(join(dir, ".env"), "utf8")).JARVIS_PIN, "####");
+  });
+
   it("Prüfung meldet Fehler, Rückfrage endet am Pipe-Ende: kein Abbruch, Exit 0", async () => {
     const dir = neuesVerzeichnis();
     const lauf = await fahreRoh(dir, ["1234", "", "", "auto", "", "", ""], ["--abschnitt", "sicherheit", "--env", join(dir, ".env")]);

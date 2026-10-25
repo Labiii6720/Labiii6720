@@ -10,7 +10,8 @@ import { ROOT } from "./workspace.js";
 import { persona } from "./persona.js";
 import { beraterPrompt } from "./berater.js";
 import { schwaerze } from "./robust.js";
-import { sichereDefekt } from "./datei.js";
+import { istNurLesen, sichereDefekt } from "./datei.js";
+import { pinEingabe } from "./pin.js";
 
 /**
  * Eigene Marken (gehen nicht an die API): `zurueckgehalten` im Notaus nicht ausgegebene Antwort (runLoop), bleibt für
@@ -61,6 +62,35 @@ function loadHistory(): Msg[] {
   return [];
 }
 let history: Msg[] = loadHistory();
+
+/** Ersatz für einen ganzen Zug im Altbestand, dessen Nutzer-Text nach der PIN aussah */
+export const PIN_ENTFERNT = "[Entfernt: sah aus wie eine PIN]";
+
+/** Beginnt hier ein Zug? Nutzer-Nachricht, die nicht mit tool_result beginnt (so bleiben tool_use/tool_result-Paare ganz). */
+const zugBeginn = (m: Msg): boolean => m.role === "user" && (typeof m.content === "string" || m.content[0]?.type !== "tool_result");
+
+/**
+ * Altbestand bis 0.23.1: Damals gingen Sätze wie «meine PIN ist 4711» an Claude und in data/chat.json, samt Antwort
+ * («Die 4711 vergesse ich wieder») und Werkzeug-Schritten desselben Zugs. Beim Laden jeden Zug, dessen Nutzer-Text
+ * pinEingabe (dieselbe Klassenregel) trifft, ganz durch einen Vermerk ersetzen: von dieser Nachricht bis vor den nächsten
+ * Zugbeginn, rein strukturell, ohne Wertvergleich. Geprüft werden nur Texte des Nutzers (Kanal-Präfix wie in der Anzeige
+ * abgezogen), keine Systemnotizen und automatischen Läufe. Rückgabe: etwas ersetzt?
+ */
+function pinAltbestandBereinigen(h: Msg[]): boolean {
+  let ersetzt = false;
+  const pinFoermig = (text: string): boolean => !KEIN_NUTZER.test(text.trim()) && pinEingabe(text.trim().replace(KANAL_PRAEFIX, ""));
+  for (let i = 0; i < h.length; i++) {
+    const m = h[i]!;
+    if (!zugBeginn(m) || m.automatisch) continue;
+    const texte = typeof m.content === "string" ? [m.content] : m.content.flatMap((b) => (b.type === "text" && typeof b.text === "string" ? [b.text] : []));
+    if (!texte.some(pinFoermig)) continue;
+    let ende = i + 1;
+    while (ende < h.length && !zugBeginn(h[ende]!)) ende++;
+    h.splice(i, ende - i, { role: "user", content: PIN_ENTFERNT });
+    ersetzt = true;
+  }
+  return ersetzt;
+}
 
 /** Bilder (Screenshots) nur für den laufenden Zug behalten, danach durch einen Platzhalter ersetzen. */
 function dropImages(): void {
@@ -185,6 +215,17 @@ export function sichtbareNachrichten(verlauf: unknown, n = 5): ChatNachricht[] {
 /** Für das Dashboard: die letzten n Nachrichten des Chats (dieselbe Historie, keine Kopie). */
 export const letzteNachrichten = (n = 5): ChatNachricht[] => sichtbareNachrichten(history, n);
 
+// Einmal beim Start, erst hier (die Muster oben müssen stehen): Altbestand bereinigen, bei einer Änderung einmal
+// speichern (atomar, saveHistory), nie im Nur-lesen-Prozess (npm run check). Scheitert das Speichern, gilt die
+// bereinigte Fassung im Speicher; der nächste Zug speichert sie.
+if (pinAltbestandBereinigen(history) && !istNurLesen()) {
+  try {
+    saveHistory();
+  } catch (e) {
+    console.error(`Chat-Verlauf: Bereinigung nicht gespeichert (${schwaerze(e instanceof Error ? e.message : String(e))}).`);
+  }
+}
+
 /**
  * Notaus kam nach runLoop, vor oder während des Sendens (telegram.ts): diese Antwort (Eintrag aus RunOptions.onAntwort)
  * als zurückgehalten markieren, damit sie auch der Verlauf der Kommandozentrale nicht zeigt. Über den Verweis, nicht
@@ -210,7 +251,7 @@ const groesse = () => JSON.stringify(history).length;
 /** Kürzt die Historie (nach Anzahl und Grösse), ohne ein tool_use/tool_result-Paar zu zerreissen. */
 function trim(): void {
   while (history.length > MAX_TURNS || (history.length > 4 && groesse() > MAX_CHARS)) {
-    const i = history.findIndex((m, idx) => idx > 0 && m.role === "user" && (typeof m.content === "string" || m.content[0]?.type !== "tool_result"));
+    const i = history.findIndex((m, idx) => idx > 0 && zugBeginn(m));
     if (i <= 0) break;
     history.splice(0, i);
   }

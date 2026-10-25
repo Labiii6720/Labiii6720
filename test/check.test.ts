@@ -98,6 +98,9 @@ describe("selbsttest(nur)", () => {
       aufrufe = 0;
       config.pin = "Sesamoeffne";
       assert.deepEqual(await selbsttest(["PIN"]), [{ name: "PIN", status: "fehler", info: "PIN ohne Ziffern – bitte eine Ziffern-PIN wählen" }]);
+      // Nur Sonderzeichen: der Eingangsfilter wirkte gar nicht, dieselbe Warnung
+      config.pin = "####";
+      assert.deepEqual(await selbsttest(["PIN"]), [{ name: "PIN", status: "fehler", info: "PIN ohne Ziffern – bitte eine Ziffern-PIN wählen" }]);
       config.pin = "4711";
       const ok = await selbsttest(["PIN"]);
       assert.equal(ok[0]!.status, "ok");

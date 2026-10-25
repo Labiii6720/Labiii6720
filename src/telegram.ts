@@ -502,10 +502,13 @@ async function sendVoice(audio: Buffer): Promise<void> {
   await hochladen("sendVoice", form);
 }
 
-/** Antwort zusätzlich als Sprachnachricht, falls TTS eingerichtet ist */
+/**
+ * Antwort zusätzlich als Sprachnachricht, falls TTS eingerichtet ist. Ohne Token und Schlüssel (schwaerze) zum
+ * TTS-Anbieter, auch wenn der Aufrufer (Briefing, events.ts) nicht schon geschwärzt hat.
+ */
 export async function sendVoiceReply(text: string): Promise<void> {
   if (!config.tts || !config.telegramToken) return;
-  await sendVoice(await speak(forSpeech(text))).catch(log);
+  await sendVoice(await speak(forSpeech(schwaerze(text)))).catch(log);
 }
 
 /** Sprachnachricht des Nutzers laden */

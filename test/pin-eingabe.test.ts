@@ -44,6 +44,60 @@ describe("pinEingabe: Ziffern-PIN (4711)", () => {
   });
 });
 
+describe("pinEingabe: Trenner (0.24.1)", () => {
+  it("Leerraum jeder Art zählt als ein Leerzeichen; « - » und «, » trennen Gruppen", () => {
+    for (const t of ["4  7  1  1", "47\t11", "47\u00a011", "47\u202f11", " 47 \u00a0 11 ", "4, 7, 1, 1", "4, 7, 1, 1.", "47, 11", "4 - 7 - 1 - 1", "47 - 11", "PIN ist 4, 7, 1, 1", "Code:\u00a047\t11", "meine\u00a0PIN\u00a0ist\u00a04711"]) {
+      assert.equal(pinEingabe(t), true, JSON.stringify(t));
+    }
+  });
+
+  it("Punkt, Doppelpunkt und Komma ohne Leerzeichen trennen weiterhin nicht", () => {
+    for (const t of ["14.30", "14:30", "12.50", "1,5", "4,7,1,1", "47,11", "14. 30", "47 -- 11", "Code 14.30", "Code 12,50"]) {
+      assert.equal(pinEingabe(t), false, t);
+    }
+  });
+});
+
+describe("pinEingabe: PIN-Wort-Fenster nur mit vollständiger Zifferngruppe (0.24.1)", () => {
+  it("Teilstück einer längeren Ziffernfolge zählt nicht", () => {
+    for (const t of ["Schick den Code an 079 123 45 67", "Code an 079 123 45 67", "Der Code ist 079 123 45 67", "PIN 123 45 67", "Code 0791234567", "Code an 079, 123, 45, 67", "Code an 079 - 123 - 45 - 67"]) {
+      assert.equal(pinEingabe(t), false, t);
+    }
+  });
+
+  it("vollständige Gruppe zählt, auch mit Satzzeichen oder einer zweiten Gruppe im Fenster", () => {
+    for (const t of ["Code: 47 11", "PIN ist 4711.", "PIN ist 4711. Danke", "Code 47 - 11", "Code 4, 7, 1, 1", "Der Code für Tür 2 ist 4711", "PIN (47 11)", "PIN 4711 und 0815"]) {
+      assert.equal(pinEingabe(t), true, t);
+    }
+  });
+
+  it("Anfangsstück der Gruppe zählt: PIN gefolgt von einer weiteren Zahl bleibt blockiert", () => {
+    for (const t of ["PIN 4711 0815", "Meine PIN ist 4711 2 Mal falsch eingegeben", "meine PIN ist 4711, 4712 war die alte", "PIN 4711 3", "Die PIN ist 4711, 2 Leute kennen sie", "PIN 4711 3 mal falsch", "Code 4711 15 Uhr", "Code\n4711\n2", "PIN 2026 07", "PIN 4711 2", "PIN 4711, 2026", "PIN 47 11 2", "Code 47 - 11 - 3"]) {
+      assert.equal(pinEingabe(t), true, JSON.stringify(t));
+    }
+  });
+
+  it("nie ein mehrwortiges Stück ab einem Wort mitten in der Gruppe", () => {
+    for (const t of ["PIN 123 45 67", "Code an 079 123 45 67", "PIN 1 23 45", "Code 123 45 678"]) assert.equal(pinEingabe(t), false, t);
+  });
+
+  it("jedes Wort in PIN-Form zählt für sich, auch mit einer Zahl davor in derselben Gruppe", () => {
+    for (const t of ["PIN 12 4711", "Code 1 4711", "Code an 079 123 4711", "PIN Tür 2 4711", "Der Code für Tür 2 4711", "Code Karte 1 4711", "PIN: 1 4711", "Code 3, 4711", "PIN 0 - 4711"]) {
+      assert.equal(pinEingabe(t), true, t);
+    }
+  });
+
+  it("Gruppe aus Wörtern mit Rand: jedes Wort normalisiert («PIN 47 -11», «PIN (47) 11»)", () => {
+    for (const t of ["PIN 47 -11", "PIN (47) 11", "Code «47» 11", "PIN 47, 11"]) assert.equal(pinEingabe(t), true, t);
+    for (const t of ["PIN 47 -- 11", "PIN (14.30) 12"]) assert.equal(pinEingabe(t), false, t);
+  });
+
+  it("Wort in PIN-Form mitten in der Gruppe, aber erst nach 20 Zeichen: zählt nicht für sich", () => {
+    assert.equal(pinEingabe("PIN 1 23 45 678 901 234 4711"), false);
+    assert.equal(pinEingabe("PIN 1 23 45 678 901 23 4711"), true);
+  });
+});
+
 describe("pinEingabe: gemischte PIN (ab12)", () => {
   it("ein Wort gleicher Länge mit Ziffer und Nicht-Ziffer, nie nach Wert", () => {
     config.pin = "ab12";
@@ -61,6 +115,12 @@ describe("pinEingabe: PIN ohne Ziffern (Wertvergleich, darum die Warnung)", () =
 
   it("Warnung in Setup und check nur ohne Ziffern", () => {
     assert.equal(pinWarnung("Sesamoeffne"), "PIN ohne Ziffern – bitte eine Ziffern-PIN wählen");
+    // Nur Sonderzeichen: pinEingabe wirkt gar nicht (die normalisierte PIN ist leer), darum dieselbe Warnung
+    for (const pin of ["####", "!!!!", "#-#-", "«»«»"]) {
+      assert.equal(pinWarnung(pin), "PIN ohne Ziffern – bitte eine Ziffern-PIN wählen", pin);
+      config.pin = pin;
+      assert.equal(pinEingabe(pin), false, pin);
+    }
     assert.equal(pinWarnung("4711"), undefined);
     assert.equal(pinWarnung("ab12"), undefined);
   });
@@ -105,7 +165,7 @@ describe("pinEingabe: ohne JARVIS_PIN", () => {
 
 describe("kein Orakel", () => {
   it("richtige und falsche PIN gleicher Form: dasselbe Ergebnis, für PIN 4711 und 4712", () => {
-    const proben = ["4711", "4712", "47 11", "47 12", "PIN 4711", "PIN 4712", "4711.", "1430"];
+    const proben = ["4711", "4712", "47 11", "47 12", "PIN 4711", "PIN 4712", "4711.", "1430", "PIN 12 4711", "PIN 12 4712", "PIN (47) 11"];
     config.pin = "4711";
     const a = proben.map(pinEingabe);
     config.pin = "4712";
