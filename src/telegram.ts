@@ -2,7 +2,7 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import { closeSync, constants, mkdirSync, openSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { audit, throttled } from "./audit.js";
 import { basename } from "node:path";
-import { addSystemNote, antwortZurueckhalten, chatHinweis, handleMessage, pausiertText, resetHistory, runAuftrag, stufeVerschaerft } from "./agent.js";
+import { addSystemNote, antwortGeschwaerzt, antwortZurueckhalten, chatHinweis, handleMessage, pausiertText, pinGeschwaerzt, resetHistory, runAuftrag, stufeVerschaerft, zugVerlauf } from "./agent.js";
 import { config } from "./config.js";
 import { AUFTRAEGE_UNLESBAR, auftraegeNichtGeladen, getAuftrag, offeneAuftraege, saveAuftraege, setStatus, type Auftrag } from "./queue.js";
 import { save, state, zustandsHinweis, type Mode } from "./state.js";
@@ -256,7 +256,8 @@ export async function sendText(text: string, extra: Record<string, unknown> = {}
  * Späte Antwort von Claude (askWithBudget: Kommandozentrale, /events, Alexa; Ereignis «frage»), wie in handleUpdate:
  * im Notaus oder Notfall nichts senden; kommt er während des Versands (auch zwischen den Wiederholungen), bleibt der
  * Rest zurück, nicht im Postausgang, und die Antwort (`eintrag` aus onAntwort) gilt als zurückgehalten. Bei einer
- * Störung wartet nur der nicht zugestellte Rest im Postausgang.
+ * Störung wartet nur der nicht zugestellte Rest im Postausgang, als Antwort markiert: im Notaus hält postausgangTick
+ * ihn bis /weiter zurück, im Notfall bis /entwarnung.
  */
 export async function sendeAntwort(text: string, eintrag?: object): Promise<void> {
   const gesperrt = () => Boolean(state.paused) || notfallAktiv();
@@ -266,7 +267,7 @@ export async function sendeAntwort(text: string, eintrag?: object): Promise<void
   if (r.abgebrochen || gesperrt()) return antwortZurueckhalten(eintrag);
   if (fehlerArt(r.fehler) === "client") throw r.fehler;
   log(r.fehler);
-  ablegen(r.rest);
+  ablegen(r.rest, undefined, true);
 }
 
 // ---------- Postausgang ----------
@@ -280,10 +281,18 @@ interface Postausgang {
   text: string;
   /** Notfall-Alarm, Freigabe-Ergebnis: fliegt beim Kürzen nie vor gewöhnlichen Einträgen raus */
   vorrang?: true;
+  /** Antwort von Claude (Chat, späte Antwort, Zeitplan, Vorgang): wartet im Notaus bis /weiter, im Notfall bis /entwarnung */
+  antwort?: true;
+}
+
+/** Wie postausgangEintrag, behält aber die Marke `antwort` (sonst ginge der Rest nach einem Neustart im Notaus hinaus). */
+function postausgangPruefen(roh: unknown): Postausgang | undefined {
+  const e = postausgangEintrag(roh);
+  return e && (roh as { antwort?: unknown }).antwort === true ? { ...e, antwort: true } : e;
 }
 
 // Ungültige Einträge (kein Text, kein lesbarer Zeitpunkt) fallen beim Laden weg, mit Sicherung und Hinweis (postausgangEintrag)
-const postausgangGeladen = ladeListe<Postausgang>(POSTAUSGANG_FILE, "Postausgang", postausgangEintrag);
+const postausgangGeladen = ladeListe<Postausgang>(POSTAUSGANG_FILE, "Postausgang", postausgangPruefen);
 /**
  * true, wenn data/postausgang.json vorhanden, aber unlesbar war (Sicherung .defekt). Anders als bei den übrigen Dateien
  * wirft das Speichern dann nicht – sonst ginge jede Meldung bei einer Störung verloren. Neue Einträge warten nur im
@@ -314,9 +323,12 @@ function kuerzen(): void {
   }
 }
 
-/** `faellig`: Zeitpunkt des Sendeauftrags, nicht des Scheiterns – sonst gälte eine vor dem Notfall fällige Nachricht als neu. */
-function ablegen(text: string, faellig = new Date().toISOString()): void {
-  postausgang.push({ ts: faellig, text });
+/**
+ * `faellig`: Zeitpunkt des Sendeauftrags, nicht des Scheiterns – sonst gälte eine vor dem Notfall fällige Nachricht als neu.
+ * `antwort`: Rest einer Claude-Antwort (im Notaus zurückgestellt, siehe zurueckgestellt).
+ */
+function ablegen(text: string, faellig = new Date().toISOString(), antwort = false): void {
+  postausgang.push(antwort ? { ts: faellig, text, antwort: true } : { ts: faellig, text });
   kuerzen();
   speicherePostausgang();
 }
@@ -337,6 +349,14 @@ function imNotfallErlaubt(e: Postausgang): boolean {
   return !notfallAktiv() || (e.vorrang === true && e.ts >= (state.notfall?.seit ?? ""));
 }
 
+/**
+ * Antwort von Claude im Notaus: bleibt im Postausgang (nicht verworfen) und geht erst nach /weiter hinaus. Der Nutzer
+ * hebt den Notaus bewusst auf; bis dahin keine Antwort samt Echo der Frage in einen womöglich übernommenen Chat.
+ */
+const zurueckgestellt = (e: Postausgang): boolean => e.antwort === true && Boolean(state.paused);
+/** Jetzt sendbar: im Notfall erlaubt und nicht im Notaus zurückgestellt */
+const sendbar = (e: Postausgang): boolean => imNotfallErlaubt(e) && !zurueckgestellt(e);
+
 export interface SpaeterOptionen {
   /** Sofort senden, auch wenn etwas im Postausgang wartet; scheitert es, vorn statt hinten einreihen (Notfall, Antworten auf Freigaben). */
   vorrang?: boolean;
@@ -345,6 +365,12 @@ export interface SpaeterOptionen {
    * während des Versands hält die übrigen Teile zurück. Nie für den Notfall-Alarm selbst setzen.
    */
   imNotfallZurueckhalten?: boolean;
+  /**
+   * Antwort von Claude (Zeitplan, Rückblick, Zielcheck, Vorgang): wie sendeAntwort im Notaus oder Notfall weder senden
+   * noch ablegen, ein Notaus während des Versands hält den Rest zurück. Abgelegt (Störung, wartender Postausgang) trägt
+   * sie die Marke `antwort`: postausgangTick hält sie im Notaus bis /weiter zurück. Nicht mit `vorrang`.
+   */
+  antwort?: boolean;
 }
 
 /**
@@ -357,27 +383,30 @@ export async function sendeSpaeter(text: string, optionen: SpaeterOptionen = {})
 }
 
 /**
- * Wie sendeSpaeter, meldet aber, ob der Text zugestellt bzw. abgelegt (true) oder im Notfall verworfen wurde (false).
- * Ohne Vorrang geht im Notfall nichts direkt hinaus, auch kein weiterer Teil: es bleibt bis /entwarnung im Postausgang.
+ * Wie sendeSpaeter, meldet aber, ob der Text zugestellt bzw. abgelegt (true) oder im Notfall (bei Antworten auch im
+ * Notaus) verworfen wurde (false). Ohne Vorrang geht im Notfall nichts direkt hinaus, auch kein weiterer Teil: es bleibt bis /entwarnung im Postausgang.
  */
 async function zustellen(text: string, optionen: SpaeterOptionen): Promise<boolean> {
   // Ohne Telegram weder senden noch ablegen: nachgereicht würde ohnehin nie (postausgangTick läuft nur mit Telegram)
   if (!eingerichtet()) return false;
   const faellig = new Date().toISOString();
-  const zurueckhalten = optionen.imNotfallZurueckhalten ? notfallAktiv : undefined;
+  const antwort = Boolean(optionen.antwort);
+  const zurueckhalten = antwort ? () => Boolean(state.paused) || notfallAktiv() : optionen.imNotfallZurueckhalten ? notfallAktiv : undefined;
   if (zurueckhalten?.()) return false;
-  if (!optionen.vorrang && (postausgang.length > 0 || notfallAktiv())) {
-    ablegen(text, faellig);
+  // Eine im Notaus zurückgestellte Antwort hält die übrigen Meldungen nicht auf (sie geht ohnehin erst nach /weiter).
+  if (!optionen.vorrang && (postausgang.some((e) => !zurueckgestellt(e)) || notfallAktiv())) {
+    ablegen(text, faellig, antwort);
     return true;
   }
-  const r = await sendeTeile(text, {}, optionen.vorrang ? zurueckhalten : notfallAktiv);
+  const r = await sendeTeile(text, {}, optionen.vorrang || antwort ? zurueckhalten : notfallAktiv);
   if (r.ok) return true;
-  // Notfall kam während des Versands (auch während der Wiederholungen): Daten bleiben auch dem Postausgang fern
+  // Notfall (bei Antworten auch Notaus) kam während des Versands, auch während der Wiederholungen: Daten bleiben auch
+  // dem Postausgang fern
   if (zurueckhalten && (r.abgebrochen || zurueckhalten())) return false;
   if (!r.abgebrochen && fehlerArt(r.fehler) === "client") throw r.fehler;
   // nur der nicht zugestellte Rest; ein Rest ohne Vorrang wartet im Notfall auf /entwarnung (postausgangTick)
   if (optionen.vorrang) voranstellen(r.rest, faellig);
-  else ablegen(r.rest, faellig);
+  else ablegen(r.rest, faellig, antwort);
   return true;
 }
 
@@ -390,12 +419,13 @@ export async function postausgangTick(): Promise<void> {
   nachreichenLaeuft = true;
   try {
     while (postausgang.length > 0) {
-      // Im Notfall nur den Alarm (Vorrang, nach der Auslösung fällig). Alles andere wartet auf /entwarnung.
-      const e = notfallAktiv() ? postausgang.find(imNotfallErlaubt) : postausgang[0];
+      // Im Notfall nur den Alarm (Vorrang, nach der Auslösung fällig). Alles andere wartet auf /entwarnung; Antworten
+      // von Claude warten im Notaus auf /weiter.
+      const e = postausgang.find(sendbar);
       if (!e) break;
       const volltext = `(nachgereicht, ${clock(new Date(e.ts))}) ${e.text}`;
-      // Ein Notfall mitten im Nachreichen hält die übrigen Teile eines gewöhnlichen Eintrags zurück.
-      const r = await sendeTeile(volltext, {}, () => !imNotfallErlaubt(e));
+      // Ein Notfall (bei Antworten auch ein Notaus) mitten im Nachreichen hält die übrigen Teile zurück.
+      const r = await sendeTeile(volltext, {}, () => !sendbar(e));
       if (!r.ok) {
         if (r.abgebrochen || fehlerArt(r.fehler) !== "client") {
           // weiterhin gestört → nächster Tick; schon zugestellte Teile fallen weg (Präfix liegt immer im ersten Teil)
@@ -735,30 +765,60 @@ function pinFoermig(eingabe: string): boolean {
 const ANFUEHRUNG = `«»‹›"'„“”‚‘’`;
 const RAND_VORN = new RegExp(`^[\\s!${ANFUEHRUNG}]+`);
 const RAND_HINTEN = new RegExp(`[\\s.!?,;:${ANFUEHRUNG}]+$`);
-/** Zwischen zwei Ziffern: Leerraum, Komma, Punkt, Bindestriche (einzeln gesprochene Ziffern, «47-11») */
-const ZIFFERN_TRENNER = /(?<=\d)[\s.,\-–—]+(?=\d)/g;
+/** Ziffern mit Trennern dazwischen am Stück: Leerraum, Komma, Punkt, Bindestriche (gesprochene Ziffern, «47-11») */
+const ZIFFERN_TRENNER = /^\d+(?:[\s.,\-–—]+\d+)+$/;
+/** Dasselbe nur mit Leerraum und Bindestrichen («47 11», «47-11») */
+const ZIFFERN_LEER_STRICH = /^\d+(?:[\s\-–—]+\d+)+$/;
+
+/**
+ * Ziffern mit Trennern, die als PIN gelten: zusammen genau so viele Ziffern wie die PIN, und entweder einzeln gesetzt
+ * («4 7 1 1», «4, 7, 1, 1», «4.7.1.1»: Spracherkennung) oder nur mit Leerraum und Bindestrichen getrennt («47 11»,
+ * «47-11»). Nicht: Uhrzeit, Betrag, Datum mit Punkt oder Komma («14.30», «120.50», «25.10.2026»). Gruppen mit Leerraum
+ * oder Bindestrich treffen bei passender Ziffernzahl auch Uhrzeit, Spanne, Telefonnummer oder ISO-Datum («14 30»,
+ * «14-16», bei zehn Stellen «079 123 45 67», bei acht «2026-10-25»): abgewiesen wie die PIN (pinGeschwaerzt schwärzt
+ * dieselbe Klasse), aber nie gezählt (`getrennt`). Hängt nur von der Länge der PIN ab, nie vom Wert.
+ */
+function gesprocheneZiffern(t: string, laenge: number): { ziffern: string; getrennt: boolean } | undefined {
+  if (!ZIFFERN_TRENNER.test(t)) return undefined;
+  const gruppen = t.match(/\d+/g) ?? [];
+  const ziffern = gruppen.join("");
+  if (ziffern.length !== laenge) return undefined;
+  if (gruppen.every((g) => g.length === 1)) return { ziffern, getrennt: false };
+  return ZIFFERN_LEER_STRICH.test(t) ? { ziffern, getrennt: true } : undefined;
+}
+
+/** Wie pinFoermigLocker, dazu ob die Fassung nur aus Gruppen mit Leerraum oder Bindestrich stammt (nicht gezählt). */
+function pinFoermigTreffer(eingabe: string): { fassung: string; getrennt: boolean } | undefined {
+  const t = eingabe.trim();
+  const ohneRand = t.replace(RAND_VORN, "").replace(RAND_HINTEN, "");
+  const fassung = [t, t.replace(/[\s.!?,;:]+$/, ""), ohneRand].find(pinFoermig);
+  if (fassung !== undefined) return { fassung, getrennt: false };
+  const pin = config.pin ?? "";
+  if (!/^\d+$/.test(pin)) return undefined;
+  const g = gesprocheneZiffern(ohneRand, pin.length);
+  return g !== undefined && pinFoermig(g.ziffern) ? { fassung: g.ziffern, getrennt: g.getrennt } : undefined;
+}
 
 /**
  * Wie pinFoermig, aber Leerraum und Satzzeichen am Ende («4711.», «4711!», Autokorrektur, Spracherkennung), ein «!»
  * davor (starkes Modell) und Anführungszeichen ändern nichts; bei einer Ziffern-PIN auch Trenner zwischen den Ziffern
- * nicht («4 7 1 1», «47-11», «4, 7, 1, 1.»). Liefert die PIN-förmige Fassung (fürs Zählen) oder undefined. Für jeden
- * Weg zu Claude: Telegram (Text und Sprache), Gesprächsfeld der Kommandozentrale, /events (Konsole, Kurzbefehl,
- * Sprach-Satellit), Alexa (FrageIntent).
+ * nicht («4 7 1 1», «47-11», «4, 7, 1, 1.», siehe gesprocheneZiffern). Liefert die PIN-förmige Fassung (fürs Zählen)
+ * oder undefined. Für jeden Weg zu Claude: Telegram (Text und Sprache), Gesprächsfeld der Kommandozentrale, /events
+ * (Konsole, Kurzbefehl, Sprach-Satellit), Alexa (FrageIntent).
  */
 export function pinFoermigLocker(eingabe: string): string | undefined {
-  const t = eingabe.trim();
-  const ohneRand = t.replace(RAND_VORN, "").replace(RAND_HINTEN, "");
-  const fassungen = [t, t.replace(/[\s.!?,;:]+$/, ""), ohneRand];
-  if (/^\d+$/.test(config.pin ?? "")) fassungen.push(ohneRand.replace(ZIFFERN_TRENNER, ""));
-  return fassungen.find(pinFoermig);
+  return pinFoermigTreffer(eingabe)?.fassung;
 }
 
 /**
  * PIN-förmige Eingabe ohne wartende Abfrage: zählt als Missbrauch (5 in 5 Minuten → Notfall), richtig oder falsch.
- * Nicht bei einer PIN ohne Ziffern: sonst zählte jedes «Danke». Die gleiche Antwort verrät dort trotzdem nichts.
+ * Nicht bei einer PIN ohne Ziffern: sonst zählte jedes «Danke». Nicht bei Gruppen mit Leerraum oder Bindestrich
+ * («14 30», «14-16», «47 11»): die sehen auch wie Uhrzeit, Spanne oder Telefonnummer aus, fünf Antworten auf Rückfragen
+ * lösten sonst den Notfall aus. Abgewiesen werden sie trotzdem; die gleiche Antwort verrät nichts.
  */
 export function pinRatenZaehlen(eingabe: string): void {
-  if (pinFoermigLocker(eingabe) !== undefined && /\d/.test(config.pin ?? "")) abuseSignal("pin");
+  const treffer = pinFoermigTreffer(eingabe);
+  if (treffer !== undefined && !treffer.getrennt && /\d/.test(config.pin ?? "")) abuseSignal("pin");
 }
 
 /** Freigabe von einer anderen Oberfläche (Dashboard). Sensible Aufträge brauchen die PIN im selben Schritt. */
@@ -1102,7 +1162,8 @@ export async function handleUpdate(u: Update): Promise<void> {
       pinRatenZaehlen(text);
       return void await sendText("Die PIN bitte tippen, Sir, nie sprechen. Sprachnachricht gelöscht.");
     }
-    await sendText(`🎙 ${text}`);
+    // Echo geschwärzt (Token, Schlüssel, PIN-Förmiges im Satz nach Klasse); Claude bekommt den Satz unverändert
+    await sendText(`🎙 ${pinGeschwaerzt(schwaerze(text))}`);
   }
 
   // /weiter bzw. /entwarnung im Notaus ist nie die PIN: die wartende Freigabe verfällt (sie muss nach dem Notaus
@@ -1181,6 +1242,8 @@ export async function handleUpdate(u: Update): Promise<void> {
   try {
     let reply: string;
     let eintrag: object | undefined;
+    // Vor dem Zug erfasst: leert ein anderer Kanal währenddessen die Historie (resetHistory), zählt die Frage trotzdem
+    const verlauf = zugVerlauf(text);
     try {
       reply = await abhaengigkeiten.handleMessage(text, hooks, { onAntwort: (e) => void (eintrag = e) });
     } catch (e) {
@@ -1203,8 +1266,12 @@ export async function handleUpdate(u: Update): Promise<void> {
       await sendText(pausiertText()).catch(log);
       return;
     }
+    // Hinaus nur geschwärzt (wie späte Antworten und Verlauf): die gemeinsame Historie kann aus anderen Kanälen eine
+    // PIN im Satz oder ein Token enthalten. Nur was vom Nutzer in PIN-Form stammt (Eingaben, Notizen, Profil),
+    // Bestellnummer, PLZ und Jahr aus Werkzeugen bleiben lesbar (antwortGeschwaerzt). Die Historie bleibt unverändert.
+    const hinaus = antwortGeschwaerzt(schwaerze(reply), "<PIN>", verlauf());
     // Die Antwort ist bezahlt und in der Historie: scheitert nur Telegram, bleibt sie im Postausgang statt verloren zu gehen.
-    const r = await sendeTeile(reply, {}, () => state.paused || notfallAktiv());
+    const r = await sendeTeile(hinaus, {}, () => state.paused || notfallAktiv());
     if (!r.ok) {
       // Notaus während des Versands, auch während der Wiederholungen eines Teils: der Rest geht weder raus
       // noch in den Postausgang (womöglich kompromittierter Chat), und der Verlauf der Kommandozentrale zeigt sie nicht
@@ -1214,10 +1281,10 @@ export async function handleUpdate(u: Update): Promise<void> {
       }
       log(r.fehler);
       // client: Nachricht selbst unbrauchbar, Wiederholen hilft nicht; sonst nur den nicht zugestellten Rest ablegen
-      if (fehlerArt(r.fehler) !== "client") ablegen(r.rest);
+      if (fehlerArt(r.fehler) !== "client") ablegen(r.rest, undefined, true);
       return;
     }
-    if (spoken && !state.paused && !notfallAktiv()) await sendVoiceReply(reply);
+    if (spoken && !state.paused && !notfallAktiv()) await sendVoiceReply(hinaus);
   } finally {
     clearInterval(ticker);
   }

@@ -123,7 +123,8 @@ describe("sichtbareNachrichten (rein)", () => {
       { role: "user", content: "[Ereignis aus dem Haus] Klingel" },
       { role: "assistant", content: "Jemand an der Tür, Sir." },
     ];
-    assert.deepEqual(agent.sichtbareNachrichten(v), [{ rolle: "nutzer", text: "Klingel" }, { rolle: "jarvis", text: "Jemand an der Tür, Sir." }]);
+    // Ereignis aus dem Haus: Absender «haus», nicht der Nutzer
+    assert.deepEqual(agent.sichtbareNachrichten(v), [{ rolle: "haus", text: "Klingel" }, { rolle: "jarvis", text: "Jemand an der Tür, Sir." }]);
     assert.deepEqual(agent.sichtbareNachrichten(v, 1), [{ rolle: "jarvis", text: "Jemand an der Tür, Sir." }]);
   });
 });

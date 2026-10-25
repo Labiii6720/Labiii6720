@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { after, before, describe, it } from "node:test";
@@ -84,12 +84,36 @@ describe("Gesten-Konsole im Browser (ohne CDN, strenge CSP)", { skip: chrome ? f
     assert.deepEqual(await csp(page), []);
     assert.deepEqual(log.fremd, []);
     assert.deepEqual(log.seitenfehler, []);
-    // Einziger Konsoleneintrag: Chromium meldet die 404 des fehlenden Modells
-    assert.deepEqual(log.konsole, ["Failed to load resource: the server responded with a status of 404 (Not Found)"]);
-    assert.ok(log.antworten.some((a) => a.url === "/gesture/mp/hand_landmarker.task" && a.status === 404));
+    // Die Seite fragt zuerst nach dem Zustand: kein 404, keine Meldung «Failed to load resource» in der Konsole
+    assert.ok(log.antworten.some((a) => a.url === "/gesture/mp/modell.json" && a.status === 200 && /^application\/json/.test(a.typ)), JSON.stringify(log.antworten));
+    assert.deepEqual(log.antworten.filter((a) => a.status >= 400), []);
+    assert.ok(!log.antworten.some((a) => a.url === "/gesture/mp/hand_landmarker.task"), "das Modell wird gar nicht erst geholt");
+    assert.deepEqual(log.konsole, []);
     // Die Kugel läuft trotzdem
     await page.waitForFunction(() => Number(document.getElementById("fps")?.textContent) > 0);
     await page.close();
+  });
+
+  it("Handmodell mit falschem Inhalt: ruhiger Hinweis «defekt» statt «FEHLER:», keine Kamera, kein WASM, kein 409 in der Konsole", async () => {
+    mkdirSync(join(temp, "vendor", "mediapipe"), { recursive: true });
+    writeFileSync(join(temp, "vendor", "mediapipe", "hand_landmarker.task"), "kaputt");
+    try {
+      const { page, log } = await seite();
+      await page.goto(dienst!.url + "/gesture");
+      await page.waitForFunction(() => /^(Handmodell|FEHLER|LIVE|KAMERA)/.test(document.getElementById("st")?.textContent ?? ""));
+      assert.equal(await page.textContent("#st"), "Handmodell defekt: npm run gesten:modell");
+      assert.equal(await page.getAttribute("#st", "class"), "hinweis");
+      assert.ok(log.antworten.some((a) => a.url === "/gesture/mp/modell.json" && a.status === 200));
+      assert.ok(!log.antworten.some((a) => a.url === "/gesture/mp/hand_landmarker.task" || a.url.startsWith("/gesture/mp/wasm/")));
+      assert.deepEqual(log.antworten.filter((a) => a.status >= 400), []);
+      assert.deepEqual(await csp(page), []);
+      assert.deepEqual(log.fremd, []);
+      assert.deepEqual(log.seitenfehler, []);
+      assert.deepEqual(log.konsole, []);
+      await page.close();
+    } finally {
+      rmSync(join(temp, "vendor"), { recursive: true, force: true });
+    }
   });
 
   it("WASM lädt unter der CSP vom eigenen Server (application/wasm); ein kleines Test-Modell wird sauber abgewiesen", async () => {

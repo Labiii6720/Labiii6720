@@ -243,11 +243,11 @@ export function freigabenHinweis(
   const gestartet = auftraege.filter((a) => a.status === "offen" && a.gestartetAm);
   const du = opts.form === "du";
   // Auch hier höchstens drei Nummern: nach Abstürzen können sich unklare Aufträge ansammeln
-  const gNamen = gestartet.slice(0, HINWEIS_MAX_NENNEN).map((a) => a.id).join(", ");
-  const gRest = gestartet.length - Math.min(gestartet.length, HINWEIS_MAX_NENNEN);
-  const gRestText = gRest > 0 ? ` und ${gRest === 1 ? "eine weitere" : `${zahlwort(gRest)} weitere`}` : "";
+  const gNummern = gestartet.slice(0, HINWEIS_MAX_NENNEN).map((a) => String(a.id));
+  const gRest = gestartet.length - gNummern.length;
+  const gNamen = aufzaehlen(gRest > 0 ? [...gNummern, gRest === 1 ? "eine weitere" : `${zahlwort(gRest)} weitere`] : gNummern);
   const gestartetText = gestartet.length
-    ? `${gestartet.length === 1 ? "Nummer" : "Die Nummern"} ${gNamen}${gRestText} ${gestartet.length === 1 ? "ist" : "sind"} ` +
+    ? `${gestartet.length === 1 ? "Nummer" : "Die Nummern"} ${gNamen} ${gestartet.length === 1 ? "ist" : "sind"} ` +
       "bereits gestartet oder ohne klares Ergebnis; den Stand zeigt Telegram."
     : "";
   if (!offen.length) return gestartetText;

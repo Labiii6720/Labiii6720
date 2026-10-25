@@ -124,8 +124,10 @@ describe("Gespräch: Verlauf der letzten fünf Nachrichten", { skip: chrome ? fa
     await page.evaluate(() => { location.hash = "uebersicht"; });
     await page.waitForSelector("#v-uebersicht:not([hidden]) .auftraege");
     await page.evaluate(() => { location.hash = "gespraech"; });
-    // Was vor dem Abruf gesendet war, steht danach im Verlauf des Servers: die eigenen Einträge weichen ihm
-    await page.waitForFunction(() => document.querySelectorAll("#v-gespraech .msg:not(.frueher)").length === 0);
+    // Was vor dem Abruf angekommen war, steht danach im Verlauf des Servers: diese Einträge weichen ihm.
+    // Die abgewiesene PIN-Eingabe kam nie an: ihr Fehlereintrag bleibt stehen
+    await page.waitForFunction(() => document.querySelectorAll("#v-gespraech .msg:not(.frueher)").length === 1);
+    assert.equal(await page.textContent("#v-gespraech .msg.jv.fehler:not(.frueher) .txt"), "Die PIN gehört nicht in den Chat, Sir. Nichts gesendet.");
     assert.equal(abrufe.length, vorher + 1, "genau ein neuer Abruf");
     // Die Attrappe hat «Neue Frage» nicht in data/chat.json geschrieben: der Server bleibt die Quelle
     assert.deepEqual(await texte(), SICHTBAR);

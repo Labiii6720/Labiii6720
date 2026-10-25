@@ -130,7 +130,8 @@ describe("POST /api/chat: die PIN gehört nicht in den Chat", () => {
     claudeAntwort = "Die 4711 nenne ich nicht, Sir.";
     const r = await chat("Ist 4711 eine gute PIN?");
     assert.equal(r.statusCode, 200);
-    assert.equal(r.body.reply, "Die 4711 nenne ich nicht, Sir.");
+    // Auch die rechtzeitige Antwort ohne PIN
+    assert.equal(r.body.reply, "Die <PIN> nenne ich nicht, Sir.");
     assert.equal(anClaude.length, 1);
     const n = await verlauf();
     assert.deepEqual(n, [{ rolle: "nutzer", text: "Ist <PIN> eine gute PIN?" }, { rolle: "jarvis", text: "Die <PIN> nenne ich nicht, Sir." }]);
@@ -145,6 +146,16 @@ describe("POST /api/chat: die PIN gehört nicht in den Chat", () => {
     assert.equal(telegram.length, 1);
     assert.match(telegram[0]!, /^Zur Frage aus der Zentrale \(«Bitte prüfen, ob <PIN> noch gilt»\):/);
     assert.ok(!telegram[0]!.includes("4711"));
+  });
+
+  it("die rechtzeitige Antwort: wiederholt Claude die PIN, steht in der Kommandozentrale nur der Platzhalter", async () => {
+    claudeAntwort = "Die 4711 gilt noch, Sir.";
+    const r = await chat("Gilt die Zahl noch?");
+    assert.equal(r.statusCode, 200);
+    assert.equal(r.body.queued, false);
+    assert.equal(r.body.reply, "Die <PIN> gilt noch, Sir.");
+    await new Promise((r) => setTimeout(r, 20));
+    assert.deepEqual(telegram, []);
   });
 
   it("die späte Antwort nach Telegram: wiederholt Claude die PIN, steht sie dort geschwärzt", async () => {

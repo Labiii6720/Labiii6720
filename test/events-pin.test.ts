@@ -102,8 +102,30 @@ describe("POST /events: die PIN geht nie an Claude", () => {
     assert.deepEqual(telegram, []);
     assert.equal(auditZeilen("pin_im_chat").length, 4);
     assert.ok(auditZeilen("pin_im_chat").every((z) => z.includes('"quelle":"events"')));
-    assert.equal(auditZeilen("abuse_signal").length, 4, "zählt wie in Telegram und in der Kommandozentrale");
+    assert.equal(auditZeilen("abuse_signal").length, 3, "getippt zählt wie in Telegram und in der Kommandozentrale, gesprochen nicht");
     assert.ok(!readFileSync(AUDIT, "utf8").includes("4711"), "die PIN steht nicht im Audit");
+  });
+
+  it("Sprach-Satellit (kanal «stimme») und frage aus Home Assistant: abgewiesen, auditiert, nie gezählt – kein Notfall", async () => {
+    // Befund: Der Satellit reicht jeden erkannten Satz als frage_sync mit kanal «stimme» weiter. Fünf im Raum gesprochene
+    // Zahlen (Gast, Fernseher, Postleitzahl als Antwort auf eine Rückfrage) lösten über abuseSignal den Notfall aus.
+    const vorher = auditZeilen("abuse_signal").length;
+    for (const text of ["4711", "4 7 1 1", "4051", "2026", "4712", "0815"]) {
+      const r = await sende({ event: "frage_sync", text, kanal: "stimme" });
+      assert.equal(r.status, 400, text);
+      assert.deepEqual(r.body, PIN_ANTWORT, text);
+    }
+    const haus = await sende({ event: "frage", text: "4711" });
+    assert.equal(haus.status, 400);
+    await ruhe();
+    assert.equal(auditZeilen("abuse_signal").length, vorher, "nicht als Missbrauch gezählt");
+    assert.equal(state.notfall?.aktiv ?? false, false, "kein Notfall");
+    assert.equal(state.paused ?? false, false);
+    assert.deepEqual(anClaude, []);
+    assert.deepEqual(telegram, []);
+    // Gegenprobe: getippt (Konsole, Kurzbefehl ohne Kanal) zählt weiter
+    await sende({ event: "frage_sync", text: "4711" });
+    assert.equal(auditZeilen("abuse_signal").length, vorher + 1);
   });
 
   it("frage (Antwort per Telegram): ebenso abgewiesen, nichts an Claude, nichts nach Telegram", async () => {
@@ -121,6 +143,13 @@ describe("POST /events: die PIN geht nie an Claude", () => {
     assert.equal(sofort.status, 200);
     assert.equal(sofort.body.reply, "Gern, Sir.");
     assert.equal(anClaude.length, 1);
+
+    // Auch die rechtzeitige Antwort (Konsole, Satellit) ohne PIN, die der Nutzer im Satz nannte
+    claudeAntwort = "Die 4711 gilt noch, Sir.";
+    const geschwaerzt = await sende({ event: "frage_sync", text: "Gilt die 47 11 noch?", kanal: "stimme" });
+    assert.equal(geschwaerzt.status, 200);
+    assert.equal(geschwaerzt.body.reply, "Die <PIN> gilt noch, Sir.");
+    assert.equal(anClaude.length, 2);
 
     claudeVerzoegerung = 4000;
     claudeAntwort = "Die 4711 merke ich mir nicht, Sir.";

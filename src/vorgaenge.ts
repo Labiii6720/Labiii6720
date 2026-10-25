@@ -3,7 +3,7 @@ import { uptime } from "node:os";
 import { gesperrtText, ladeListe, vorgangEintrag } from "./datei.js";
 import { addSystemNote, runTask, type AgentHooks } from "./agent.js";
 import { schwaerze } from "./robust.js";
-import { state } from "./state.js";
+import { save as saveState, state, type State } from "./state.js";
 import { sendText, sendeSpaeter } from "./telegram.js";
 
 /**
@@ -96,9 +96,49 @@ export const VORGAENGE_UNLESBAR =
  */
 const hoechsteVorgangIdBeimStart = vorgaengeNichtGeladen ? 0 : geladen.hoechsteId;
 
-/** Nächste Nummer: über allen vorhandenen (unabhängig von der Reihenfolge in der Datei) und allen beim Start verworfenen. */
+/**
+ * Untergrenze in state.json: save() schreibt verworfene Einträge nicht zurück, nach dem nächsten Neustart kennte sonst
+ * niemand mehr deren Nummer. Lokal typisiert, bis state.ts das Feld selbst führt.
+ */
+const zaehler = state as State & { naechsteVorgangId?: number };
+
+/**
+ * Vor jedem Speichern der Liste: Zähler auf mindestens höchste Start-Nummer + 1 nachziehen (wie zeitplaene.ts). Nicht
+ * beim Import – auch `npm run check` lädt dieses Modul. Scheitert das Speichern, bleibt der Zähler wie er war.
+ */
+function vorgangZaehlerNachziehen(): void {
+  if (hoechsteVorgangIdBeimStart <= 0) return;
+  const mindestens = hoechsteVorgangIdBeimStart + 1;
+  const gemerkt = zaehler.naechsteVorgangId;
+  if (!Number.isSafeInteger(mindestens) || (Number.isSafeInteger(gemerkt) && gemerkt! >= mindestens)) return;
+  zaehler.naechsteVorgangId = mindestens;
+  try {
+    saveState();
+  } catch (e) {
+    if (gemerkt === undefined) delete zaehler.naechsteVorgangId;
+    else zaehler.naechsteVorgangId = gemerkt;
+    throw e;
+  }
+}
+
+/**
+ * Nächste Nummer: über allen vorhandenen (unabhängig von der Reihenfolge in der Datei), allen beim Start verworfenen und
+ * dem gemerkten Zähler. Der Zähler wird vor der Liste gespeichert; scheitert das, wirft es, bevor etwas angelegt ist.
+ */
 function neueVorgangId(): number {
-  return vorgaenge.reduce((max, v) => (Number.isSafeInteger(v.id) ? Math.max(max, v.id) : max), Math.max(0, hoechsteVorgangIdBeimStart)) + 1;
+  const gemerkt = zaehler.naechsteVorgangId;
+  const vorhanden = vorgaenge.reduce((max, v) => (Number.isSafeInteger(v.id) ? Math.max(max, v.id + 1) : max), 1);
+  const id = Math.max(vorhanden, Math.max(0, hoechsteVorgangIdBeimStart) + 1, Number.isSafeInteger(gemerkt) ? gemerkt! : 1);
+  if (!Number.isSafeInteger(id)) throw new Error("Nummernraum erschöpft, Sir – data/vorgaenge.json prüfen.");
+  zaehler.naechsteVorgangId = id + 1;
+  try {
+    saveState();
+  } catch (e) {
+    if (gemerkt === undefined) delete zaehler.naechsteVorgangId;
+    else zaehler.naechsteVorgangId = gemerkt;
+    throw e;
+  }
+  return id;
 }
 
 let nachNeustartErledigt = false;
@@ -127,6 +167,7 @@ export async function vorgaengeNachNeustart(u: Umgebung = {}): Promise<Vorgang[]
 
 function save(): void {
   if (vorgaengeNichtGeladen) throw new Error(gesperrtText(FILE, "die Vorgänge"));
+  vorgangZaehlerNachziehen();
   mkdirSync("data", { recursive: true, mode: 0o700 });
   writeFileSync(`${FILE}.tmp`, JSON.stringify(vorgaenge.slice(-100), null, 2), { mode: 0o600 });
   renameSync(`${FILE}.tmp`, FILE);
@@ -136,7 +177,6 @@ export function startVorgang(auftrag: string, hooks: AgentHooks): Vorgang {
   // Vor dem push: sonst liefe ein Vorgang, den keine Datei kennt
   if (vorgaengeNichtGeladen) throw new Error(VORGAENGE_UNLESBAR);
   const id = neueVorgangId();
-  if (!Number.isSafeInteger(id)) throw new Error("Nummernraum erschöpft, Sir – data/vorgaenge.json prüfen.");
   const v: Vorgang = { id, auftrag, status: "läuft", startedAt: new Date().toISOString(), steps: 0, pid: process.pid };
   vorgaenge.push(v);
   hierGestartet.add(v);
@@ -174,7 +214,8 @@ export function startVorgang(auftrag: string, hooks: AgentHooks): Vorgang {
         v.finishedAt = new Date().toISOString();
         save();
         addSystemNote(`Vorgang #${v.id} («${auftrag.slice(0, 80)}») ist fertig: ${v.result.slice(0, 1500)}`);
-        await sendeSpaeter(`✅ Vorgang #${v.id} fertig (${v.steps} Werkzeugschritte)\n\n${result}`, { imNotfallZurueckhalten: true }).catch((e: unknown) =>
+        // Antwort von Claude: im Notaus wie im Notfall nicht hinaus, im Postausgang bis /weiter zurückgestellt
+        await sendeSpaeter(`✅ Vorgang #${v.id} fertig (${v.steps} Werkzeugschritte)\n\n${result}`, { imNotfallZurueckhalten: true, antwort: true }).catch((e: unknown) =>
           console.error(`Vorgang #${v.id}: Ergebnis nicht zustellbar (${schwaerze(e instanceof Error ? e.message : String(e))}).`),
         );
       },

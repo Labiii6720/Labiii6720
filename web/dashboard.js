@@ -1680,17 +1680,26 @@
     if (gen !== g.gen) return; // inzwischen geleert (Abmelden, Notfall): leereQuellen hat laedt schon zurückgesetzt
     g.laedt = false;
     if (!angemeldet || (Q.status && Q.status.notfall) || r.status === 401) return;
+    // Während des Abrufs überholt (Notaus an/aus, Bereich neu geöffnet): nicht übernehmen, sofort neu holen
+    if (g.veraltet) { if (aktuell === "gespraech") void verlaufLaden().then(rendern); return; }
     const d = r.daten;
     if (r.status === 200 && d && d.ok && Array.isArray(d.nachrichten)) {
       g.frueher = d.nachrichten.filter((m) => m && typeof m.text === "string" && (m.rolle === "nutzer" || m.rolle === "jarvis")).slice(-5);
       g.frueherHinweis = d.pausiert ? ohneSymbol(d.text || "Notaus aktiv, Sir. Der Verlauf ruht.")
         : d.unlesbar ? ohneSymbol(d.text || "data/chat.json war unlesbar, Sir.") : "";
-      // Was vor dem Abruf gesendet und beantwortet war, steht jetzt im Verlauf des Servers
-      g.verlauf = g.verlauf.filter((m) => m.seq > seq);
+      // Was vor dem Abruf angekommen war, steht jetzt im Verlauf des Servers; Fehler und Telegram-Hinweise nie: sie bleiben
+      g.verlauf = g.verlauf.filter((m) => m.seq > seq || !m.imServer);
     } else {
       if (g.frueher === null) g.frueher = [];
       g.frueherHinweis = fehlerText(r, "Den Verlauf konnte ich nicht laden");
+      // Netz oder Dienst gestört: der nächste Bereichs-Takt versucht es wieder
+      if (r.status === 0 || r.status >= 500) g.veraltet = true;
     }
+  }
+  /** Anzahl der früheren Nachrichten als Wort für die Kopfzeile (höchstens fünf) */
+  const NACHRICHTEN_WORT = ["", "", "zwei", "drei", "vier", "fünf"];
+  function frueherText(n) {
+    return n === 1 ? "Die letzte Nachricht aus dem Chat." : "Die letzten " + (NACHRICHTEN_WORT[n] || String(n)) + " Nachrichten aus dem Chat.";
   }
   function nachricht(m) {
     const ich = m.wer === "ich";
@@ -1704,7 +1713,7 @@
     const g = gespraech;
     const frueher = Array.isArray(g.frueher) ? g.frueher : [];
     const quelle = g.frueher === null ? h("p", { class: "chat-quelle", text: "Ich hole den Verlauf …" })
-      : frueher.length ? h("p", { class: "chat-quelle" }, ikon("info", true), "Die letzten fünf Nachrichten aus dem Chat.") : null;
+      : frueher.length ? h("p", { class: "chat-quelle" }, ikon("info", true), frueherText(frueher.length)) : null;
     const log = h("div", { class: "chat", id: "chatLog" }, quelle,
       g.frueherHinweis ? h("p", { class: "chat-quelle" }, ikon("warn", true), g.frueherHinweis) : null,
       frueher.map((m) => nachricht({ wer: m.rolle === "nutzer" ? "ich" : "jv", text: m.text, zeit: m.zeit, frueher: true })),
@@ -1736,12 +1745,15 @@
     // Ansage über ansageAktiv: das Gespräch wartet bis 60 s, ein Dialog (Notaus, Weiter mit PIN) macht #ansage inert
     g.laeuft = false;
     if (r.status === 200 && r.daten && r.daten.ok) {
+      // Angekommen: die Frage steht jetzt im Verlauf des Servers (verlaufLaden lässt sie dann ihm), der Telegram-Hinweis nicht
+      const ich = g.verlauf.find((m) => m.seq === eigene);
+      if (ich) ich.imServer = true;
       if (r.daten.queued) {
         anhaengen({ wer: "jv", text: "Das braucht länger, Sir.", zeit: jetzt().toISOString(), hinweis: "Die Antwort kommt per Telegram." });
         ansageAktiv("Jarvis: Das braucht länger. Die Antwort kommt per Telegram.");
       } else {
         const antwort = typeof r.daten.reply === "string" && r.daten.reply ? r.daten.reply : "…";
-        anhaengen({ wer: "jv", text: antwort, zeit: jetzt().toISOString() });
+        anhaengen({ wer: "jv", text: antwort, zeit: jetzt().toISOString(), imServer: true });
         ansageAktiv("Jarvis: " + antwort);
       }
     } else {

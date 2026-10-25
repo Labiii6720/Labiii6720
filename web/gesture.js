@@ -1,9 +1,11 @@
 // Gesten- und Sprachkonsole. Alles vom eigenen Server (MediaPipe aus node_modules, Modell aus vendor/), keine fremden
 // Ursprünge: die CSP lässt nur 'self' zu. Gesendet wird nur an /events dieser Seite.
-import { HandLandmarker, FilesetResolver } from "/gesture/mp/vision_bundle.mjs";
-
+// MediaPipe erst in start() laden: fehlt das Paket, läuft die Seite trotzdem und sagt es (statischer Import bräche alles ab)
+const BUNDLE = "/gesture/mp/vision_bundle.mjs";
 const WASM = "/gesture/mp/wasm";
 const MODELL = "/gesture/mp/hand_landmarker.task";
+/** Zustand des Handmodells: zuerst fragen, damit ein fehlendes Modell kein 404 in der Browser-Konsole hinterlässt */
+const MODELL_ZUSTAND = "/gesture/mp/modell.json";
 
 const $ = (id) => document.getElementById(id);
 const video = $("video"), overlay = $("overlay"), orbCanvas = $("orb");
@@ -28,6 +30,11 @@ function toast(msg) {
 
 function status(text, klasse = "off") { $("st").textContent = text; $("st").className = klasse; }
 
+/** Sieht das Transkript nach einer gesprochenen PIN aus («4 7 1 1», «47-11.»)? Ohne Kenntnis der PIN: nur 4–12 Ziffern. */
+function pinVerdacht(t) {
+  return /^\d{4,12}$/.test(String(t).replace(/[\s.,;:!?'"«»‹›„“”‚‘’`\-–—]/g, ""));
+}
+
 // ---------- Jarvis-Brücke ----------
 let busy = false;
 async function jarvis(text) {
@@ -35,18 +42,25 @@ async function jarvis(text) {
   if (!token) { toast("TOKEN FEHLT"); return; }
   if (busy) { toast("JARVIS ARBEITET NOCH"); return; }
   busy = true; $("jv").textContent = "ARBEITET…"; $("jv").className = "";
-  $("reply").textContent = "› " + text;
+  // Eine gesprochene PIN nie anzeigen, auch nicht bis zur Antwort des Dienstes
+  const frage = "› " + (pinVerdacht(text) ? "…" : text);
+  $("reply").textContent = frage;
+  const hinweis = (t) => { $("jv").textContent = "FEHLER"; $("jv").className = "off"; $("reply").textContent = t; };
   try {
     const res = await fetch("/events", {
       method: "POST",
       headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
       body: JSON.stringify({ event: "frage_sync", text }),
     });
-    const data = await res.json();
+    const data = await res.json().catch(() => null);
     // Hielt der Dienst die Eingabe für die PIN, nicht stehen lassen: nur sein Hinweis erscheint
     if (data && data.error === "pin") { $("reply").textContent = data.text || "Die PIN gehört nicht in den Chat."; $("jv").textContent = "VERBUNDEN"; $("jv").className = "live"; return; }
+    if (res.status === 401) return hinweis("Token stimmt nicht, Sir.");
+    // Ohne JARVIS_EVENT_TOKEN gibt es /events nicht: HTML-404 statt JSON
+    if (res.status === 404 && !data) return hinweis("Ereignisse sind aus (JARVIS_EVENT_TOKEN fehlt), Sir.");
+    if (!data) throw new Error("HTTP " + res.status);
     if (!res.ok || !data.ok) throw new Error(data.text || data.error || "HTTP " + res.status);
-    $("reply").textContent = "› " + text + "\n\n" + data.reply;
+    $("reply").textContent = frage + "\n\n" + data.reply;
     $("jv").textContent = "VERBUNDEN"; $("jv").className = "live";
     speak(data.reply);
   } catch (e) {
@@ -55,12 +69,24 @@ async function jarvis(text) {
   } finally { busy = false; }
 }
 
+// Nur lokale Stimmen des Betriebssystems: Chromes «Google …»-Stimmen (localService=false) schicken den Text ins Netz.
+// Ohne lokale deutsche Stimme bleibt es beim Text (nie voice=null mit Sprache: dann wählte Chrome selbst, auch eine Netzstimme).
+let ohneStimmeGemeldet = false;
+if ("speechSynthesis" in window) {
+  speechSynthesis.getVoices(); // stösst das Laden der Liste an
+  speechSynthesis.addEventListener("voiceschanged", () => { ohneStimmeGemeldet = false; });
+}
 function speak(text) {
   if (!("speechSynthesis" in window)) return;
+  const lokal = speechSynthesis.getVoices().filter((v) => v.localService === true);
+  const stimme = lokal.find((v) => /^de[-_]CH/i.test(v.lang)) || lokal.find((v) => /^de/i.test(v.lang));
+  if (!stimme) {
+    if (!ohneStimmeGemeldet) { ohneStimmeGemeldet = true; toast("KEINE LOKALE DEUTSCHE STIMME – NUR TEXT"); }
+    return;
+  }
   const u = new SpeechSynthesisUtterance(text.replace(/https?:\/\/\S+/g, "Link").slice(0, 1500));
-  const voices = speechSynthesis.getVoices();
-  u.voice = voices.find((v) => /^de[-_]CH/i.test(v.lang)) || voices.find((v) => /^de/i.test(v.lang)) || null;
-  u.lang = u.voice?.lang || "de-DE";
+  u.voice = stimme;
+  u.lang = stimme.lang;
   u.rate = 1.05;
   speechSynthesis.cancel();
   speechSynthesis.speak(u);
@@ -75,13 +101,19 @@ function listen() {
   const rec = new Rec();
   rec.lang = "de-DE"; rec.interimResults = false; rec.maxAlternatives = 1;
   listening = true; $("talk").classList.add("on"); toast("ICH HÖRE…");
-  rec.addEventListener("result", (e) => { const t = e.results[0][0].transcript; toast("» " + t); jarvis(t); });
+  rec.addEventListener("result", (e) => { const t = e.results[0][0].transcript; toast(pinVerdacht(t) ? "» …" : "» " + t); jarvis(t); });
   rec.addEventListener("error", (e) => toast("ERKENNUNG: " + e.error));
   rec.addEventListener("end", () => { listening = false; $("talk").classList.remove("on"); });
   rec.start();
 }
 $("talk").addEventListener("click", listen);
-window.addEventListener("keydown", (e) => { if (e.code === "Space" && e.target.tagName !== "INPUT" && e.target.tagName !== "TEXTAREA") { e.preventDefault(); listen(); } });
+// Leertaste = Sprechen, ausser auf Knöpfen und Feldern (dort gehört sie dem Element) und bei Tastenwiederholung
+window.addEventListener("keydown", (e) => {
+  if (e.code !== "Space" || e.repeat) return;
+  if (e.target instanceof Element && e.target.closest("button, input, textarea, select, [contenteditable]")) return;
+  e.preventDefault();
+  listen();
+});
 
 // ---------- Mikrofon-Pegel für den Puls ----------
 let level = 0, analyser, levelBuf;
@@ -163,13 +195,13 @@ function gesture(name, ms, action) {
 }
 
 // ---------- Hauptschleife ----------
-let landmarker, last = performance.now(), frames = 0, fpsAt = last;
+let mp, landmarker, last = performance.now(), frames = 0, fpsAt = last;
 function drawHands(hands) {
   overlay.width = video.videoWidth || 1280; overlay.height = video.videoHeight || 720;
   octx.clearRect(0, 0, overlay.width, overlay.height);
   octx.lineWidth = 3; octx.strokeStyle = "rgba(255,160,90,.9)"; octx.fillStyle = "#fff";
   for (const lm of hands) {
-    for (const { start, end } of HandLandmarker.HAND_CONNECTIONS) {
+    for (const { start, end } of mp ? mp.HandLandmarker.HAND_CONNECTIONS : []) {
       octx.beginPath();
       octx.moveTo(lm[start].x * overlay.width, lm[start].y * overlay.height);
       octx.lineTo(lm[end].x * overlay.width, lm[end].y * overlay.height);
@@ -216,21 +248,32 @@ function loop() {
 async function erstelle(vision, modell) {
   const optionen = (delegate) => ({ baseOptions: { modelAssetBuffer: modell, delegate }, runningMode: "VIDEO", numHands: 2 });
   try {
-    return await HandLandmarker.createFromOptions(vision, optionen("GPU"));
+    return await mp.HandLandmarker.createFromOptions(vision, optionen("GPU"));
   } catch {
-    return await HandLandmarker.createFromOptions(vision, optionen("CPU"));
+    return await mp.HandLandmarker.createFromOptions(vision, optionen("CPU"));
   }
 }
 
 async function start() {
   requestAnimationFrame(loop); // die Kugel läuft auch ohne Handtracking
   try {
-    // Erst das Modell: fehlt es, fragt die Seite gar nicht nach der Kamera
+    mp = await import(BUNDLE);
+  } catch {
+    status("MediaPipe fehlt: npm ci, dann Jarvis neu starten", "hinweis");
+    return;
+  }
+  try {
+    // Erst das Modell: fehlt es oder stimmt es nicht, fragt die Seite gar nicht nach der Kamera
+    const z = await (await fetch(MODELL_ZUSTAND)).json();
+    if (!z.vorhanden) { status("Handmodell fehlt: npm run gesten:modell", "hinweis"); return; }
+    if (z.zustand === "falsch") { status("Handmodell defekt: npm run gesten:modell", "hinweis"); return; }
+    // Rückfall, falls sich das Modell seither geändert hat
     const res = await fetch(MODELL);
     if (res.status === 404) { status("Handmodell fehlt: npm run gesten:modell", "hinweis"); return; }
+    if (res.status === 409) { status("Handmodell defekt: npm run gesten:modell", "hinweis"); return; }
     if (!res.ok) throw new Error("Handmodell HTTP " + res.status);
     const modell = new Uint8Array(await res.arrayBuffer());
-    const vision = await FilesetResolver.forVisionTasks(WASM);
+    const vision = await mp.FilesetResolver.forVisionTasks(WASM);
     landmarker = await erstelle(vision, modell);
     status("KAMERA…");
     const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 1280, height: 720 }, audio: false });

@@ -34,7 +34,7 @@ globalThis.fetch = (async (eingabe: string | URL | Request, init?: RequestInit) 
 after(() => { globalThis.fetch = echteFetch; });
 
 const alexa = await import("../src/alexa.js");
-const { istNacht, nachtFenster, ssml, ssmlEscape, PAUSE, istFreigabeWunsch, buildSkill, _testOptionen } = alexa;
+const { istNacht, nachtFenster, ssml, ssmlEscape, PAUSE, istFreigabeWunsch, istFreigabeFrage, buildSkill, _testOptionen } = alexa;
 const { freigabenHinweis, kurzFuerStimme, briefingText, HINWEIS_MAX_ZEICHEN } = await import("../src/brain.js");
 const { auftraege, saveAuftraege } = await import("../src/queue.js");
 type Auftrag = import("../src/queue.js").Auftrag;
@@ -300,6 +300,45 @@ describe("istFreigabeWunsch", () => {
       "gib mir die nummer von müller frei", "wurde der auftrag von schmid bestätigt", "welche aufträge hat der kunde erteilt",
       "bestätige den auftrag von müller"]) {
       assert.equal(istFreigabeWunsch(t), false, t);
+    }
+  });
+});
+
+// =====================================================================
+// Befund: freie Fragen nach der Warteschlange gingen an Claude (Systemprompt mit Werkzeug, Historie mit Eingaben)
+// und umgingen ALEXA_FREIGABEN_DETAILS=off
+const FREIGABE_FRAGEN = ["welche Aufträge warten auf meine Freigabe", "was wartet auf Freigabe", "lies mir die offenen Freigaben vor",
+  "was steht in der Mail, die auf Freigabe wartet"];
+
+describe("istFreigabeFrage", () => {
+  it("Fragen nach Freigaben, offenen oder wartenden Aufträgen werden erkannt", () => {
+    for (const t of [...FREIGABE_FRAGEN, "gibt es offene freigaben", "welche aufträge sind offen", "was muss ich freigeben",
+      "welche wartenden aufträge gibt es", "ist auftrag zwölf noch offen", "was ist schon freigegeben", "Freigaben"]) {
+      assert.equal(istFreigabeFrage(t), true, t);
+    }
+  });
+
+  it("gewöhnliche Fragen und Fragen zu Dritten gehen weiter an Claude", () => {
+    for (const t of ["wie wird das Wetter", "was ist heute in Basel los", "ist die Tür offen", "welche Fenster sind offen",
+      "wann wird mein Auftrag bei Digitec ausgeführt", "ist der auftrag von meier schon freigegeben", "hat der kunde noch offene aufträge",
+      "welche aufträge hat der kunde erteilt", "wurde der auftrag von schmid bestätigt", "offenbar regnet es", "wer wartet unten"]) {
+      assert.equal(istFreigabeFrage(t), false, t);
+    }
+  });
+
+  // Befund: natürliche Formulierungen rutschten zu Claude durch («Aufträge von heute», «was wartet auf mich» …)
+  it("auch natürliche Formulierungen: Warteschlange, wartet auf mich, absegnen, Zustimmung, vorbereitete Mails", () => {
+    for (const t of ["welche Aufträge von heute sind noch offen", "welche Aufträge für mich sind offen", "was wartet auf mich",
+      "was liegt in der Warteschlange", "was muss ich noch absegnen", "Welche Mails warten auf meine Zustimmung",
+      "Was muss ich noch bestätigen", "Gibt es etwas zu genehmigen", "welche mails hast du vorbereitet"]) {
+      assert.equal(istFreigabeFrage(t), true, t);
+    }
+  });
+
+  it("Dritte mit Namen, Firma oder Kunde bleiben bei Claude, auch mit «für» und «bei»", () => {
+    for (const t of ["ist der Auftrag für Müller noch offen", "welche Aufträge bei Digitec sind offen", "hat die Firma noch offene Aufträge",
+      "kannst du mir bestätigen, dass der Termin steht"]) {
+      assert.equal(istFreigabeFrage(t), false, t);
     }
   });
 });
@@ -636,6 +675,46 @@ describe("Skill-Handler (ohne Netz)", () => {
     } finally {
       config.alexaFreigabenDetails = false;
     }
+    assert.equal(aufrufe.length, 0);
+  });
+
+  it("ALEXA_FREIGABEN_DETAILS=off: freie Fragen nach offenen Freigaben nennen nur Anzahl und Nummern, nichts an Claude", async () => {
+    auftraege.push(auftrag(12, "Mail an Müller AG wegen Offerte"));
+    saveAuftraege();
+    const vorher = readFileSync("data/auftraege.json", "utf8");
+    for (const t of FREIGABE_FRAGEN) {
+      const a = await rufe(intent("FrageIntent", { frage: { name: "frage", value: t } }));
+      assert.equal(sprache(a), "<speak>Ein Auftrag wartet auf Ihre Freigabe, Sir: Nummer 12. Freigeben geht per Telegram oder Dashboard.</speak>", t);
+      assert.equal(a.response.shouldEndSession, true, t);
+    }
+    auftraege.length = 0;
+    assert.equal(sprache(await rufe(intent("FrageIntent", { frage: { name: "frage", value: FREIGABE_FRAGEN[1] } }))), "<speak>Nichts wartet auf Sie, Sir.</speak>");
+    assert.equal(readFileSync("data/auftraege.json", "utf8"), vorher, "Warteschlange unverändert");
+    await durchlaufen();
+    assert.equal(aufrufe.length, 0, "kein Aufruf an Claude oder Telegram");
+  });
+
+  it("freie Fragen nach offenen Freigaben im Notaus und im Notfall: nur der Sperrhinweis", async () => {
+    auftraege.push(auftrag(12, "Mail an Müller AG"));
+    saveAuftraege();
+    const pausiertVorher = state.paused;
+    const notfallVorher = state.notfall;
+    const frage = (t: string) => rufe(intent("FrageIntent", { frage: { name: "frage", value: t } })).then(sprache);
+    try {
+      state.paused = true;
+      for (const t of FREIGABE_FRAGEN) assert.equal(await frage(t), "<speak>Notaus aktiv, Sir. Freigaben ruhen bis /weiter in Telegram.</speak>", t);
+      state.notfall = { aktiv: true, seit: "2026-10-11T06:00:00.000Z", grund: "Test" };
+      const notfall = "<speak>Notfall aktiv, Sir. Freigaben ruhen; aufheben nur mit /entwarnung in Telegram.</speak>";
+      for (const t of FREIGABE_FRAGEN) assert.equal(await frage(t), notfall, t);
+      // Notfall-Merker allein (ohne paused): ebenfalls keine Nummern
+      state.paused = false;
+      for (const t of FREIGABE_FRAGEN) assert.equal(await frage(t), notfall, t);
+      assert.equal(sprache(await rufe(intent("FreigabenIntent"))), notfall, "FreigabenIntent ebenso");
+    } finally {
+      state.paused = pausiertVorher;
+      state.notfall = notfallVorher;
+    }
+    await durchlaufen();
     assert.equal(aufrufe.length, 0);
   });
 

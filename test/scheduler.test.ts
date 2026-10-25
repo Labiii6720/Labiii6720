@@ -968,7 +968,7 @@ describe("Neustart mitten im Lauf: Startvermerk statt zweitem Lauf", () => {
 });
 
 describe("Notfall: Daten aus Erinnerung, Zeitplan, Rückblick und Zielcheck gehen nicht hinaus", () => {
-  it("alle vier senden mit imNotfallZurueckhalten", async () => {
+  it("alle vier senden mit imNotfallZurueckhalten, die Antworten von Claude zusätzlich als Antwort (Notaus)", async () => {
     const optionen: unknown[] = [];
     abhaengigkeiten.sendeSpaeter = async (text: string, o?: unknown) => { gesendet.push(text); optionen.push(o); };
     try {
@@ -983,7 +983,8 @@ describe("Notfall: Daten aus Erinnerung, Zeitplan, Rückblick und Zielcheck gehe
       abhaengigkeiten.sendeSpaeter = async (text: string) => { gesendet.push(text); };
     }
     assert.equal(gesendet.length, 4);
-    assert.deepEqual(optionen, Array(4).fill({ imNotfallZurueckhalten: true }));
+    const antwort = { imNotfallZurueckhalten: true, antwort: true };
+    assert.deepEqual(optionen, [antwort, antwort, { imNotfallZurueckhalten: true }, antwort]);
   });
 
   it("Rechnungs-Erinnerung: Notfall während der Wiederholungspause → keine IBAN an Telegram, nichts im Postausgang", async () => {

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -101,6 +101,52 @@ describe("gesten.ts: Handmodell laden", () => {
     assert.deepEqual(inhalt(d2), []);
   });
 
+  it("liegengebliebene tmp-Dateien früherer Abbrüche (andere PID) sind nach erfolgreichem Laden weg, Fremdes bleibt", async () => {
+    const d = ordner();
+    mkdirSync(join(d, "vendor", "mediapipe"), { recursive: true });
+    writeFileSync(`${g.modellPfad(d)}.tmp-999999`, "halb");
+    writeFileSync(join(d, "vendor", "mediapipe", "notiz.txt"), "bleibt");
+    attrappe(() => new Response(TEST_MODELL));
+    await g.ladeModell(d, { erwartet: ERWARTET, warten: keinWarten });
+    assert.deepEqual(inhalt(d), ["mediapipe", join("mediapipe", "hand_landmarker.task"), join("mediapipe", "notiz.txt")]);
+    assert.deepEqual(readFileSync(g.modellPfad(d)), TEST_MODELL);
+  });
+
+  it("Ordner nicht beschreibbar (Datei «vendor» im Weg): kein Download, klare Meldung mit Benutzer jarvis, nichts verändert", async () => {
+    const d = ordner();
+    writeFileSync(join(d, "vendor"), "im Weg");
+    const f = attrappe(() => new Response(TEST_MODELL));
+    await assert.rejects(g.ladeModell(d, { erwartet: ERWARTET, warten: keinWarten }), (e: Error) => {
+      assert.ok(e instanceof g.ModellOrdnerFehler, String(e));
+      assert.equal(
+        e.message,
+        `Handmodell: ${join(d, "vendor", "mediapipe")} nicht beschreibbar (ENOTDIR). Als Benutzer jarvis ausführen: sudo -u jarvis npm run gesten:modell`,
+      );
+      return true;
+    });
+    assert.equal(f.aufrufe.length, 0, "erst prüfen, dann 7,8 MB laden");
+    assert.equal(readFileSync(join(d, "vendor"), "utf8"), "im Weg");
+  });
+
+  it("modellGeprueft: prüft je Dateistand einmal, ein neues Modell (rename) wird neu geprüft, fehlt → fehlt", () => {
+    const d = ordner();
+    const neu: string[] = [];
+    const pruefe = () => g.modellGeprueft(d, ERWARTET, (z) => neu.push(z.zustand)).zustand;
+    assert.equal(pruefe(), "fehlt");
+    mkdirSync(join(d, "vendor", "mediapipe"), { recursive: true });
+    writeFileSync(g.modellPfad(d), "kaputt");
+    assert.equal(pruefe(), "falsch");
+    assert.equal(pruefe(), "falsch");
+    assert.deepEqual(neu, ["falsch"], "einmal je Dateistand");
+    writeFileSync(`${g.modellPfad(d)}.neu`, TEST_MODELL);
+    renameSync(`${g.modellPfad(d)}.neu`, g.modellPfad(d));
+    assert.equal(pruefe(), "ok");
+    assert.equal(pruefe(), "ok");
+    assert.deepEqual(neu, ["falsch", "ok"]);
+    rmSync(g.modellPfad(d));
+    assert.equal(pruefe(), "fehlt");
+  });
+
   it("Konstanten: genau das gepinnte Modell", () => {
     assert.equal(g.MODELL_URL, "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task");
     assert.equal(g.MODELL_SHA256, "fbc2a30080c3c557093b5ddfc334698132eb341044ccee322ccf8bcf3607cde1");
@@ -110,8 +156,9 @@ describe("gesten.ts: Handmodell laden", () => {
 });
 
 describe("scripts/gesten-modell.ts im Kindprozess (fetch-Attrappe)", () => {
-  const lauf = (attrappeQuelle: string) => {
+  const lauf = (attrappeQuelle: string, vorbereiten?: (d: string) => void) => {
     const d = ordner();
+    vorbereiten?.(d);
     const datei = join(d, "attrappe.mjs");
     writeFileSync(datei, attrappeQuelle);
     const r = spawnSync(process.execPath, ["--import", import.meta.resolve("tsx"), "--import", pathToFileURL(datei).href, join(projekt, "scripts", "gesten-modell.ts")], {
@@ -125,6 +172,15 @@ describe("scripts/gesten-modell.ts im Kindprozess (fetch-Attrappe)", () => {
     assert.equal(r.status, 1, r.stdout + r.stderr);
     assert.match(r.stderr, /Handmodell nicht geladen \(HTTP 404\)\. Nichts gespeichert\. Bitte später nochmals: npm run gesten:modell, Sir\./);
     assert.ok(!existsSync(join(r.d, "vendor")));
+  });
+
+  it("Ordner nicht beschreibbar: Exit 1, Hinweis auf Benutzer jarvis, kein «später nochmals», kein Download", () => {
+    const r = lauf('globalThis.fetch = async () => { throw new Error("kein Download erwartet"); };\n', (d) => writeFileSync(join(d, "vendor"), "x"));
+    assert.equal(r.status, 1, r.stdout + r.stderr);
+    assert.match(r.stderr, /nicht beschreibbar \(ENOTDIR\)\. Als Benutzer jarvis ausführen: sudo -u jarvis npm run gesten:modell, Sir\./);
+    assert.doesNotMatch(r.stderr, /später nochmals/);
+    assert.doesNotMatch(r.stderr, /kein Download erwartet/);
+    assert.equal(readFileSync(join(r.d, "vendor"), "utf8"), "x");
   });
 
   it("falscher Inhalt: Exit 1, verworfen", () => {

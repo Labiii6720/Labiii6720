@@ -1,8 +1,8 @@
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { handleMessage } from "./agent.js";
+import { antwortZurueckhalten, handleMessage } from "./agent.js";
 import { config } from "./config.js";
 import { audit } from "./audit.js";
-import { hooks, sendeSpaeter } from "./telegram.js";
+import { hooks, sendeSpaeter, type SpaeterOptionen } from "./telegram.js";
 import { state } from "./state.js";
 import { hhmm, imFenster, minutesOfDay, todayKey } from "./time.js";
 import { faelligIm, saveZeitplaene, zeitplaene } from "./zeitplaene.js";
@@ -13,8 +13,16 @@ import { berichtText, hatAenderungen, verdichteJetzt, verdichtungLaeuft } from "
 
 const log = (e: unknown) => console.error(e instanceof Error ? schwaerze(e.message) : e);
 
-/** Claude, Telegram und die Verdichtung sind hier ersetzbar (Tests mit Attrappen); im Betrieb die echten Funktionen. */
-export const abhaengigkeiten = { handleMessage, sendeSpaeter, verdichteJetzt };
+/**
+ * Claude, Telegram und die Verdichtung sind hier ersetzbar (Tests mit Attrappen); im Betrieb die echten Funktionen.
+ * sendeSpaeter: true = zugestellt oder abgelegt, false = verworfen (im Notfall), ohne Rückmeldung (void) = unbekannt.
+ */
+export const abhaengigkeiten: {
+  handleMessage: typeof handleMessage;
+  sendeSpaeter: (text: string, optionen?: SpaeterOptionen) => Promise<boolean | void>;
+  verdichteJetzt: typeof verdichteJetzt;
+  antwortZurueckhalten: typeof antwortZurueckhalten;
+} = { handleMessage, sendeSpaeter, verdichteJetzt, antwortZurueckhalten };
 
 // ---------- Gemeinsames Muster: erst nach Erfolg als gelaufen markieren ----------
 
@@ -221,6 +229,28 @@ function wartetWeilOffline(was: string): boolean {
   return true;
 }
 
+/** Optionen für Antworten von Claude aus automatischen Läufen (antwortSenden) */
+const ANTWORT_SENDEN: SpaeterOptionen = { imNotfallZurueckhalten: true, antwort: true };
+
+/**
+ * Antwort eines Laufs mit Werkzeugen senden (`eintrag` aus onAntwort). Notaus nach der Antwort, vor dem Senden: nicht senden.
+ * Notaus oder Notfall während des Versands: sendeSpaeter verwirft den Rest (Option `antwort`). In beiden Fällen gilt die
+ * Antwort als zurückgehalten, sonst zeigte sie der Verlauf der Kommandozentrale nach /weiter bzw. /entwarnung doch (wie
+ * telegram.ts bei Chat-Antworten). Liegt sie wegen einer Störung im Postausgang, trägt sie die Marke `antwort` und wartet
+ * im Notaus bis /weiter. Ohne Rückmeldung von sendeSpaeter zählt ein Notaus oder Notfall nach dem Versand – im Zweifel
+ * verbergen. Rückgabe false: Notaus vor dem Senden.
+ */
+async function antwortSenden(eintrag: object | undefined, text: string): Promise<boolean> {
+  if (state.paused) {
+    abhaengigkeiten.antwortZurueckhalten(eintrag);
+    return false;
+  }
+  // Die Antwort kann Daten enthalten (Mails, Termine): kommt Notaus oder Notfall dazwischen, weder senden noch ablegen
+  const zugestellt = await abhaengigkeiten.sendeSpaeter(text, ANTWORT_SENDEN);
+  if (zugestellt !== true && (state.paused || state.notfall?.aktiv)) abhaengigkeiten.antwortZurueckhalten(eintrag);
+  return true;
+}
+
 const schritteText = (n: number) => `${n} Werkzeugschritt${n === 1 ? "" : "en"}`;
 
 /**
@@ -355,11 +385,13 @@ export async function zeitplanTick(now = new Date()): Promise<void> {
       `Zeitplan «${name}»`,
       now,
       async (zaehle) => {
-        const reply = await abhaengigkeiten.handleMessage(`[Zeitplan «${name}», läuft automatisch] ${z.auftrag}`, hooks, { onStep: zaehle });
+        let eintrag: object | undefined;
+        const reply = await abhaengigkeiten.handleMessage(`[Zeitplan «${name}», läuft automatisch] ${z.auftrag}`, hooks, {
+          onStep: zaehle,
+          onAntwort: (e) => void (eintrag = e),
+        });
         // Notaus während des Laufs: die Antwort wäre nur «Ich bin pausiert …» – nicht senden, nicht abhaken.
-        if (state.paused) return false;
-        // Die Antwort kann Daten enthalten (Mails, Termine): kommt der Notfall dazwischen, weder senden noch ablegen
-        await abhaengigkeiten.sendeSpaeter(`🕒 ${name}\n\n${reply}`, { imNotfallZurueckhalten: true });
+        return antwortSenden(eintrag, `🕒 ${name}\n\n${reply}`);
       },
       true,
     );
@@ -396,9 +428,9 @@ export async function rueckblickTick(now = new Date()): Promise<void> {
     "Der Rückblick",
     now,
     async (zaehle) => {
-      const reply = await abhaengigkeiten.handleMessage(prompt, hooks, { onStep: zaehle });
-      if (state.paused) return false;
-      await abhaengigkeiten.sendeSpaeter(`🌙 Rückblick\n\n${reply}`, { imNotfallZurueckhalten: true });
+      let eintrag: object | undefined;
+      const reply = await abhaengigkeiten.handleMessage(prompt, hooks, { onStep: zaehle, onAntwort: (e) => void (eintrag = e) });
+      return antwortSenden(eintrag, `🌙 Rückblick\n\n${reply}`);
     },
     true,
   );
@@ -478,9 +510,9 @@ export async function zielcheckTick(now = new Date()): Promise<void> {
     "Der Zielcheck",
     now,
     async (zaehle) => {
-      const reply = await abhaengigkeiten.handleMessage(prompt, hooks, { onStep: zaehle });
-      if (state.paused) return false;
-      await abhaengigkeiten.sendeSpaeter(`🎯 Zielcheck\n\n${reply}`, { imNotfallZurueckhalten: true });
+      let eintrag: object | undefined;
+      const reply = await abhaengigkeiten.handleMessage(prompt, hooks, { onStep: zaehle, onAntwort: (e) => void (eintrag = e) });
+      return antwortSenden(eintrag, `🎯 Zielcheck\n\n${reply}`);
     },
     true,
   );

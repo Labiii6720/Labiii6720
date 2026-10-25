@@ -1,7 +1,7 @@
 import { timingSafeEqual } from "node:crypto";
 import { readFileSync } from "node:fs";
 import type { NextFunction, Request, Response } from "express";
-import { askWithBudget, chatHinweis, letzteNachrichten, pinGeschwaerzt } from "./agent.js";
+import { antwortGeschwaerzt, askWithBudget, chatHinweis, letzteNachrichten, pinGeschwaerzt, zugVerlauf } from "./agent.js";
 import { audit } from "./audit.js";
 import { allWachen, bedingungWert, cameras, camerasNichtGeladen, dynamicWachen, neueWacheId, pruefeWache, ruheMinuten, saveWachen, snapshot, WACHEN_UNLESBAR, wacheZustand, wachenNichtGeladen, type Wache } from "./cameras.js";
 import { verbrauchVerlauf } from "./claude.js";
@@ -191,9 +191,14 @@ export async function chat(req: Request, res: Response): Promise<void> {
   audit("chat", { quelle: "dashboard", zeichen: text.length });
   // Echo und späte Antwort gehen nach Telegram: die PIN darin (etwa mitten in einem Satz, von Claude wiederholt) geschwärzt
   const echo = pinGeschwaerzt(schwaerze(text)).slice(0, 60);
-  // Im Notaus/Notfall nichts davon (askWithBudget, sendeAntwort)
-  const reply = await askWithBudget(`[Kommandozentrale] ${text}`, _chatFrist.ms, hooks, (r, eintrag) => sendeAntwort(`Zur Frage aus der Zentrale («${echo}»):\n\n${pinGeschwaerzt(schwaerze(r))}`, eintrag));
-  res.json({ ok: true, reply: reply ?? "Das braucht länger, die Antwort kommt per Telegram.", queued: reply === undefined });
+  // Im Notaus/Notfall nichts davon (askWithBudget, sendeAntwort). Verlauf vor dem Zug erfasst: ein /neu während der
+  // Antwort leert sonst, wogegen geschwärzt wird (zugVerlauf)
+  const frage = `[Kommandozentrale] ${text}`;
+  const verlauf = zugVerlauf(frage);
+  const reply = await askWithBudget(frage, _chatFrist.ms, hooks, (r, eintrag) => sendeAntwort(`Zur Frage aus der Zentrale («${echo}»):\n\n${antwortGeschwaerzt(schwaerze(r), "<PIN>", verlauf())}`, eintrag));
+  // Auch die rechtzeitige Antwort geschwärzt (die PIN, von Claude wiederholt, gehört nicht auf den Bildschirm);
+  // Zahlen aus Werkzeugen (Bestellung, PLZ, Jahr) bleiben lesbar (antwortGeschwaerzt)
+  res.json({ ok: true, reply: reply === undefined ? "Das braucht länger, die Antwort kommt per Telegram." : antwortGeschwaerzt(schwaerze(reply), "<PIN>", verlauf()), queued: reply === undefined });
 }
 
 /**

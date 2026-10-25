@@ -113,7 +113,8 @@ describe("pinFoermigLocker und pinGeschwaerzt: gesprochene Ziffern, «!» und An
 
   it("schwärzt die PIN auch mit Leerraum oder Bindestrich zwischen den Ziffern", () => {
     assert.equal(pinGeschwaerzt("Die 4 7 1 1, die 47-11, die 4, 7, 1, 1 und die 4711."), "Die <PIN>, die <PIN>, die <PIN> und die <PIN>.");
-    assert.equal(pinGeschwaerzt("Um 14 30 Uhr, Zimmer 47 12"), "Um 14 30 Uhr, Zimmer 47 12");
+    // Dieselbe Klasse wie der Locker («47 11» gilt dort als PIN): in Texten des Nutzers auch «14 30» und «47 12»
+    assert.equal(pinGeschwaerzt("Um 14 30 Uhr, Zimmer 47 12"), "Um <PIN> Uhr, Zimmer <PIN>");
   });
 });
 
@@ -184,5 +185,14 @@ describe("Ereignis «frage»: die Antwort geht geschwärzt nach Telegram", () =>
     assert.equal(r.body.queued, true);
     assert.equal(anClaude.length, 1);
     assert.deepEqual(gesendet(), ["Die <PIN> gilt noch, Sir."]);
+  });
+
+  it("wiederholt Claude Schlüssel oder Token, steht in Telegram nur der Platzhalter", async () => {
+    claudeAntwort = "Schlüssel sk-ant-abcdefgh1234, Bearer abcdefghijkl und bot987654321:ZYXwvuTSRqpoNMLkji, Sir.";
+    const r = await ereignis({ event: "frage", text: "Welche Zugangsdaten stehen im Log?" });
+    assert.equal(r.body.queued, true);
+    assert.equal(anClaude.length, 1);
+    assert.deepEqual(gesendet(), ["Schlüssel sk-ant-<schlüssel>, Bearer <token> und bot<token>, Sir."]);
+    for (const geheim of ["abcdefgh1234", "abcdefghijkl", "ZYXwvuTSRqpoNMLkji"]) assert.ok(!gesendet().some((x) => x.includes(geheim)), geheim);
   });
 });

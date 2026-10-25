@@ -31,12 +31,16 @@ describe("Gesten-Konsole: statische Zusagen", () => {
   it("gesture.js: lädt nur vom eigenen Server, sendet nur an /events, kein Code aus Text", () => {
     assert.doesNotMatch(js, /https?:\/\/|jsdelivr|googleapis|unpkg|cdn\./i, "keine fremde Adresse");
     const importe = [...js.matchAll(/^\s*import\b[^"']*["']([^"']+)["']/gm)].map((m) => m[1]);
-    assert.deepEqual(importe, ["/gesture/mp/vision_bundle.mjs"]);
+    // MediaPipe dynamisch in start(): fehlt das Paket, läuft die Seite weiter und zeigt einen Hinweis
+    assert.deepEqual(importe, [], "kein statischer Import");
+    assert.deepEqual([...js.matchAll(/\bimport\(\s*([^)]+)\)/g)].map((m) => m[1]!.trim()), ["BUNDLE"]);
+    assert.match(js, /const BUNDLE = "\/gesture\/mp\/vision_bundle\.mjs";/);
     assert.match(js, /const WASM = "\/gesture\/mp\/wasm";/);
     assert.match(js, /const MODELL = "\/gesture\/mp\/hand_landmarker\.task";/);
+    assert.match(js, /const MODELL_ZUSTAND = "\/gesture\/mp\/modell\.json";/);
     assert.match(js, /modelAssetBuffer/);
     const ziele = [...js.matchAll(/\bfetch\(\s*([^,)]+)/g)].map((m) => m[1]!.trim());
-    assert.deepEqual(ziele.sort(), ['"/events"', "MODELL"]);
+    assert.deepEqual(ziele.sort(), ['"/events"', "MODELL", "MODELL_ZUSTAND"]);
     assert.doesNotMatch(js, /\bbase\b.*\/events|\$\{base\}/, "kein frei wählbarer Ursprung");
     for (const [muster, was] of [
       [/\.innerHTML\b/, "innerHTML"], [/\.outerHTML\b/, "outerHTML"], [/insertAdjacentHTML/, "insertAdjacentHTML"], [/document\.write/, "document.write"],
@@ -44,6 +48,8 @@ describe("Gesten-Konsole: statische Zusagen", () => {
       [/\.on[a-z]+\s*=/, "on…-Zuweisung"], [/setAttribute\(\s*["']on/i, "on…-Attribut"], [/\.style\./, "Inline-Stil"],
     ] as const) assert.doesNotMatch(js, muster, was);
     assert.match(js, /status\("Handmodell fehlt: npm run gesten:modell"/, "ruhiger Hinweis ohne Modell");
+    assert.match(js, /status\("Handmodell defekt: npm run gesten:modell"/, "ruhiger Hinweis bei falscher Prüfsumme");
+    assert.match(js, /if \(res\.status === 409\) \{ status\("Handmodell defekt: npm run gesten:modell", "hinweis"\); return; \}/, "409 als Rückfall");
   });
 
   it("gesture.js: hält der Dienst die Eingabe für die PIN, steht nur sein Hinweis da (nicht das Transkript, nicht «Fehler: pin»)", () => {
@@ -65,10 +71,11 @@ describe("Gesten-Konsole: statische Zusagen", () => {
     const GESTEN_CSP = [...roh.matchAll(/"([^"]*)"/g)].map((m) => m[1]).join("");
     assert.equal(
       GESTEN_CSP,
-      "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self' blob: data:; media-src 'self' blob: mediastream:; " +
-        "connect-src 'self'; worker-src 'self' blob:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; object-src 'none'",
+      "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src data:; connect-src 'self'; " +
+        "base-uri 'none'; form-action 'none'; frame-ancestors 'none'; object-src 'none'",
     );
     assert.doesNotMatch(GESTEN_CSP, /'unsafe-eval'|'unsafe-inline'|https?:|\*/);
+    assert.doesNotMatch(GESTEN_CSP, /blob:|mediastream:/);
   });
 
   it("server.ts: feste Routen statt express.static, alles hinter lanOnly", () => {
@@ -77,7 +84,7 @@ describe("Gesten-Konsole: statische Zusagen", () => {
     for (const route of [/app\.get\("\/gesture", lanOnly,/, /app\.get\(pfad, lanOnly, gestenDatei\(typ, \(\) => web\(datei\)\)\)/, /app\.get\(pfad, lanOnly, gestenDatei\(typ, \(\) => \(mp \?/, /app\.get\(GESTEN_MODELL, lanOnly,/]) {
       assert.match(server, route);
     }
-    assert.match(server, /TUNNEL_SCHALTBAR = new Set\(\["\/events", "\/gesture", \.\.\.Object\.keys\(GESTEN_WEB\), \.\.\.Object\.keys\(MEDIAPIPE_DATEIEN\), GESTEN_MODELL\]\)/);
+    assert.match(server, /TUNNEL_SCHALTBAR = new Set\(\["\/events", "\/gesture", \.\.\.Object\.keys\(GESTEN_WEB\), \.\.\.Object\.keys\(MEDIAPIPE_DATEIEN\), GESTEN_MODELL, GESTEN_MODELL_ZUSTAND\]\)/);
   });
 
   it("Paket exakt gepinnt, Lockfile mit Prüfsumme, vendor/ nicht versioniert, npm-Skript vorhanden", () => {

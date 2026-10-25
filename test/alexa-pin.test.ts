@@ -92,7 +92,7 @@ afterEach(() => {
 });
 
 describe("Alexa FrageIntent: die PIN geht nie an Claude", () => {
-  it("«4711», «4 7 1 1», «4712.»: Hinweis, nichts an Claude, nichts in data/chat.json, nichts nach Telegram; gezählt", async () => {
+  it("«4711», «4 7 1 1», «4712.»: Hinweis, nichts an Claude, nichts in data/chat.json, nichts nach Telegram; auditiert, nicht gezählt", async () => {
     for (const t of ["4711", "4 7 1 1", "4712."]) {
       missbrauchZuruecksetzen();
       assert.equal(await frage(t), "<speak>Die PIN bitte nie sprechen, Sir. Nichts gesendet.</speak>", t);
@@ -103,8 +103,34 @@ describe("Alexa FrageIntent: die PIN geht nie an Claude", () => {
     assert.deepEqual(telegram, []);
     assert.equal(auditZeilen("pin_im_chat").length, 3);
     assert.ok(auditZeilen("pin_im_chat").every((z) => z.includes('"quelle":"alexa"')));
-    assert.equal(auditZeilen("abuse_signal").length, 3);
+    // Am Echo spricht jeder im Raum: kein Beitrag zum Notfall-Zähler
+    assert.equal(auditZeilen("abuse_signal").length, 0);
     assert.ok(!readFileSync(AUDIT, "utf8").includes("4711"));
+  });
+
+  it("fünf PIN-förmige Alexa-Fragen hintereinander lösen keinen Notfall aus", async () => {
+    // Befund: jeder in Hörweite konnte mit fünf gesprochenen Zahlen Notaus, Werkzeuge aus und «Tokens erneuern» auslösen
+    for (const t of ["1234", "4711", "1.2.5.0.", "9 9 9 9", "0000"]) {
+      assert.equal(await frage(t), "<speak>Die PIN bitte nie sprechen, Sir. Nichts gesendet.</speak>", t);
+    }
+    await new Promise((r) => setTimeout(r, 20));
+    assert.equal(Boolean(state.notfall?.aktiv), false, "kein Notfall");
+    assert.equal(Boolean(state.paused), false, "kein Notaus");
+    assert.equal(anClaude, 0);
+    assert.deepEqual(telegram, [], "kein Alarm nach Telegram");
+  });
+
+  it("die rechtzeitige Antwort ist geschwärzt, bevor Alexa sie vorliest (auch «4*7*1*1»)", async () => {
+    // Befund: innerhalb des Budgets ging die Antwort roh über Amazon, nach dem Budget geschwärzt per Telegram.
+    // Geschwärzt wird, was der Nutzer selbst in PIN-Form sagte; vorgelesen «PIN» statt «&lt;PIN&gt;»
+    claudeAntwort = "Die 4711 gilt noch, Sir. Alt war 4*7*1*1, Schlüssel sk-ant-abcdefghijkl123.";
+    const s = await frage("ob die 4711 noch gilt");
+    assert.equal(anClaude, 1);
+    assert.ok(!/4\D{0,2}7\D{0,2}1\D{0,2}1/.test(s), s);
+    assert.ok(!s.includes("abcdefghijkl"), s);
+    assert.ok(!s.includes("&lt;PIN&gt;"), s);
+    assert.match(s, /^<speak>Die PIN gilt noch, Sir\. Alt war PIN, Schlüssel sk-ant-&lt;schlüssel/);
+    assert.deepEqual(telegram, []);
   });
 
   it("ein Satz mit der PIN geht an Claude; die späte Antwort in Telegram ist samt Echo geschwärzt", async () => {

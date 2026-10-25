@@ -11,22 +11,39 @@ import { persona } from "./persona.js";
 import { beraterPrompt } from "./berater.js";
 import { schwaerze } from "./robust.js";
 import { sichereDefekt } from "./datei.js";
+import { profil } from "./profil.js";
+import { NOTES } from "./tools.js";
 
-/** `zurueckgehalten`: im Notaus nicht ausgegebene Antwort (runLoop). Bleibt für Claude, nie in der Anzeige; geht nicht an die API. */
-type Msg = Anthropic.MessageParam & { zurueckgehalten?: true };
+/**
+ * Eigene Marken (gehen nicht an die API): `zurueckgehalten` im Notaus nicht ausgegebene Antwort (runLoop), bleibt für
+ * Claude, nie in der Anzeige; `ausgegeben` Antwort mit tool_use, die beim Limit der Werkzeugrunden doch ausgegeben
+ * wurde; `automatisch` Auftrag eines automatischen Laufs (Zeitplan, Rückblick, Zielcheck), nicht vom Nutzer.
+ */
+type Msg = Anthropic.MessageParam & { zurueckgehalten?: true; ausgegeben?: true; automatisch?: true };
 
-/** Ohne das eigene Feld: die API nimmt keine unbekannten Felder an. */
+/** Ohne die eigenen Felder: die API nimmt keine unbekannten Felder an. */
 const fuerApi = (m: Msg): Anthropic.MessageParam => {
-  if (!m.zurueckgehalten) return m;
-  const { zurueckgehalten: _z, ...rest } = m;
+  if (!m.zurueckgehalten && !m.ausgegeben && !m.automatisch) return m;
+  const { zurueckgehalten: _z, ausgegeben: _a, automatisch: _m, ...rest } = m;
   return rest;
 };
 
 const CHAT_FILE = "data/chat.json";
 const MAX_TURNS = 40;
 
-/** Beim Start vorhanden, aber kein lesbares JSON-Array: der Verlauf beginnt leer (für den Hinweis im Dashboard). */
+/** Beim Start vorhanden, aber kein lesbares JSON-Array von Nachrichten: der Verlauf beginnt leer (für den Hinweis im Dashboard). */
 export let chatNichtGeladen = false;
+
+/**
+ * Hat der Eintrag die Form einer Nachricht (Rolle, Text oder Liste von Blöcken)? Sonst brächen dropImages, h.map(fuerApi)
+ * oder die API an jedem weiteren Zug.
+ */
+const istNachricht = (m: unknown): boolean => {
+  if (!m || typeof m !== "object") return false;
+  const { role, content } = m as { role?: unknown; content?: unknown };
+  if (role !== "user" && role !== "assistant") return false;
+  return typeof content === "string" || (Array.isArray(content) && content.every((b) => b !== null && typeof b === "object"));
+};
 
 function loadHistory(): Msg[] {
   let roh: string;
@@ -38,8 +55,9 @@ function loadHistory(): Msg[] {
   }
   try {
     const h = JSON.parse(roh) as unknown;
-    // Kein Array (von Hand bearbeitet): sonst bräche der erste Chat-Zug an h.push
-    if (Array.isArray(h)) return h as Msg[];
+    // Kein Array oder fremde Einträge (von Hand bearbeitet): sonst bräche jeder Chat-Zug und jede Systemnotiz. Ganz
+    // verwerfen (mit Sicherung), nicht einzeln herausfiltern: sonst rissen tool_use/tool_result-Paare.
+    if (Array.isArray(h) && h.every(istNachricht)) return h as Msg[];
   } catch { /* unten */ }
   chatNichtGeladen = true;
   return [];
@@ -106,13 +124,20 @@ function saveHistory(): void {
   renameSync(`${CHAT_FILE}.tmp`, CHAT_FILE);
 }
 
-export interface ChatNachricht { rolle: "nutzer" | "jarvis"; text: string }
+export interface ChatNachricht { rolle: "nutzer" | "jarvis" | "haus"; text: string }
 
 /** Kanal-Präfixe vor Nutzertexten (dashboard.ts, events.ts): in der Anzeige weg. */
 const KANAL_PRAEFIX = /^\[(?:Kommandozentrale|Ereignis aus dem Haus|Kurzbefehl|Kanal: Stimme, die Antwort wird vorgelesen)\]\s*/;
-/** Nicht vom Nutzer: Systemnotizen und automatische Läufe (Zeitplan, Rückblick, Zielcheck). */
-const KEIN_NUTZER = /^\[(?:Systemnotiz|[^\]\n]*läuft automatisch)\]/;
+/** Ereignis «frage» aus Home Assistant (events.ts): kein Text des Nutzers, sondern des Hauses */
+const VOM_HAUS = /^\[Ereignis aus dem Haus\]/;
+/**
+ * Nicht vom Nutzer: Systemnotizen und automatische Läufe (Zeitplan, Rückblick, Zielcheck). Rückfall für Einträge ohne
+ * Marke `automatisch` (Altbestand); der Zeitplan-Name darf «]» enthalten (zeitplaene.ts prüft nur die Länge).
+ */
+const KEIN_NUTZER = /^\[(?:Systemnotiz\]|[^\]\n]*läuft automatisch\]|Zeitplan «[^\n]*?», läuft automatisch\])/;
 const MAX_ANZEIGE = 2000;
+/** Hinweis wie in runLoop, für die beim Limit der Werkzeugrunden ausgegebene Antwort */
+const LIMIT_HINWEIS = "(Limit der Werkzeugrunden erreicht, Zwischenstand.)";
 
 const textBloecke = (content: unknown): string =>
   typeof content === "string"
@@ -121,43 +146,261 @@ const textBloecke = (content: unknown): string =>
       ? content.map((b) => (b && typeof b === "object" && (b as { type?: unknown }).type === "text" && typeof (b as { text?: unknown }).text === "string" ? (b as { text: string }).text : "")).join("")
       : "";
 
+/** Ziffern mit Trennern dazwischen (wie ZIFFERN_TRENNER in telegram.ts), am Stück */
+const ZIFFERNBLOCK = /\d+(?:[\s.,\-–—]+\d+)*/g;
+/** Trenner, der Gruppen wie im Locker verbindet («47 11», «47-11», «47–11»; ZIFFERN_LEER_STRICH in telegram.ts) */
+const LEER_STRICH = /^[\s\-–—]+$/;
+/** Betrag oder Jahr (auch «seit 2019», «bis Ende 2026», «im 2026»): bleibt stehen (unabhängig von der PIN, verrät also nichts) */
+const BETRAG_DAVOR = /(?<![A-Za-zäöüÄÖÜ])(?:CHF|Fr\.|EUR|USD|€|\$|Januar|Februar|März|April|Mai|Juni|Juli|August|September|Oktober|November|Dezember|Jahr|Jahres|[Ss]eit|[Bb]is|[Aa]b|[Ii]m|Ende|Anfang|Mitte)\s*$/;
+const BETRAG_DANACH = /^\s*(?:CHF|Fr\.|Franken|EUR|Euro|€|\$)/;
 /**
- * JARVIS_PIN (ab 4 Zeichen) im Text durch «<PIN>» ersetzen, auch mit Leerraum, Komma, Punkt oder Bindestrich zwischen
- * den Zeichen («4 7 1 1», «47-11»: Spracherkennung); zweite Schicht hinter pinFoermigLocker (Dashboard-Chat, /events, Alexa).
+ * Zahl kurz hinter «PIN», «Code» & Co., auch zusammengesetzt («Garagencode», «Alarm-PIN», «Codewort») und mit ein paar
+ * Wörtern dazwischen («Code der Alarmanlage ist 4711»): gilt immer als heikel, auch als Betrag («PIN: Mai 4711»).
+ * Hängt nur vom Text ab, nie vom PIN-Wert.
  */
-export function pinGeschwaerzt(text: string): string {
+const PIN_WORT_DAVOR = /(?:pin|code|codewort|geheimzahl|geheimnummer|kennzahl|kennwort|passwort|kombination)(?:e|en|n|s)?(?![a-zäöüß])[^\d\n]{0,30}$/i;
+const pinWortDavor = (text: string, ab: number) => PIN_WORT_DAVOR.test(text.slice(Math.max(0, ab - 60), ab));
+
+/** `betrag`: Betrag oder Jahr davor/danach (BETRAG_DAVOR/BETRAG_DANACH), bleibt nur ohne PIN-Wort davor stehen */
+interface PinStelle { ab: number; bis: number; ziffern: string; betrag: boolean }
+
+/**
+ * Stellen in PIN-Form (Ziffern-PIN der Länge `laenge`), dieselbe Klasse wie pinFoermigLocker, nur mitten im Satz:
+ * - eine Gruppe mit genau `laenge` Ziffern, frei stehend oder nur durch Leerraum, «, » oder «. » von Nachbarn getrennt
+ *   («4711», «4711 2 mal», «4711 0815», «am 3. 4711»);
+ * - einzeln gesetzte Ziffern, zusammen `laenge` («4 7 1 1», «4, 7, 1, 1», «4.7.1.1», «4–7–1–1»);
+ * - Gruppen nur mit Leerraum oder Bindestrichen dazwischen, zusammen `laenge` («47 11», «471 1», «47-11», «47–11»).
+ * Nicht: knapp gesetzte Punkte oder Kommas (Uhrzeit, Datum, Dezimalzahl: «14.30», «25.10.2026», «47.11»), Gruppen in
+ * einer längeren Folge («079 123 45 67», «2026-10-25» bei vier Stellen), eine Gruppe in einer Telefonnummer
+ * («044 471 1234»). Hängt nur von der Länge ab, nie vom Wert.
+ */
+function pinStellen(text: string, laenge: number): PinStelle[] {
+  const stellen: PinStelle[] = [];
+  for (const m of text.matchAll(ZIFFERNBLOCK)) {
+    const block = m[0];
+    const gruppen: { ab: number; bis: number; z: string }[] = [];
+    for (const g of block.matchAll(/\d+/g)) gruppen.push({ ab: m.index + g.index, bis: m.index + g.index + g[0].length, z: g[0] });
+    /** Trenner vor Gruppe i (leer vor der ersten) */
+    const vor = (i: number) => (i > 0 ? text.slice(gruppen[i - 1]!.bis, gruppen[i]!.ab) : "");
+    /** Rand einer Folge: kein Trenner, oder einer mit Leerraum («, », «. »); knapp gesetzt gehört er zur Zahl */
+    const randFrei = (i: number) => i <= 0 || i >= gruppen.length || /\s/.test(vor(i));
+    const bereiche: [number, number][] = [];
+    // Folgen über Leerraum und Bindestriche («47 11», «079 123 45 67», «2026-10-25»)
+    for (let i = 0; i < gruppen.length; ) {
+      let j = i;
+      while (j + 1 < gruppen.length && LEER_STRICH.test(vor(j + 1))) j++;
+      const folge = gruppen.slice(i, j + 1);
+      const summe = folge.reduce((n, g) => n + g.z.length, 0);
+      const telefon = summe >= 9 && (/^0\d{2}$|^00/.test(folge[0]!.z) || text[folge[0]!.ab - 1] === "+");
+      if (summe === laenge && randFrei(i) && randFrei(j + 1)) bereiche.push([i, j]);
+      else if (!telefon) {
+        for (let k = i; k <= j; k++) if (gruppen[k]!.z.length === laenge && randFrei(k) && randFrei(k + 1)) bereiche.push([k, k]);
+      }
+      i = j + 1;
+    }
+    // Einzeln gesetzte Ziffern, beliebige Trenner («4, 7, 1, 1», «4.7.1.1»)
+    for (let i = 0; i < gruppen.length; ) {
+      let j = i;
+      if (gruppen[i]!.z.length === 1) while (j + 1 < gruppen.length && gruppen[j + 1]!.z.length === 1) j++;
+      if (gruppen[i]!.z.length === 1 && j - i + 1 === laenge) bereiche.push([i, j]);
+      i = j + 1;
+    }
+    bereiche.sort((a, b) => a[0] - b[0] || b[1] - a[1]);
+    let bisher = -1;
+    for (const [i, j] of bereiche) {
+      if (i <= bisher) continue; // schon in einem grösseren Bereich
+      bisher = j;
+      const ab = gruppen[i]!.ab;
+      const bis = gruppen[j]!.bis;
+      const betrag = BETRAG_DAVOR.test(text.slice(Math.max(0, ab - 12), ab)) || BETRAG_DANACH.test(text.slice(bis, bis + 10));
+      stellen.push({ ab, bis, ziffern: gruppen.slice(i, j + 1).map((g) => g.z).join(""), betrag });
+    }
+  }
+  return stellen;
+}
+
+/**
+ * Stellen in PIN-Form bei einer gemischten PIN: jede Folge aus Buchstaben, Ziffern und den Sonderzeichen der PIN von
+ * genau ihrer Länge, mit Ziffer und Nicht-Ziffer, links und rechts durch ein Zeichen ausserhalb dieser Klasse begrenzt
+ * («Code:ab12», «PIN=ab12», «<ab12>», «ab12…», «ab12/xy»). Nicht nach Leerraum getrennt, sonst stünde sie an jedem
+ * fremden Satzzeichen ungeschwärzt da. Hängt nur von Länge und Zeichenklasse ab, nie vom Wert.
+ */
+function gemischtMuster(pin: string): RegExp {
+  const zeichen = Array.from(pin);
+  const sonder = [...new Set(zeichen.filter((z) => !/[A-Za-z0-9\s]/.test(z)))].map((z) => z.replace(/[\\\]\[^-]/g, "\\$&")).join("");
+  const k = `[A-Za-z0-9${sonder}]`;
+  const nichtZiffer = `[A-Za-z${sonder}]`;
+  return new RegExp(`(?<!${k})(?=${k}*\\d)(?=${k}*${nichtZiffer})${k}{${zeichen.length}}(?!${k})`, "gu");
+}
+
+/**
+ * Ersetzt die Stellen in PIN-Form. `nur`: nur Stellen, deren Ziffern (gemischt: deren Folge) darin vorkommen oder die
+ * gleich hinter «PIN», «Code» & Co. stehen; ohne `nur` alle.
+ */
+function pinErsetzen(text: string, ersatz: string, nur?: ReadonlySet<string>): string {
   const pin = config.pin;
   if (!pin || pin.length < 4) return text;
-  const muster = Array.from(pin).map((z) => z.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("[\\s.,\\-–—]*");
-  return text.replace(new RegExp(muster, "g"), "<PIN>");
+  const laenge = pin.length;
+  const heikel = (wert: string, ab: number) => !nur || nur.has(wert) || pinWortDavor(text, ab);
+  if (/^\d+$/.test(pin)) {
+    let aus = "";
+    let pos = 0;
+    for (const s of pinStellen(text, laenge)) {
+      // Betrag oder Jahr bleibt, ausser kurz hinter einem PIN-Wort
+      if (s.betrag ? !pinWortDavor(text, s.ab) : !heikel(s.ziffern, s.ab)) continue;
+      aus += text.slice(pos, s.ab) + ersatz;
+      pos = s.bis;
+    }
+    return aus + text.slice(pos);
+  }
+  if (!/\d/.test(pin)) return text;
+  return text.replace(gemischtMuster(pin), (kandidat: string, ab: number) => (heikel(kandidat, ab) ? ersatz : kandidat));
+}
+
+/**
+ * Macht im Text alles unkenntlich («<PIN>»), was nach seiner Form die PIN sein könnte – ohne sie mit JARVIS_PIN zu
+ * vergleichen. Nur die Klasse zählt (Länge, Ziffern oder gemischt), nie der Wert: Eine richtige PIN sieht danach genau
+ * so aus wie eine falsche. Ein Wertvergleich wäre ein Orakel (Kandidatenliste schicken, im Verlauf oder Echo die
+ * markierte Stelle ablesen; ungezählt, an pinPruefen und abuseSignal vorbei) und verriete die PIN auch über bekannte
+ * Zahlen (Uhrzeit, Datum, Telefonnummer). Das Ergebnis darf deshalb nie vom PIN-Wert abhängen, denn es geht auch an
+ * Token-Inhaber (Verlauf der Kommandozentrale), in den Raum (Alexa) und nach Telegram (Echos, späte Antworten).
+ * Ziffern-PIN (ab 4): jede Stelle in PIN-Form (pinStellen, dieselbe Klasse wie pinFoermigLocker), ausser Betrag oder
+ * Jahr; gemischte PIN: jede Folge derselben Länge und Zeichenklasse mit Ziffer und Nicht-Ziffer (gemischtMuster),
+ * auch an Satzzeichen («Code:ab12»); PIN ohne Ziffern: nichts (jedes Wort
+ * dieser Länge wäre sonst weg). Für Texte des Nutzers (Echo, Verlauf) und Fehlertexte; Antworten von Claude über
+ * antwortGeschwaerzt.
+ */
+export function pinGeschwaerzt(text: string, ersatz = "<PIN>"): string {
+  return pinErsetzen(text, ersatz);
+}
+
+/** Systemnotizen tragen Werkzeugergebnisse, keine Eingaben des Nutzers (ausser dem Kontext vom Handy, events.ts) */
+const WERKZEUG_NOTIZ = /^\[Systemnotiz\](?! Kontext vom Handy:)/;
+
+/** Werkzeuge, deren Ergebnis Gemerktes des Nutzers trägt (Notizen, Profil): ihre Zahlen zählen wie seine Eingaben */
+const GEDAECHTNIS_WERKZEUGE = new Set(["notizen_lesen", "profil_anzeigen"]);
+
+/**
+ * Ziffern (gemischte PIN: Folgen) in PIN-Form aus `text` in `zahlen`. Eingaben des Nutzers: alle, Betrag oder Jahr nur
+ * kurz hinter einem PIN-Wort. `nurPinWort` (Gemerktes: Notizen, Profil): nur kurz hinter einem PIN-Wort – sonst wären
+ * Jahre, Postleitzahlen, Kunden- und Ticketnummern daraus in jeder Antwort auf allen Kanälen geschwärzt.
+ */
+function zahlenAus(text: string, pin: string, zahlen: Set<string>, nurPinWort = false): void {
+  if (!text) return;
+  if (/^\d+$/.test(pin)) {
+    for (const s of pinStellen(text, pin.length)) if ((nurPinWort || s.betrag) ? pinWortDavor(text, s.ab) : true) zahlen.add(s.ziffern);
+  } else if (/\d/.test(pin)) {
+    for (const m of text.matchAll(gemischtMuster(pin))) if (!nurPinWort || pinWortDavor(text, m.index)) zahlen.add(m[0]);
+  }
+}
+
+/** Gemerktes des Nutzers, das Claude auch ohne Verlauf kennt: data/notizen.md (notiz_speichern) und die Profil-Texte */
+function gedaechtnisTexte(): string[] {
+  const texte: string[] = [];
+  try {
+    texte.push(readFileSync(NOTES, "utf8"));
+  } catch { /* keine Notizen */ }
+  const t = (x: unknown) => void (typeof x === "string" && texte.push(x));
+  for (const z of profil.ziele) t(z.text);
+  for (const w of profil.werte) t(w);
+  for (const m of profil.muster) { t(m.text); if (Array.isArray(m.belege)) m.belege.forEach(t); }
+  for (const e of profil.entscheidungen) { t(e.text); t(e.ausgang); }
+  for (const f of profil.fakten) t(f.text);
+  for (const c of profil.chronik) t(c.text);
+  return texte;
+}
+
+/**
+ * Ziffern (gemischte PIN: Folgen) in PIN-Form aus allem, was vom Nutzer stammt: seine Eingaben im Verlauf (ohne
+ * Werkzeugergebnisse), dazu aus Gemerktem nur, was dort kurz hinter «PIN», «Code» & Co. steht: Ergebnisse von
+ * notizen_lesen/profil_anzeigen im Verlauf und das Gemerkte selbst (Notizen, Profil; gilt auch nach /neu oder gekürztem
+ * Verlauf). Nur daher kann Claude die PIN wiederholen – Bestellnummern, Postleitzahlen, Jahre und Termine aus anderen
+ * Werkzeugen und aus Notizen bleiben so in seinen Antworten lesbar. Nie nach dem PIN-Wert.
+ */
+function nutzerZahlen(verlauf: readonly unknown[]): Set<string> {
+  const zahlen = new Set<string>();
+  const pin = config.pin;
+  if (!pin || pin.length < 4) return zahlen;
+  const gedaechtnisIds = new Set<unknown>();
+  for (const m of verlauf) {
+    if (!m || typeof m !== "object") continue;
+    const { role, content } = m as { role?: unknown; content?: unknown };
+    if (role === "assistant" && Array.isArray(content)) {
+      for (const b of content as ({ type?: unknown; name?: unknown; id?: unknown } | null)[]) {
+        if (b?.type === "tool_use" && typeof b.name === "string" && GEDAECHTNIS_WERKZEUGE.has(b.name)) gedaechtnisIds.add(b.id);
+      }
+    }
+    if (role !== "user") continue;
+    if (Array.isArray(content)) {
+      for (const b of content as ({ type?: unknown; tool_use_id?: unknown; content?: unknown } | null)[]) {
+        if (b?.type === "tool_result" && gedaechtnisIds.has(b.tool_use_id)) zahlenAus(textBloecke(b.content), pin, zahlen, true);
+      }
+    }
+    const text = textBloecke(content);
+    if (!text || WERKZEUG_NOTIZ.test(text)) continue;
+    zahlenAus(text, pin, zahlen);
+  }
+  for (const t of gedaechtnisTexte()) zahlenAus(t, pin, zahlen, true);
+  return zahlen;
+}
+
+/**
+ * Antwort von Claude (Telegram, Sprachantwort, Kommandozentrale, /events, Alexa, späte Antworten) ohne PIN: geschwärzt
+ * wird nur, was in PIN-Form auch vom Nutzer stammt (Eingabe im Verlauf, Notizen, Profil; nur daher kann Claude die PIN
+ * kennen und wiederholen, nutzerZahlen) oder kurz hinter «PIN», «Code» & Co. steht. So bleiben Postleitzahl, Jahr,
+ * Bestell- und Auftragsnummer aus anderen Werkzeugen lesbar. Hängt nie vom PIN-Wert ab: eine Kandidatenliste des
+ * Nutzers erscheint ganz geschwärzt. `verlauf`: zur Antwort auf eine bestimmte Frage zugVerlauf(), sonst der Chat jetzt.
+ */
+export function antwortGeschwaerzt(text: string, ersatz = "<PIN>", verlauf: readonly unknown[] = history): string {
+  return pinErsetzen(text, ersatz, nutzerZahlen(verlauf));
+}
+
+/**
+ * Verlauf zum Schwärzen der Antwort auf `text`, vor dem Zug erfasst: der Stand von jetzt samt der Frage, beim Aufruf
+ * ergänzt um den dann gültigen Chat. Sonst leerte ein /neu (resetHistory) während einer langen Antwort die Historie, und
+ * die PIN aus der eigenen Frage stünde ungeschwärzt in der (späten) Antwort.
+ */
+export function zugVerlauf(text: string): () => readonly unknown[] {
+  const vorher: readonly unknown[] = [...history, { role: "user", content: text }];
+  return () => [...vorher, ...history];
 }
 
 /**
  * Die letzten n Nachrichten mit sichtbarem Text, älteste zuerst: nur Textblöcke, ohne Werkzeug-Schritte (Antworten
- * mit tool_use sah der Nutzer nie, nur die letzte), ohne im Notaus zurückgehaltene Antworten, ohne Systemnotizen und
- * automatische Läufe, Kanal-Präfixe entfernt, geschwärzt (auch die PIN) und gekürzt. Liest nur, was übergeben wird
- * (und config.pin); Einträge unbekannter Form fallen weg.
+ * mit tool_use sah der Nutzer nie, ausser der beim Limit der Werkzeugrunden ausgegebenen), ohne im Notaus
+ * zurückgehaltene Antworten, ohne Systemnotizen und automatische Läufe, Kanal-Präfixe entfernt (Ereignisse aus dem Haus
+ * als «haus»), geschwärzt (nie nach dem PIN-Wert: Texte des Nutzers nach Klasse, pinGeschwaerzt; Antworten nur, was
+ * vom Nutzer in PIN-Form stammt, antwortGeschwaerzt) und gekürzt. Liest nur, was übergeben wird (dazu config.pin,
+ * Notizen und Profil für nutzerZahlen); Einträge unbekannter Form fallen weg.
  */
 export function sichtbareNachrichten(verlauf: unknown, n = 5): ChatNachricht[] {
   if (!Array.isArray(verlauf)) return [];
+  const nutzer = nutzerZahlen(verlauf);
   const aus: ChatNachricht[] = [];
   for (let i = verlauf.length - 1; i >= 0 && aus.length < n; i--) {
-    const m = verlauf[i] as { role?: unknown; content?: unknown } | null;
+    const m = verlauf[i] as { role?: unknown; content?: unknown; zurueckgehalten?: unknown; ausgegeben?: unknown; automatisch?: unknown } | null;
     if (!m || typeof m !== "object") continue;
     let text: string;
+    let rolle: ChatNachricht["rolle"];
     if (m.role === "user") {
+      if (m.automatisch === true) continue;
       text = textBloecke(m.content).trim();
       if (KEIN_NUTZER.test(text)) continue;
+      rolle = VOM_HAUS.test(text) ? "haus" : "nutzer";
       text = text.replace(KANAL_PRAEFIX, "").trim();
     } else if (m.role === "assistant") {
       // Im Notaus zurückgehalten (runLoop, telegram.ts): auch hier nie zeigen
-      if ((m as { zurueckgehalten?: unknown }).zurueckgehalten === true) continue;
-      if (Array.isArray(m.content) && m.content.some((b) => b && typeof b === "object" && (b as { type?: unknown }).type === "tool_use")) continue;
+      if (m.zurueckgehalten === true) continue;
       text = textBloecke(m.content).trim();
+      if (Array.isArray(m.content) && m.content.some((b) => b && typeof b === "object" && (b as { type?: unknown }).type === "tool_use")) {
+        if (m.ausgegeben !== true) continue;
+        text = `${text}\n\n${LIMIT_HINWEIS}`.trim();
+      }
+      rolle = "jarvis";
     } else continue;
     if (!text) continue;
-    const s = Array.from(pinGeschwaerzt(schwaerze(text)));
-    aus.push({ rolle: m.role === "user" ? "nutzer" : "jarvis", text: s.length > MAX_ANZEIGE ? `${s.slice(0, MAX_ANZEIGE - 1).join("")}…` : s.join("") });
+    const s = Array.from(rolle === "jarvis" ? pinErsetzen(schwaerze(text), "<PIN>", nutzer) : pinGeschwaerzt(schwaerze(text)));
+    aus.push({ rolle, text: s.length > MAX_ANZEIGE ? `${s.slice(0, MAX_ANZEIGE - 1).join("")}…` : s.join("") });
   }
   return aus.reverse();
 }
@@ -208,7 +451,7 @@ export function addSystemNote(text: string): void {
  * zwischengespeichert (Prompt Caching, Lesen kostet rund ein Zehntel), der kleine variable Teil (Zeit, Modus,
  * offene Aufträge) kommt dahinter und bleibt ungecacht.
  */
-function systemPrompt(): Anthropic.TextBlockParam[] {
+function systemPrompt(opts: Pick<RunOptions, "freigabenNurNummern"> = {}): Anthropic.TextBlockParam[] {
   const fixed = [
     persona("chat"),
     "",
@@ -230,7 +473,9 @@ function systemPrompt(): Anthropic.TextBlockParam[] {
   const offen = offeneAuftraege();
   const variable = [
     `Jetzt: ${now}. Modus: ${currentMode()}.`,
-    offen.length ? `Offene Aufträge: ${offen.map((a) => `#${a.id} ${a.tool}`).join(", ")}.` : "",
+    opts.freigabenNurNummern
+      ? `${FREIGABEN_NUR_NUMMERN} Offene Aufträge: ${offen.length}${offen.length ? ` (${offen.map((a) => `#${a.id}`).join(", ")})` : ""}.`
+      : offen.length ? `Offene Aufträge: ${offen.map((a) => `#${a.id} ${a.tool}`).join(", ")}.` : "",
   ].filter(Boolean).join("\n");
 
   return [
@@ -255,7 +500,18 @@ export interface RunOptions {
   onStep?: (step: number, tool: string) => void;
   /** Historien-Eintrag der ausgegebenen Antwort (für antwortZurueckhalten); nicht bei pausiertText() */
   onAntwort?: (eintrag: object) => void;
+  /** Automatischer Lauf (Zeitplan, Rückblick, Zielcheck): der Auftrag erscheint nicht als Nachricht des Nutzers */
+  automatisch?: true;
+  /**
+   * Kanal ohne Einzelheiten zu Freigaben (Alexa mit ALEXA_FREIGABEN_DETAILS=off, die Antwort geht über Amazon): im
+   * variablen Promptteil nur Anzahl und Nummern samt Kanalnotiz, kein Werkzeugname. Der feste Teil bleibt gleich (Cache).
+   */
+  freigabenNurNummern?: true;
 }
+
+/** Kanalnotiz für freigabenNurNummern */
+const FREIGABEN_NUR_NUMMERN =
+  "[Kanal: Alexa, die Antwort geht über Amazon und wird im Raum vorgelesen] Zu offenen Aufträgen und Freigaben nennst du nur Anzahl und Nummern, nie Werkzeug, Empfänger, Betreff, Inhalt oder Stufe, auch nicht aus dem Verlauf; für Einzelheiten verweist du auf Telegram.";
 
 /** Verarbeitet eine Nutzernachricht im Chat; Anfragen laufen nacheinander. «!» am Anfang = starkes Modell. */
 export function handleMessage(text: string, hooks: AgentHooks, opts: RunOptions = {}): Promise<string> {
@@ -291,7 +547,7 @@ async function runLoop(text: string, hooks: AgentHooks, opts: RunOptions & { his
   const h = opts.history;
   const isChat = h === history;
 
-  h.push({ role: "user", content: text });
+  h.push(opts.automatisch ? { role: "user", content: text, automatisch: true } : { role: "user", content: text });
   if (isChat) trim();
 
   let reply = "";
@@ -300,7 +556,7 @@ async function runLoop(text: string, hooks: AgentHooks, opts: RunOptions & { his
   for (let loop = 0; loop < maxLoops; loop++) {
     const msg = await claudeAufruf("chat", () =>
       anthropic.messages.create(
-        { model, max_tokens: opts.stark ? 8000 : 2500, system: systemPrompt(), tools: toolParams, messages: h.map(fuerApi) },
+        { model, max_tokens: opts.stark ? 8000 : 2500, system: systemPrompt(opts), tools: toolParams, messages: h.map(fuerApi) },
         { timeout: 300_000 },
       ),
     );
@@ -340,7 +596,11 @@ async function runLoop(text: string, hooks: AgentHooks, opts: RunOptions & { his
       if (isChat) saveHistory();
       return pausiertText();
     }
-    if (loop === maxLoops - 1) reply = `${reply}\n\n(Limit von ${maxLoops} Werkzeugrunden erreicht, Zwischenstand.)`.trim();
+    if (loop === maxLoops - 1) {
+      reply = `${reply}\n\n(Limit von ${maxLoops} Werkzeugrunden erreicht, Zwischenstand.)`.trim();
+      // Diese Antwort trägt tool_use, geht aber hinaus: auch der Verlauf zeigt sie (sichtbareNachrichten)
+      antwort.ausgegeben = true;
+    }
   }
   if (isChat) saveHistory();
   if (letzte) opts.onAntwort?.(letzte);
@@ -441,16 +701,17 @@ const gesperrt = (): boolean => Boolean(state.paused) || Boolean(state.notfall?.
  * Sonst läuft die Arbeit weiter und das Ergebnis geht über `later` raus (Telegram, mit sendeAntwort). Im Notaus oder
  * Notfall ruft es `later` gar nicht erst auf: weder Antwort noch Pausenhinweis noch Fehlertext, also auch kein Echo der
  * Frage in einen womöglich übernommenen Chat; die Antwort gilt dann als zurückgehalten. `eintrag` (Historie) braucht
- * `later` fürs Zurückhalten, falls der Notaus erst während des Versands kommt.
+ * `later` fürs Zurückhalten, falls der Notaus erst während des Versands kommt. `opts`: Kanal (freigabenNurNummern).
  */
 export async function askWithBudget(
   text: string,
   ms: number,
   hooks: AgentHooks,
   later: (reply: string, eintrag?: object) => Promise<void>,
+  opts: Pick<RunOptions, "freigabenNurNummern"> = {},
 ): Promise<string | undefined> {
   let eintrag: object | undefined;
-  const work = handleMessage(text, hooks, { onAntwort: (e) => void (eintrag = e) });
+  const work = handleMessage(text, hooks, { ...opts, onAntwort: (e) => void (eintrag = e) });
   const timeout = new Promise<undefined>((r) => setTimeout(() => r(undefined), ms).unref());
   const reply = await Promise.race([work, timeout]);
   if (reply !== undefined) return reply;

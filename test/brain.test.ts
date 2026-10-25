@@ -260,7 +260,7 @@ describe("Freigaben-Hinweis – Notaus, gestartete Aufträge, Emoji", () => {
     assert.equal(
       gemischt,
       "Ein Auftrag wartet auf Ihre Freigabe, Sir: Nummer 13, Licht Büro aus. Freigeben geht per Telegram oder Dashboard. " +
-        "Die Nummern 12, 14 sind bereits gestartet oder ohne klares Ergebnis; den Stand zeigt Telegram.",
+        "Die Nummern 12 und 14 sind bereits gestartet oder ohne klares Ergebnis; den Stand zeigt Telegram.",
     );
     assert.equal(freigabenHinweis([auftrag(1, "A", { status: "erledigt", gestartetAm: "x" })], "Sir"), "");
   });
@@ -277,12 +277,23 @@ describe("Freigaben-Hinweis – Notaus, gestartete Aufträge, Emoji", () => {
     );
     assert.equal(
       freigabenHinweis([3, 7, 12].map(g), "Sir"),
-      "Die Nummern 3, 7, 12 sind bereits gestartet oder ohne klares Ergebnis; den Stand zeigt Telegram.",
+      "Die Nummern 3, 7 und 12 sind bereits gestartet oder ohne klares Ergebnis; den Stand zeigt Telegram.",
     );
     const viele = freigabenHinweis([...Array.from({ length: 15 }, (_, i) => g(i + 1)), auftrag(99, "Licht aus")], "Sir");
     assert.match(viele, /Nummer 99, Licht aus\. Freigeben geht/);
     assert.match(viele, /Die Nummern 1, 2, 3 und zwölf weitere sind bereits gestartet/);
     assert.ok(!/\b4\b|Geheim/.test(viele), viele);
+  });
+
+  it("gestartete Aufträge mit «und» aufgezählt (2, 3 und 4 gestartet)", () => {
+    const g = (id: number) => auftrag(id, `Geheim ${id}`, { gestartetAm: "2026-10-11T06:00:00.000Z" });
+    const satz = (nummern: string) => `Die Nummern ${nummern} sind bereits gestartet oder ohne klares Ergebnis; den Stand zeigt Telegram.`;
+    assert.equal(freigabenHinweis([3, 4].map(g), "Sir"), satz("3 und 4"));
+    assert.equal(freigabenHinweis([3, 4, 5].map(g), "Sir"), satz("3, 4 und 5"));
+    assert.equal(freigabenHinweis([3, 4, 5, 6].map(g), "Sir"), satz("3, 4, 5 und eine weitere"));
+    // Auch hinter wartenden Aufträgen und in der knappen Alexa-Form
+    const gemischt = freigabenHinweis([g(3), g(4), auftrag(9, "Licht aus")], "Sir", { details: false });
+    assert.ok(gemischt.endsWith(satz("3 und 4")), gemischt);
   });
 
   it("Dashboard nur nennen, wenn es eingebunden ist (DASHBOARD an und JARVIS_EVENT_TOKEN gesetzt)", () => {

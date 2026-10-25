@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { request } from "node:http";
 import { createServer } from "node:net";
@@ -14,7 +15,13 @@ const projekt = resolve(import.meta.dirname, "..");
 const temp = mkdtempSync(join(tmpdir(), "jarvis-server-"));
 const TOKEN = "ereignis-token-nur-attrappe-0123456789";
 const attrappe = join(temp, "fetch-attrappe.mjs");
-writeFileSync(attrappe, 'globalThis.fetch = async () => { throw new Error("kein Netz im Test"); };\n');
+// Erwartetes Handmodell nur für diesen Test: Inhalt «attrappe» gilt als geprüft (der echte Wert bleibt unberührt)
+const MODELL_ERWARTET = { bytes: 8, sha256: createHash("sha256").update("attrappe").digest("hex") };
+writeFileSync(
+  attrappe,
+  'globalThis.fetch = async () => { throw new Error("kein Netz im Test"); };\n' +
+    `globalThis[Symbol.for("jarvis.test.modellErwartet")] = ${JSON.stringify(MODELL_ERWARTET)};\n`,
+);
 
 const freierPort = () =>
   new Promise<number>((ok, fehler) => {
@@ -191,8 +198,8 @@ describe("server.ts: Start und Netzsperren", () => {
 
 describe("server.ts: Gesten-Konsole ohne CDN (feste Dateien, CSP, Netzregel)", () => {
   const CSP =
-    "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self' blob: data:; media-src 'self' blob: mediastream:; " +
-    "connect-src 'self'; worker-src 'self' blob:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; object-src 'none'";
+    "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src data:; connect-src 'self'; " +
+    "base-uri 'none'; form-action 'none'; frame-ancestors 'none'; object-src 'none'";
   const DATEIEN: [string, RegExp][] = [
     ["/gesture", /^text\/html; charset=utf-8$/i],
     ["/gesture/app.js", /^text\/javascript; charset=utf-8$/i],
@@ -221,7 +228,7 @@ describe("server.ts: Gesten-Konsole ohne CDN (feste Dateien, CSP, Netzregel)", (
     assert.doesNotMatch(seite.text, /https?:\/\//i, "nichts von aussen");
   });
 
-  it("Handmodell: ohne Datei 404, mit Datei im Arbeitsordner 200 (application/octet-stream)", async () => {
+  it("Handmodell: ohne Datei 404, mit geprüfter Datei im Arbeitsordner 200 (application/octet-stream)", async () => {
     assert.equal((await anfrage(port, "GET", MODELL)).status, 404);
     mkdirSync(join(temp, "vendor", "mediapipe"), { recursive: true });
     writeFileSync(join(temp, "vendor", "mediapipe", "hand_landmarker.task"), "attrappe");
@@ -237,6 +244,52 @@ describe("server.ts: Gesten-Konsole ohne CDN (feste Dateien, CSP, Netzregel)", (
       rmSync(join(temp, "vendor"), { recursive: true, force: true });
     }
     assert.equal((await anfrage(port, "GET", MODELL)).status, 404);
+  });
+
+  it("Handmodell mit falscher Prüfsumme: 409 ohne Inhalt (mit CSP), einmal geloggt, nie ausgeliefert", async () => {
+    mkdirSync(join(temp, "vendor", "mediapipe"), { recursive: true });
+    // gleiche Grösse wie erwartet, anderer Inhalt: nur die Prüfsumme verrät es
+    writeFileSync(join(temp, "vendor", "mediapipe", "hand_landmarker.task"), "verdorbn");
+    try {
+      const vorher = ausgabe.split("Handmodell defekt").length;
+      for (let i = 0; i < 3; i++) {
+        const r = await anfrage(port, "GET", MODELL);
+        assert.equal(r.status, 409);
+        assert.equal(r.text, "");
+        assert.equal(r.kopf["content-security-policy"], CSP);
+        assert.equal(r.kopf["x-content-type-options"], "nosniff");
+      }
+      const z = await anfrage(port, "GET", "/gesture/mp/modell.json");
+      assert.deepEqual(JSON.parse(z.text), { vorhanden: true, zustand: "falsch" });
+      await new Promise((r) => setTimeout(r, 50));
+      assert.equal(ausgabe.split("Handmodell defekt: löschen, dann npm run gesten:modell").length - 1, 1, "einmal je Dateistand");
+      assert.equal(ausgabe.split("Handmodell defekt").length - vorher, 1);
+      assert.doesNotMatch(ausgabe, /verdorbn/);
+    } finally {
+      rmSync(join(temp, "vendor"), { recursive: true, force: true });
+    }
+  });
+
+  it("Zustand des Handmodells: /gesture/mp/modell.json 200 mit vorhanden false/true, CSP, JSON, auch über den Tunnel", async () => {
+    const pfad = "/gesture/mp/modell.json";
+    const ohne = await anfrage(port, "GET", pfad);
+    assert.equal(ohne.status, 200);
+    assert.deepEqual(JSON.parse(ohne.text), { vorhanden: false, zustand: "fehlt" });
+    assert.match(String(ohne.kopf["content-type"]), /^application\/json; charset=utf-8$/i);
+    assert.equal(ohne.kopf["content-security-policy"], CSP);
+    assert.equal(ohne.kopf["cache-control"], "no-cache");
+    mkdirSync(join(temp, "vendor", "mediapipe"), { recursive: true });
+    writeFileSync(join(temp, "vendor", "mediapipe", "hand_landmarker.task"), "attrappe");
+    try {
+      const mit = await anfrage(port, "GET", pfad);
+      assert.equal(mit.status, 200);
+      assert.deepEqual(JSON.parse(mit.text), { vorhanden: true, zustand: "ok" });
+      // EVENTS_VIA_TUNNEL=on öffnet ihn wie die übrigen Dateien der Konsole
+      assert.equal((await anfrage(port, "GET", pfad, { "cf-ray": "8a1b2c3d4e5f-ZRH" })).status, 200);
+    } finally {
+      rmSync(join(temp, "vendor"), { recursive: true, force: true });
+    }
+    assert.deepEqual(JSON.parse((await anfrage(port, "GET", pfad)).text), { vorhanden: false, zustand: "fehlt" });
   });
 
   it("nichts ausserhalb der Whitelist: kein Ordner von node_modules, vendor oder web", async () => {

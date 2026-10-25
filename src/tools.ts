@@ -90,7 +90,8 @@ export function saveReminders(): void {
   renameSync(`${REMINDER_FILE}.tmp`, REMINDER_FILE);
 }
 
-const NOTES = "data/notizen.md";
+/** Notizen (notiz_speichern); Zahlen daraus schwärzt agent.ts in Antworten wie Eingaben des Nutzers */
+export const NOTES = "data/notizen.md";
 
 function range(von?: string, bis?: string): { start: Date; end: Date } {
   const start = von ? new Date(von) : new Date();
