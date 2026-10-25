@@ -23,6 +23,8 @@ export interface Feld {
   standard?: string;
   /** Fehlertext oder undefined */
   pruefen?: (wert: string) => string | undefined;
+  /** Warnung nach der Eingabe; der Wert gilt trotzdem */
+  warnen?: (wert: string) => string | undefined;
   /** art token: leer + Enter erzeugt einen Token */
   erzeugen?: boolean;
   /** am Terminal ohne Echo, obwohl kein Geheimnis: kann eines enthalten */
@@ -61,6 +63,14 @@ export function pruefePin(wert: string): string | undefined {
   if (wert.length < 4) return "mindestens 4 Zeichen";
   if (/\s/.test(wert)) return "kein Leerraum erlaubt";
   return undefined;
+}
+
+/**
+ * Eine PIN ohne Ziffern erkennt der Eingangsfilter (pin.ts) nicht an der Form, nur am Wert: dann verrät die Antwort im
+ * Chat, ob ein Wort die PIN ist. Warnung im Setup (PIN-Feld) und im Befund «PIN» von npm run check.
+ */
+export function pinWarnung(wert: string): string | undefined {
+  return wert && !/\d/.test(wert) ? "PIN ohne Ziffern – bitte eine Ziffern-PIN wählen" : undefined;
 }
 
 export function pruefeUrl(wert: string): string | undefined {
@@ -201,7 +211,7 @@ export const ABSCHNITTE: Abschnitt[] = [
     beschreibung: "PIN für sensible Aufträge, Geheimnisse für /events und /notfall, Freigabe-Regeln. Tokens erzeuge ich auf Wunsch.",
     optional: false,
     felder: [
-      { key: "JARVIS_PIN", frage: "PIN für sensible Aufträge", hinweis: "mindestens 4 Zeichen, kein Leerraum", art: "geheim", pflicht: true, pruefen: pruefePin },
+      { key: "JARVIS_PIN", frage: "PIN für sensible Aufträge", hinweis: "mindestens 4 Zeichen, kein Leerraum, am besten nur Ziffern", art: "geheim", pflicht: true, pruefen: pruefePin, warnen: pinWarnung },
       { key: "JARVIS_EVENT_TOKEN", frage: "Ereignis-Token für POST /events", hinweis: "Enter = bestehenden Token behalten, sonst erzeugen (wie openssl rand -hex 24); «-» = Endpunkt aus; neu erzeugen: erst «-», dann nochmals npm run setup -- --abschnitt sicherheit", art: "token", erzeugen: true },
       { key: "JARVIS_PANIC_TOKEN", frage: "Panik-Token für POST /notfall", hinweis: "Enter = bestehenden Token behalten, sonst erzeugen; «-» = Endpunkt aus; neu erzeugen: erst «-», dann nochmals npm run setup -- --abschnitt sicherheit", art: "token", erzeugen: true },
       { key: "JARVIS_COMMANDS", frage: "Shell-Befehle", hinweis: "freigabe = jeder Befehl braucht Ihr OK (empfohlen), auto = läuft direkt", art: "wahl", wahl: ["freigabe", "auto"], standard: "freigabe", pruefen: pruefeWahl(["freigabe", "auto"]) },
@@ -209,7 +219,7 @@ export const ABSCHNITTE: Abschnitt[] = [
       { key: "DASHBOARD", frage: "Dashboard unter /dashboard", hinweis: "nur Heimnetz/Tailscale, nutzt JARVIS_EVENT_TOKEN", art: "wahl", wahl: ["on", "off"], standard: "on", pruefen: anAus },
       { key: "ZAHLUNG_NUR_VORBEREITEN", frage: "Zahlungen nur vorbereiten, nie auslösen", hinweis: "on empfohlen", art: "wahl", wahl: ["on", "off"], standard: "on", pruefen: anAus },
     ],
-    checks: ["Sicherheit"],
+    checks: ["Sicherheit", "PIN"],
   },
   {
     name: "alexa",

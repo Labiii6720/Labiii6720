@@ -81,72 +81,41 @@ afterEach(async () => {
   missbrauchZuruecksetzen();
 });
 
-describe("PIN ohne wartende Abfrage: die Antwort verrät nicht, welche Eingabe stimmt", () => {
-  it("richtige und falsche PIN: dieselbe Antwort, beide gelöscht, keine an Claude", async () => {
+const PIN_TEXT = "Das sieht aus wie eine PIN, Sir. Ich schicke es nicht weiter.";
+const chatEnthaelt = (s: string) => existsSync(join(temp, "data", "chat.json")) && readFileSync(join(temp, "data", "chat.json"), "utf8").includes(s);
+
+describe("PIN ohne wartende Abfrage (pinEingabe): gleiche Antwort, nie an Claude, nie gezählt", () => {
+  it("richtige und falsche PIN gleicher Form: dieselbe Antwort, beide gelöscht, keine an Claude", async () => {
     const richtig = await antwortAuf("4711");
     const falsch = await antwortAuf("4712");
     assert.deepEqual(richtig, falsch);
-    assert.deepEqual(falsch.antwort, ["Keine Freigabe wartet auf eine PIN, Sir. Nachricht gelöscht."]);
+    assert.deepEqual(falsch.antwort, [PIN_TEXT]);
     assert.equal(falsch.geloescht, 1);
     assert.deepEqual(falsch.claude, []);
-    // auch andere Längen derselben Art
-    assert.deepEqual(await antwortAuf("000000"), richtig);
+    for (const t of ["47 11", "4-7-1-1", "4711.", "!4711", "«4712»", "meine PIN ist 4711"]) assert.deepEqual(await antwortAuf(t), richtig, t);
+    assert.ok(!chatEnthaelt("4711") && !chatEnthaelt("4712"));
   });
 
-  it("getippt mit Satzzeichen am Ende («4711.», «4712!», «4711?»): dieselbe Antwort, gelöscht, nie an Claude, gezählt", async () => {
-    const richtig = await antwortAuf("4711");
+  it("nicht gezählt: auch zehn PIN-förmige Eingaben lösen keinen Notfall aus", async () => {
     const vorher = missbrauch();
-    for (const t of ["4711.", "4712!", "4711?"]) assert.deepEqual(await antwortAuf(t), richtig, t);
-    assert.equal(missbrauch() - vorher, 3);
-    assert.ok(!existsSync(join(temp, "data", "chat.json")) || !readFileSync(join(temp, "data", "chat.json"), "utf8").includes("4711"));
-  });
-
-  it("fünf PIN-Versuche über den Chat lösen den Notfall aus, auch wenn der letzte stimmt", async () => {
-    const vorher = missbrauch();
-    for (const versuch of ["0000", "0001", "0002", "0003"]) await antwortAuf(versuch);
-    assert.equal(missbrauch() - vorher, 4);
+    for (let i = 0; i < 10; i++) await antwortAuf(`471${i}`);
+    assert.equal(missbrauch(), vorher);
     assert.notEqual(state.notfall?.aktiv, true);
-    await antwortAuf("4711");
-    assert.equal(missbrauch() - vorher, 5);
-    assert.equal(state.notfall?.aktiv, true);
-    assert.equal(state.paused, true);
+    assert.notEqual(state.paused, true);
   });
 
-  it("Sätze und kurze Wörter laufen weiter an Claude, ohne Zählung", async () => {
-    const vorher = missbrauch();
-    for (const t of ["Wie wird das Wetter morgen?", "Danke", "ok", "Termin um 14 Uhr?"]) {
+  it("Fehltreffer gehen an Claude, nicht gelöscht: Uhrzeit, Betrag, Datum, Telefonnummer, Sätze", async () => {
+    for (const t of ["14.30", "12.50", "25.10.2026", "079 123 45 67", "Termin um 1430 mit Müller", "Wie wird das Wetter morgen?", "Danke"]) {
       const r = await antwortAuf(t);
       assert.equal(r.geloescht, 0, t);
       assert.deepEqual(r.claude, [t]);
     }
-    assert.equal(missbrauch(), vorher);
   });
 
-  it("nach einer Entscheidung anderswo: richtige und vertippte PIN gleich beantwortet und gezählt", async () => {
-    const vorher = missbrauch();
-    const ergebnisse: string[][] = [];
-    let id = 0;
-    for (const pin of ["4711", "4712"]) {
-      const a = sensibel();
-      id = a.id;
-      await knopfOk(a.id);
-      await denyAuftrag(getAuftrag(a.id)!);
-      await ruhe();
-      const r = await antwortAuf(pin);
-      assert.equal(r.geloescht, 1);
-      assert.deepEqual(r.claude, []);
-      ergebnisse.push(r.antwort.map((t) => t.replace(`#${a.id}`, "#N")));
-    }
-    assert.deepEqual(ergebnisse[0], ergebnisse[1]);
-    assert.deepEqual(ergebnisse[1], ["#N ist nicht mehr offen, Sir. Nachricht gelöscht."]);
-    assert.ok(id > 0);
-    assert.equal(missbrauch() - vorher, 2);
-  });
-
-  it("gesprochen: richtige und falsche PIN gleich, kein Echo, nie an Claude, gezählt", async () => {
+  it("gesprochen: richtige und falsche PIN gleich, kein Echo, gelöscht, nie an Claude, nicht gezählt", async () => {
     const vorher = missbrauch();
     const antworten: string[][] = [];
-    for (const pin of ["4711", "4712", "4713."]) {
+    for (const pin of ["4711", "4712", "4 7 1 3.", "Meine PIN ist 4711"]) {
       sttText = ` ${pin} `;
       aufrufe = [];
       claude = [];
@@ -156,22 +125,25 @@ describe("PIN ohne wartende Abfrage: die Antwort verrät nicht, welche Eingabe s
       assert.deepEqual(claude, []);
       antworten.push(gesendet());
     }
-    assert.deepEqual(antworten[0], ["Die PIN bitte tippen, Sir, nie sprechen. Sprachnachricht gelöscht."]);
-    assert.deepEqual(antworten[1], antworten[0]);
-    assert.deepEqual(antworten[2], antworten[0]);
-    assert.equal(missbrauch() - vorher, 3);
+    for (const a of antworten) assert.deepEqual(a, [PIN_TEXT]);
+    assert.equal(missbrauch(), vorher);
   });
 
-  it("PIN ohne Ziffern: gleiche Antwort für PIN-förmige Wörter, aber kein Notfall durch fünfmal «Danke»", async () => {
+  it("gesprochen, keine PIN-Form: Echo ohne Token, Claude bekommt den Satz unverändert; die Antwort geht ohne Schwärzung der Zahl hinaus", async () => {
+    sttText = "Um 14.30 Uhr Termin, Token Bearer abcdefghijklmnop123";
+    abhaengigkeiten.handleMessage = async (text: string) => { claude.push(text); return "Notiert für 14.30, Sir. Bearer abcdefghijklmnop123"; };
+    aufrufe = [];
+    await handleUpdate(sprache());
+    assert.deepEqual(claude, ["Um 14.30 Uhr Termin, Token Bearer abcdefghijklmnop123"]);
+    assert.deepEqual(gesendet(), ["🎙 Um 14.30 Uhr Termin, Token Bearer <token>", "Notiert für 14.30, Sir. Bearer <token>"]);
+  });
+
+  it("PIN ohne Ziffern: nur der Wert selbst wird abgewiesen, andere Wörter und Zahlen gehen an Claude", async () => {
     config.pin = "geheim";
     const richtig = await antwortAuf("geheim");
-    const falsch = await antwortAuf("Danke");
-    assert.deepEqual(richtig, falsch);
-    const vorher = missbrauch();
-    for (let i = 0; i < 5; i++) await antwortAuf("Danke");
-    assert.equal(missbrauch(), vorher);
-    assert.notEqual(state.notfall?.aktiv, true);
-    // Zahlen gehen bei einer solchen PIN weiter an Claude
+    assert.deepEqual(richtig.antwort, [PIN_TEXT]);
+    assert.deepEqual(richtig.claude, []);
+    assert.deepEqual((await antwortAuf("Danke")).claude, ["Danke"]);
     assert.deepEqual((await antwortAuf("2026")).claude, ["2026"]);
   });
 });
@@ -246,6 +218,24 @@ describe("PIN-Abfrage abgelaufen: eine verspätete, vertippte PIN geht nicht an 
     assert.equal(r.geloescht, 1);
     assert.deepEqual(r.claude, []);
     assert.deepEqual(r.antwort, [`#${a.id} ist nicht mehr offen, Sir. Nachricht gelöscht.`]);
+  });
+
+  it("nach einer Entscheidung anderswo: richtige und vertippte PIN gleich beantwortet, gelöscht, nicht gezählt", async () => {
+    const vorher = missbrauch();
+    const ergebnisse: string[][] = [];
+    for (const pin of ["4711", "4712"]) {
+      const a = sensibel();
+      await knopfOk(a.id);
+      await denyAuftrag(getAuftrag(a.id)!);
+      await ruhe();
+      const r = await antwortAuf(pin);
+      assert.equal(r.geloescht, 1);
+      assert.deepEqual(r.claude, []);
+      ergebnisse.push(r.antwort.map((t) => t.replace(`#${a.id}`, "#N")));
+    }
+    assert.deepEqual(ergebnisse[0], ergebnisse[1]);
+    assert.deepEqual(ergebnisse[1], ["#N ist nicht mehr offen, Sir. Nachricht gelöscht."]);
+    assert.equal(missbrauch(), vorher);
   });
 
   it("der Schutz gilt zwei Minuten ab Ablauf: Stunden später geht auch ein kurzes Wort wieder an Claude", async () => {

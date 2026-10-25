@@ -1,12 +1,13 @@
 import { timingSafeEqual } from "node:crypto";
 import type { Request, Response } from "express";
-import { addSystemNote, antwortGeschwaerzt, askWithBudget, handleMessage, pinGeschwaerzt, zugVerlauf } from "./agent.js";
+import { addSystemNote, askWithBudget, handleMessage } from "./agent.js";
 import { save, state, type Mode } from "./state.js";
 import { briefingTeile, briefingText, briefingVerbinden, briefingVersandLaeuft, type BriefingTeile } from "./brain.js";
 import { audit, throttled } from "./audit.js";
 import { config } from "./config.js";
 import { day } from "./state.js";
-import { hooks, pinFoermigLocker, pinRatenZaehlen, sendeAntwort, sendeSpaeter, sendText, sendVoiceReply } from "./telegram.js";
+import { PIN_EINGABE_TEXT, pinEingabe } from "./pin.js";
+import { hooks, sendeAntwort, sendeSpaeter, sendText, sendVoiceReply } from "./telegram.js";
 import { onCameraEvent } from "./watch.js";
 import { abuseSignal, notfallAktiv } from "./notfall.js";
 import { schwaerze } from "./robust.js";
@@ -48,17 +49,13 @@ function briefingBereit(teile: BriefingTeile | undefined): teile is BriefingTeil
 }
 
 /**
- * Wie in Telegram und im Gesprächsfeld der Kommandozentrale: was die PIN sein könnte (in der Konsole, im Kurzbefehl,
- * auch «4711.»), geht weder an Claude noch in die Historie; gleiche Antwort. true = beantwortet. Gezählt (abuseSignal)
- * nur bei `zaehlen` (getippt: Konsole, Kurzbefehl ohne Kanal). Gesprochen (Kanal «stimme»: Satellit, Siri) und Texte
- * aus Home Assistant (frage) nur auditiert, wie bei Alexa: im Raum spricht jeder, eine Postleitzahl oder ein Jahr als
- * Antwort auf eine Rückfrage ist PIN-förmig – fünf davon dürfen keinen Notfall auslösen.
+ * Wie in Telegram und im Gespräch der Kommandozentrale: was nach der PIN aussieht (pinEingabe; Konsole, Kurzbefehl,
+ * Satellit, Home Assistant), geht weder an Claude noch in die Historie; gleiche Antwort, nicht gezählt. true = beantwortet.
  */
-function pinAbweisen(text: string, res: Response, zaehlen: boolean): boolean {
-  if (pinFoermigLocker(text) === undefined) return false;
-  audit("pin_im_chat", { quelle: "events" });
-  if (zaehlen) pinRatenZaehlen(text);
-  res.status(400).json({ ok: false, error: "pin", text: `Die PIN gehört nicht in den Chat, ${config.anrede}. Nichts gesendet.` });
+function pinAbweisen(text: string, res: Response): boolean {
+  if (!pinEingabe(text)) return false;
+  audit("pin_eingabe", { kanal: "events" });
+  res.status(400).json({ ok: false, error: "pin", text: PIN_EINGABE_TEXT });
   return true;
 }
 
@@ -135,12 +132,12 @@ async function briefingNachliefern(schonZugestellt: boolean): Promise<void> {
  *   { "event": "nachricht", "text": "…" }           → Text 1:1 per Telegram (über den Postausgang: im Notfall
  *                                                     zurückgehalten bis /entwarnung, bei Störung nachgereicht)
  *   { "event": "frage", "text": "…" }               → Jarvis bearbeitet den Text mit allen Werkzeugen, Antwort per Telegram
- *                                                     (geschwärzt; im Notaus/Notfall keine)
+ *                                                     (im Notaus/Notfall keine)
  *   { "event": "frage_sync", "text": "…", "budget": 25000, "kanal": "stimme" }
  *                                                   → Antwort kommt direkt zurück (Gesten-Konsole, Siri-Kurzbefehl); dauert es
  *                                                     länger als budget ms, kommt sie per Telegram nach. Bei frage und
- *                                                     frage_sync gilt: PIN-förmig → 400 { ok: false, error: "pin", text };
- *                                                     gezählt nur bei frage_sync ohne kanal "stimme" (getippt)
+ *                                                     frage_sync gilt: PIN-förmig (pinEingabe) → 400 { ok: false, error: "pin", text },
+ *                                                     nie gezählt
  *   { "event": "kontext", "text": "Angekommen: Arbeit", "modus": "fokus" }
  *                                                   → stiller Hinweis fürs Gespräch, optional Modus wechseln (Kurzbefehl-Automationen)
  *   { "event": "kamera", "kamera": "raum", "label": "person", "zonen": [], "id": "…" } → Kamera-Meldung nach den Regeln in cameras.json
@@ -225,29 +222,24 @@ export async function handleEvent(req: Request, res: Response): Promise<void> {
         break;
       case "frage": {
         if (!text) throw new Error("text fehlt");
-        if (pinAbweisen(text, res, false)) return;
+        if (pinAbweisen(text, res)) return;
         res.json({ ok: true, queued: true }); // nicht warten, Jarvis braucht evtl. länger
         let eintrag: object | undefined;
-        const frage = `[Ereignis aus dem Haus] ${text}`;
-        const verlauf = zugVerlauf(frage); // vor dem Zug: ein /neu währenddessen leert sonst, wogegen geschwärzt wird
-        const reply = await handleMessage(frage, hooks, { onAntwort: (e) => void (eintrag = e) });
-        // Wie frage_sync: geschwärzt (auch die PIN, von Claude wiederholt); im Notaus/Notfall nichts, auch kein Pausenhinweis
-        await sendeAntwort(antwortGeschwaerzt(schwaerze(reply), "<PIN>", verlauf()), eintrag);
+        const reply = await handleMessage(`[Ereignis aus dem Haus] ${text}`, hooks, { onAntwort: (e) => void (eintrag = e) });
+        // Wie frage_sync: ohne Token und Schlüssel; im Notaus/Notfall nichts, auch kein Pausenhinweis
+        await sendeAntwort(schwaerze(reply), eintrag);
         return;
       }
       case "frage_sync": {
         if (!text) throw new Error("text fehlt");
-        if (pinAbweisen(text, res, body.kanal !== "stimme")) return;
+        if (pinAbweisen(text, res)) return;
         const budget = budgetMs(body.budget);
         const prefix = body.kanal === "stimme" ? "[Kanal: Stimme, die Antwort wird vorgelesen] " : "[Kurzbefehl] ";
-        // Echo und späte Antwort gehen nach Telegram: die PIN darin (mitten in einem Satz, von Claude wiederholt) geschwärzt
-        const echo = pinGeschwaerzt(schwaerze(text)).slice(0, 60);
-        // Im Notaus/Notfall nichts davon (askWithBudget, sendeAntwort). Verlauf vor dem Zug erfasst (zugVerlauf)
-        const verlauf = zugVerlauf(prefix + text);
-        const reply = await askWithBudget(prefix + text, budget, hooks, (r, eintrag) => sendeAntwort(`Zu Ihrer Frage von unterwegs («${echo}»):\n\n${antwortGeschwaerzt(schwaerze(r), "<PIN>", verlauf())}`, eintrag));
+        // Echo und Antworten ohne Token und Schlüssel; im Notaus/Notfall nichts davon (askWithBudget, sendeAntwort)
+        const echo = schwaerze(text).slice(0, 60);
+        const reply = await askWithBudget(prefix + text, budget, hooks, (r, eintrag) => sendeAntwort(`Zu Ihrer Frage von unterwegs («${echo}»):\n\n${schwaerze(r)}`, eintrag));
         if (reply === undefined) res.json({ ok: true, queued: true, reply: `Das braucht einen Moment, ${config.anrede}. Die Antwort kommt per Telegram.` });
-        // Auch die rechtzeitige Antwort geschwärzt (Konsole und Satellit lesen sie vor)
-        else res.json({ ok: true, reply: antwortGeschwaerzt(schwaerze(reply), "<PIN>", verlauf()) });
+        else res.json({ ok: true, reply: schwaerze(reply) });
         return;
       }
       case "kontext": {

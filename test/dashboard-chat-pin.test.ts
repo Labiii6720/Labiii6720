@@ -5,8 +5,8 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
 import type Anthropic from "@anthropic-ai/sdk";
 
-// Befund: Das Gesprächsfeld der Kommandozentrale gab eine irrtümlich eingetippte PIN an Claude, in data/chat.json,
-// in den Verlauf (GET /api/chat/verlauf) und nach 60 s ins Telegram-Echo. Temp-Ordner, Attrappen, kein Netz.
+// Gesprächsfeld der Kommandozentrale (POST /api/chat): was nach der PIN aussieht (pinEingabe), geht weder an Claude noch
+// in data/chat.json, den Verlauf oder das Telegram-Echo; gleiche Antwort, nicht gezählt. Temp-Ordner, Attrappen, kein Netz.
 const temp = mkdtempSync(join(tmpdir(), "jarvis-chat-pin-"));
 process.chdir(temp);
 process.once("exit", () => rmSync(temp, { recursive: true, force: true }));
@@ -89,84 +89,54 @@ afterEach(() => {
   state.notfall = { aktiv: false };
 });
 
-describe("POST /api/chat: die PIN gehört nicht in den Chat", () => {
-  it("die PIN selbst: 400, nichts an Claude, nichts in data/chat.json, nichts nach Telegram; gezählt", async () => {
+const PIN_ANTWORT = { ok: false, error: "pin", text: "Das sieht aus wie eine PIN, Sir. Ich schicke es nicht weiter." };
+
+describe("POST /api/chat: PIN-förmige Eingaben gehen nirgends hin", () => {
+  it("die PIN selbst: 400 mit dem einen Text, nichts an Claude, nichts in data/chat.json, nichts nach Telegram; nicht gezählt", async () => {
     const r = await chat("4711");
     assert.equal(r.statusCode, 400);
-    assert.deepEqual(r.body, { ok: false, error: "pin", text: "Die PIN gehört nicht in den Chat, Sir. Nichts gesendet." });
+    assert.deepEqual(r.body, PIN_ANTWORT);
     assert.deepEqual(anClaude, []);
     assert.equal(existsSync(CHAT), false, "kein Eintrag in der Historie");
     await new Promise((r) => setTimeout(r, 20));
     assert.deepEqual(telegram, []);
-    assert.equal(auditZeilen("pin_im_chat").length, 1);
-    assert.equal(auditZeilen("abuse_signal").length, 1, "zählt wie in Telegram als unbefugter Versuch");
+    assert.equal(auditZeilen("pin_eingabe").length, 1);
+    assert.equal(auditZeilen("abuse_signal").length, 0, "nicht als Missbrauch gezählt");
     assert.ok(!readFileSync(AUDIT, "utf8").includes("4711"), "die PIN steht nicht im Audit");
     assert.deepEqual(await verlauf(), []);
   });
 
-  it("eine andere Zahl derselben Art bekommt genau dieselbe Antwort (kein Orakel)", async () => {
+  it("richtige und falsche PIN gleicher Form: genau dieselbe Antwort (kein Orakel), auch zehnmal ohne Notfall", async () => {
     const richtig = await chat("4711");
-    const falsch = await chat("123456");
-    assert.deepEqual(falsch, richtig);
-    assert.deepEqual(anClaude, []);
-  });
-
-  it("mit Satzzeichen am Ende («4711.», «4711!», «4711?»): dieselbe Antwort, nichts an Claude, nichts in data/chat.json, gezählt", async () => {
-    const richtig = await chat("4711");
-    const vorher = auditZeilen("abuse_signal").length;
-    for (const t of ["4711.", "4711!", "4711?", "4712. ", "4711 ."]) {
-      missbrauchZuruecksetzen(); // fünf in fünf Minuten lösten sonst den Notfall aus (eigener Befund)
-      assert.deepEqual(await chat(t), richtig, t);
-    }
+    for (const t of ["4712", "47 11", "4711.", "!4711", "Meine PIN ist 4712"]) assert.deepEqual(await chat(t), richtig, t);
+    for (let i = 0; i < 10; i++) await chat(`000${i}`);
     assert.notEqual(state.notfall?.aktiv, true);
+    assert.equal(auditZeilen("abuse_signal").length, 0);
     assert.deepEqual(anClaude, []);
-    assert.equal(existsSync(CHAT), false, "kein Eintrag in der Historie");
-    await new Promise((r) => setTimeout(r, 20));
-    assert.deepEqual(telegram, []);
-    assert.equal(auditZeilen("abuse_signal").length - vorher, 5, "jede zählt wie die PIN selbst");
+    assert.equal(existsSync(CHAT), false);
   });
 
-  it("ein Satz mit der PIN geht wie in Telegram an Claude; Verlauf und Telegram-Echo zeigen sie geschwärzt", async () => {
-    claudeAntwort = "Die 4711 nenne ich nicht, Sir.";
-    const r = await chat("Ist 4711 eine gute PIN?");
-    assert.equal(r.statusCode, 200);
-    // Auch die rechtzeitige Antwort ohne PIN
-    assert.equal(r.body.reply, "Die <PIN> nenne ich nicht, Sir.");
-    assert.equal(anClaude.length, 1);
-    const n = await verlauf();
-    assert.deepEqual(n, [{ rolle: "nutzer", text: "Ist <PIN> eine gute PIN?" }, { rolle: "jarvis", text: "Die <PIN> nenne ich nicht, Sir." }]);
+  it("Fehltreffer gehen an Claude: Uhrzeit, Betrag, Datum, Telefonnummer, Satz ohne PIN-Wort", async () => {
+    for (const t of ["14.30", "12.50", "25.10.2026", "079 123 45 67", "Termin um 1430 mit Müller"]) {
+      const r = await chat(t);
+      assert.equal(r.statusCode, 200, t);
+    }
+    assert.equal(anClaude.length, 5);
+  });
 
-    // Dauert die Antwort länger als die Frist, geht sie mit einem Echo der Frage nach Telegram: ohne PIN
+  it("Antworten und Verlauf ohne PIN-Schwärzung (Zahlen bleiben lesbar), Token weiter geschwärzt", async () => {
+    claudeAntwort = "Um 14.30 an der Hauptstrasse 4711, Sir. Bearer abcdefghijklmnop123";
+    const r = await chat("Wann und wo ist der Termin?");
+    assert.equal(r.body.reply, "Um 14.30 an der Hauptstrasse 4711, Sir. Bearer <token>");
+    assert.deepEqual((await verlauf()).at(-1), { rolle: "jarvis", text: "Um 14.30 an der Hauptstrasse 4711, Sir. Bearer <token>" });
+
+    // Dauert die Antwort länger als die Frist, geht sie mit Echo nach Telegram
     dashboard._chatFrist.ms = 5;
     claudeVerzoegerung = 40;
     claudeAntwort = "Später, Sir.";
-    const spaet = await chat("Bitte prüfen, ob 4711 noch gilt");
+    const spaet = await chat("Bitte prüfen, ob Bestellung 1042 da ist");
     assert.equal(spaet.body.queued, true);
     for (let i = 0; i < 50 && telegram.length === 0; i++) await new Promise((r) => setTimeout(r, 10));
-    assert.equal(telegram.length, 1);
-    assert.match(telegram[0]!, /^Zur Frage aus der Zentrale \(«Bitte prüfen, ob <PIN> noch gilt»\):/);
-    assert.ok(!telegram[0]!.includes("4711"));
-  });
-
-  it("die rechtzeitige Antwort: wiederholt Claude die PIN, steht in der Kommandozentrale nur der Platzhalter", async () => {
-    claudeAntwort = "Die 4711 gilt noch, Sir.";
-    const r = await chat("Gilt die Zahl noch?");
-    assert.equal(r.statusCode, 200);
-    assert.equal(r.body.queued, false);
-    assert.equal(r.body.reply, "Die <PIN> gilt noch, Sir.");
-    await new Promise((r) => setTimeout(r, 20));
-    assert.deepEqual(telegram, []);
-  });
-
-  it("die späte Antwort nach Telegram: wiederholt Claude die PIN, steht sie dort geschwärzt", async () => {
-    dashboard._chatFrist.ms = 5;
-    claudeVerzoegerung = 40;
-    claudeAntwort = "Ihre PIN 4711 ist notiert, Sir.";
-    const r = await chat("Merken Sie sich bitte die Zahl aus meinem Satz 4711");
-    assert.equal(r.body.queued, true);
-    for (let i = 0; i < 50 && telegram.length === 0; i++) await new Promise((r) => setTimeout(r, 10));
-    assert.equal(telegram.length, 1);
-    assert.match(telegram[0]!, /Ihre PIN <PIN> ist notiert, Sir\.$/);
-    assert.ok(!telegram[0]!.includes("4711"), telegram[0]);
+    assert.deepEqual(telegram, ["Zur Frage aus der Zentrale («Bitte prüfen, ob Bestellung 1042 da ist»):\n\nSpäter, Sir."]);
   });
 });

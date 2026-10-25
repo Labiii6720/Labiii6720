@@ -2,10 +2,10 @@ import * as Alexa from "ask-sdk-core";
 import type { ErrorHandler, HandlerInput, RequestHandler } from "ask-sdk-core";
 import { config } from "./config.js";
 import { aktuellerFreigabenHinweis, briefingTeile, cardioText, dashboardErreichbar, morningDone } from "./brain.js";
-import { antwortGeschwaerzt, askWithBudget, pinGeschwaerzt, zugVerlauf } from "./agent.js";
+import { askWithBudget } from "./agent.js";
 import { audit } from "./audit.js";
-import { offeneAuftraege } from "./queue.js";
-import { hooks, pinFoermigLocker, sendeAntwort } from "./telegram.js";
+import { PIN_EINGABE_TEXT, pinEingabe } from "./pin.js";
+import { hooks, sendeAntwort } from "./telegram.js";
 import { forSpeech } from "./voice.js";
 import { sagt } from "./persona.js";
 import { state, type Mode } from "./state.js";
@@ -128,136 +128,6 @@ export function istFreigabeWunsch(text: string): boolean {
   return verb.test(text) && objekt.test(text);
 }
 
-/** Nach «Auftrag von/für/bei …» kein Dritter: Pronomen und Zeitangaben («Aufträge von heute», «für mich») */
-const KEIN_DRITTER = String.raw`(?:mich|mir|uns|dich|dir|euch|heute|gestern|vorgestern|morgen|übermorgen|vorhin|jetzt|eben|gerade|dies\w*|letzt\w*|vergangen\w*|nächst\w*|heutig\w*|gestrig\w*|woche|warteschlange|freigabe\w*)`;
-/**
- * Bezug auf Dritte: «der Auftrag von Müller», «für den Garten», «hat der Kunde …», «hat die Werkstatt Meier», Firma,
- * Lieferant. «hat» mit Subjekt ist nie der Nutzer («habe ich») und nie Jarvis («hast du»).
- */
-const DRITTE = new RegExp(
-  String.raw`\bauftr[aä]g\w*\s+(?:von|vom|bei|für|der|des)\s+(?:(?:der|die|das|den|dem|des|eine[mnrs]?|ein)\s+)?(?!${KEIN_DRITTER}\b)[a-zäöüß]|\bhat\s+(?!(?:sich|es|noch|schon|jetzt|gerade|heute|bisher)\b)[a-zäöüß]|\bkund\w*|\bfirma\b|\blieferant\w*`,
-  "i",
-);
-
-/** Fragewort am Anfang, das nach dem eigenen Stand fragt (nicht «wer», «wie lang», «braucht es») */
-const FRAGE_STAND = String.raw`^\s*(?:was|welche[mnrs]?|wie\s*viele|gibt\s+es|gibts|lies|les|zeig\w*|sag\w*|nenn\w*|liegt|liegen|steht|stehen|ist|sind|hast\s+du|habe?\s+ich)\b`;
-/** Nur «was», «etwas» oder Sachen aus der Warteschlange als Objekt, kein anderes Nomen («dem Angebot», «die Rechnung») */
-const SUBJEKT_WARTESCHLANGE = String.raw`^\s*(?:was|welche[mnrs]?(?:\s+(?:auftr[aä]ge|mails?|nachrichten|termine|entw[uü]rfe|sachen|dinge))?|gibt\s+es\s+(?:noch\s+)?(?:etwas|was|nichts))`;
-const PRUEFVERB = String.raw`(?:bestätigen|genehmigen|absegnen|abnicken|zustimmen|freigeben)`;
-const FUELLWORT = String.raw`(?:\s+(?:noch|heute|jetzt|gerade|eigentlich|bitte|schon|denn|mal))*`;
-
-/**
- * Fragt die Frage nach der eigenen Warteschlange («was wartet auf Freigabe», «lies mir die offenen Freigaben vor»,
- * «welche Aufträge sind offen», «was muss ich freigeben», «was wartet auf mich», «was liegt in der Warteschlange», «was
- * muss ich noch absegnen», «welche Mails warten auf meine Zustimmung», «welche Mails hast du vorbereitet»)? Dann nicht
- * an Claude: Historie und Werkzeugeingaben kennen Empfänger und Inhalt, die Antwort ginge über Amazon
- * (ALEXA_FREIGABEN_DETAILS). Nur eindeutige Fragen: «Freigabe» mit Bezug auf den Nutzer («offene Freigaben», «auf
- * Freigabe»), «Warteschlange» ohne Ort («am Zoll», «beim Arzt»), «wartet auf mich» und Prüfverben nur mit «was»,
- * «etwas» oder Sachen der Warteschlange («Soll ich dem Angebot zustimmen» geht an Claude), alles ohne Bezug auf Dritte
- * (DRITTE). Was durchrutscht, bekommt bei Claude nur Nummern (freigabenNurNummern) und wird geprüft (nenntAuftragsdetails:
- * Werkzeugname und markante Eingaben wie Empfänger und Betreff).
- */
-export function istFreigabeFrage(text: string): boolean {
-  const t = text.trim();
-  // Nur das Stichwort («Freigaben», «offene Freigaben»)
-  if (/^(?:(?:meine|offene|wartende)\s+)?freigaben?[\s?.!]*$/i.test(t)) return true;
-  if (DRITTE.test(t)) return false;
-  const frage = new RegExp(FRAGE_STAND, "i").test(t);
-  const freigabe = /\b(?:meine[nr]?|unsere[nr]?|offene[nr]?|wartende[nr]?|ausstehende[nr]?|anstehende[nr]?|neue[nr]?)\s+freigaben?\b|\bauf\s+(?:meine\s+|unsere\s+)?(?:freigabe|zustimmung|bestätigung|genehmigung)\b/i;
-  if (frage && freigabe.test(t)) return true;
-  // «in der Warteschlange», «meine Warteschlange», aber keine Warteschlange an einem Ort
-  const warteschlange = /\b(?:der|die|meine[rn]?|deine[rn]?|ihre[rn]?|unsere[rn]?)\s+warteschlange\b(?!\s+(?:am|an|beim|bei|im|in|vor|von|vom|auf|zu[mr]?|für|der|des)\b)/i;
-  if (frage && warteschlange.test(t)) return true;
-  // «was wartet (noch) auf mich», «welche Mails warten auf uns»; nicht «wer wartet», «wartet der Bus», kein Ort dazwischen
-  const wartetAufMich = new RegExp(String.raw`${SUBJEKT_WARTESCHLANGE}${FUELLWORT}\s+warte[nt]?\b(?:(?!\b(?:im|am|beim|bei|vor|unten|oben|draussen|draußen)\b).)*\bauf\s+(?:mich|uns)\b`, "i");
-  if (wartetAufMich.test(t)) return true;
-  // «was muss ich (noch) bestätigen», «welche Mails soll ich freigeben», «gibt es etwas zu genehmigen»
-  const zuPruefen = new RegExp(
-    String.raw`${SUBJEKT_WARTESCHLANGE}(?:\s+(?:muss|müsste|soll|sollte|kann|darf)\s+ich)?${FUELLWORT}\s+(?:zu\s+${PRUEFVERB}|${PRUEFVERB}|abzusegnen|zuzustimmen|freizugeben)\b`,
-    "i",
-  );
-  if (zuPruefen.test(t)) return true;
-  const offen = String.raw`(?:offen(?:e[nrs]?)?|wartend\w*|warte[nt]?)`;
-  const auftraege = new RegExp(String.raw`\b${offen}\b.*\bauftr[aä]g|\bauftr[aä]g\w*\b.*\b${offen}\b`, "i");
-  if (auftraege.test(t)) return true;
-  const vorbereitet = /\b(?:mails?|nachrichten?|auftr[aä]g\w*|entw[uü]rfe?|termine?)\b.*\bvorbereitet\b|\bvorbereitet\w*\s+(?:mails?|nachrichten?|auftr[aä]g\w*|entw[uü]rfe?)\b/i;
-  if (vorbereitet.test(t)) return true;
-  // «was ist schon freigegeben», «welche Aufträge sind freigegeben»
-  return new RegExp(String.raw`${SUBJEKT_WARTESCHLANGE}\b.*\bfreigegeben\b`, "i").test(t);
-}
-
-/** Für den Vergleich: klein, Umlaute ausgeschrieben («Müller» = «mueller»), alles ausser Buchstaben und Ziffern als ein Leerzeichen */
-const normiert = (t: string): string =>
-  t.toLowerCase().replace(/ä/g, "ae").replace(/ö/g, "oe").replace(/ü/g, "ue").replace(/ß/g, "ss")
-    .normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]+/g, " ").trim();
-
-/** Teile vor dem @, die keinen Menschen nennen (info@, kontakt@ …) */
-const ALLGEMEINE_POSTFAECHER = new Set(["info", "kontakt", "contact", "office", "mail", "email", "hallo", "hello", "support", "admin", "service", "team", "noreply", "sales", "verkauf", "buchhaltung", "empfang", "zentrale"]);
-
-/**
- * Markante Eingaben eines offenen Auftrags, nicht Allerweltswörter: `roh` (klein, als Teilstring gesucht) Adressen,
- * Domains, URLs, Hosts, entity_id und Pfade; `woerter` (normiert, als ganze Wortfolge gesucht) Namen aus der
- * Mail-Adresse (ab 4 Zeichen), der Teil einer entity_id nach dem Punkt (ab 6), Wortpaare aus kurzen Feldern wie
- * Betreff, Titel, Ort (zusammen ab 12 Zeichen), Wortdreier aus langen Feldern wie dem Mailtext, ein langes Einzelwort.
- */
-function auftragsMerkmale(input: unknown): { roh: string[]; woerter: string[] } {
-  const roh: string[] = [];
-  const woerter: string[] = [];
-  const texte: string[] = [];
-  const sammeln = (x: unknown, tiefe: number): void => {
-    if (texte.length >= 100) return;
-    if (typeof x === "string") texte.push(x.slice(0, 4000));
-    else if (x && typeof x === "object" && tiefe < 4) for (const v of Object.values(x)) sammeln(v, tiefe + 1);
-  };
-  sammeln(input, 0);
-  for (const wert of texte) {
-    for (const stueck of wert.split(/[\s,;<>()"'«»]+/)) {
-      const s = stueck.toLowerCase().replace(/^[.:]+|[.:]+$/g, "");
-      // Adresse, URL, entity_id, Datei oder Domain; keine Abkürzung («z.B.»), Zahl oder Uhrzeit («14.30»)
-      if (s.length < 5 || !/[a-z]/.test(s) || !/@|_|:\/\/|[a-z0-9]\.[a-z]/.test(s)) continue;
-      roh.push(s);
-      const mail = /^([^@]+)@(.+)$/.exec(s);
-      if (mail) {
-        roh.push(mail[2]!);
-        for (const teil of mail[1]!.split(/[._+-]+/)) if (teil.length >= 4 && !ALLGEMEINE_POSTFAECHER.has(teil) && !/^\d+$/.test(teil)) woerter.push(normiert(teil));
-        continue;
-      }
-      const url = /^[a-z][a-z0-9+.-]*:\/\/(?:www\.)?([^/:?#]+)/.exec(s);
-      if (url && url[1]!.includes(".")) roh.push(url[1]!);
-      const entity = /^[a-z_]+\.([a-z0-9_]+)$/.exec(s);
-      if (entity && entity[1]!.length >= 6) woerter.push(normiert(entity[1]!.replace(/_/g, " ")));
-    }
-    const w = normiert(wert).split(" ").filter(Boolean);
-    if (w.length === 1 && w[0]!.length >= 12) woerter.push(w[0]!);
-    const lang = wert.length > 80;
-    const n = lang ? 3 : 2;
-    for (let i = 0; i + n <= w.length; i++) {
-      const folge = w.slice(i, i + n);
-      if (folge.some((x) => x.length < (lang ? 4 : 3))) continue;
-      const phrase = folge.join(" ");
-      if (phrase.length >= 12) woerter.push(phrase);
-    }
-  }
-  return { roh, woerter };
-}
-
-/**
- * Nennt die Antwort Einzelheiten offener Aufträge? Werkzeugname («mail_senden», auch mit Leerzeichen) oder markante
- * Eingaben (auftragsMerkmale: Empfänger, Betreff, Titel, Ort, entity_id, URL), auch ohne Werkzeugnamen («die Antwort an
- * Herrn Müller zur Offerte Zutrittskontrolle Basel»). Dann geht sie bei ALEXA_FREIGABEN_DETAILS=off nicht über Amazon;
- * Alexa nennt stattdessen nur den Stand. Die Kanalnotiz allein ist nur eine Anweisung, der Verlauf trägt die Eingaben.
- */
-function nenntAuftragsdetails(antwort: string): boolean {
-  const t = antwort.toLowerCase();
-  const wortweise = ` ${normiert(antwort)} `;
-  return offeneAuftraege().some((a) => {
-    const name = a.tool.toLowerCase();
-    if (t.includes(name) || (name.includes("_") && t.includes(name.replace(/_/g, " ")))) return true;
-    const { roh, woerter } = auftragsMerkmale(a.input);
-    return roh.some((r) => t.includes(r)) || woerter.some((w) => w && wortweise.includes(` ${w} `));
-  });
-}
-
 // =====================================================================
 // Handler
 // =====================================================================
@@ -318,40 +188,33 @@ const Frage: RequestHandler = {
   handle: async (i) => {
     const frage = Alexa.getSlotValue(i.requestEnvelope, "frage")?.trim();
     if (!frage) return sprich(i, "Ich höre.", "Ich höre.");
-    // Was die PIN sein könnte, geht weder an Claude noch in die Historie oder nach Telegram. Nur auditiert, nicht als
-    // Missbrauch gezählt: am Echo spricht jeder im Raum, prüfen lässt sich die PIN hier nicht; fünf gesprochene Zahlen
-    // dürfen keinen Notfall auslösen (wie POST /notfall, notfall.ts).
-    if (pinFoermigLocker(frage) !== undefined) {
-      audit("pin_im_chat", { quelle: "alexa" });
-      return sprich(i, `Die PIN bitte nie sprechen, ${config.anrede}. Nichts gesendet.`);
+    // Was nach der PIN aussieht (pinEingabe), geht weder an Claude noch in die Historie oder nach Telegram; nicht
+    // gezählt: fünf gesprochene Zahlen dürfen nie den Notfall auslösen.
+    if (pinEingabe(frage)) {
+      audit("pin_eingabe", { kanal: "alexa" });
+      return sprich(i, PIN_EINGABE_TEXT);
     }
-    // Nichts freigeben, aber den Stand nennen; Fragen nach der Warteschlange ebenso nicht an Claude
+    // Nichts freigeben, aber den Stand nennen
     if (istFreigabeWunsch(frage)) return sprich(i, [nurSchriftlich(), freigabenStand()]);
-    if (istFreigabeFrage(frage)) return sprich(i, freigabenStand());
     const telegram = Boolean(config.telegramToken && config.telegramOwner);
-    // Echo und späte Antwort geschwärzt (auch die PIN mitten im Satz); im Notaus/Notfall nichts (askWithBudget, sendeAntwort)
-    const echo = pinGeschwaerzt(schwaerze(frage)).slice(0, 60);
-    // Vor dem Zug erfasst: auch nach einem /neu während der Antwort zählt die eigene Frage
-    const verlauf = zugVerlauf(frage);
+    // Echo und späte Antwort ohne Token und Schlüssel; im Notaus/Notfall nichts (askWithBudget, sendeAntwort)
+    const echo = schwaerze(frage).slice(0, 60);
     const later = async (reply: string, eintrag?: object) => {
-      const r = antwortGeschwaerzt(schwaerze(reply), "<PIN>", verlauf());
+      const r = schwaerze(reply);
       if (telegram) await sendeAntwort(`Zu deiner Frage per Alexa («${echo}»):\n\n${r}`, eintrag);
       else console.log("Antwort ohne Telegram-Zustellung:", r);
     };
-    // Ohne Einzelheiten (Standard): Claude sieht zu offenen Aufträgen nur Anzahl und Nummern, samt Kanalnotiz
-    const ohneDetails = !config.alexaFreigabenDetails;
-    const reply = await askWithBudget(frage, config.alexaBudgetMs, hooks, later, ohneDetails ? { freigabenNurNummern: true } : {});
+    // Eigenständig, ohne Chat-Verlauf (nichts aus data/chat.json, nichts hinein); ohne Einzelheiten (Standard) sieht
+    // Claude zu offenen Aufträgen nur Anzahl und Nummern. Die Eingaben offener Aufträge erreichen es so nie.
+    const reply = await askWithBudget(frage, config.alexaBudgetMs, hooks, later, {
+      ohneVerlauf: true,
+      ...(config.alexaFreigabenDetails ? {} : { freigabenNurNummern: true as const }),
+    });
     if (reply === undefined) {
       return sprich(i, telegram ? `Das braucht einen Moment, ${config.anrede}. Das Ergebnis kommt per Telegram.` : "Das braucht einen Moment, ich arbeite weiter.");
     }
-    // Nennt sie trotzdem Einzelheiten offener Aufträge: nicht über Amazon, nur der Stand
-    if (ohneDetails && nenntAuftragsdetails(reply)) {
-      audit("alexa_antwort_ersetzt", { grund: "freigaben_details" });
-      return sprich(i, [`Einzelheiten zu offenen Aufträgen nenne ich hier nicht, ${config.anrede}; sie stehen in Telegram.`, freigabenStand()], "Noch etwas?");
-    }
-    // Auch die rechtzeitige Antwort geschwärzt (sie geht über Amazon und wird im Raum vorgelesen); die PIN nach forSpeech,
-    // damit auch «4*7*1*1» als «4 7 1 1» erkannt wird. Vorgelesen wird «PIN», nicht «kleiner PIN grösser».
-    return sprich(i, Array.from(antwortGeschwaerzt(forSpeech(schwaerze(reply)), "PIN", verlauf())).slice(0, 1500).join(""), "Noch etwas?");
+    // Auch die rechtzeitige Antwort ohne Token und Schlüssel (sie geht über Amazon und wird im Raum vorgelesen)
+    return sprich(i, Array.from(forSpeech(schwaerze(reply))).slice(0, 1500).join(""), "Noch etwas?");
   },
 };
 

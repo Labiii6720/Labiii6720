@@ -110,7 +110,7 @@ describe("Gespräch: Verlauf der letzten fünf Nachrichten", { skip: chrome ? fa
     await page.fill("#chatIn", DEMO_PIN);
     await page.keyboard.press("Enter");
     await page.waitForSelector("#v-gespraech .msg.jv.fehler");
-    assert.equal(await page.textContent("#v-gespraech .msg.jv.fehler .txt"), "Die PIN gehört nicht in den Chat, Sir. Nichts gesendet.");
+    assert.equal(await page.textContent("#v-gespraech .msg.jv.fehler .txt"), "Das sieht aus wie eine PIN, Sir. Ich schicke es nicht weiter.");
     assert.ok(!(await page.$$eval("#v-gespraech .msg .txt", (els) => els.map((e) => e.textContent))).includes(DEMO_PIN));
     assert.deepEqual(await texte(), SICHTBAR);
     // Die erwartete Abweisung (400) meldet Chromium als Konsolenfehler: genau diese eine, sonst nichts
@@ -127,7 +127,7 @@ describe("Gespräch: Verlauf der letzten fünf Nachrichten", { skip: chrome ? fa
     // Was vor dem Abruf angekommen war, steht danach im Verlauf des Servers: diese Einträge weichen ihm.
     // Die abgewiesene PIN-Eingabe kam nie an: ihr Fehlereintrag bleibt stehen
     await page.waitForFunction(() => document.querySelectorAll("#v-gespraech .msg:not(.frueher)").length === 1);
-    assert.equal(await page.textContent("#v-gespraech .msg.jv.fehler:not(.frueher) .txt"), "Die PIN gehört nicht in den Chat, Sir. Nichts gesendet.");
+    assert.equal(await page.textContent("#v-gespraech .msg.jv.fehler:not(.frueher) .txt"), "Das sieht aus wie eine PIN, Sir. Ich schicke es nicht weiter.");
     assert.equal(abrufe.length, vorher + 1, "genau ein neuer Abruf");
     // Die Attrappe hat «Neue Frage» nicht in data/chat.json geschrieben: der Server bleibt die Quelle
     assert.deepEqual(await texte(), SICHTBAR);

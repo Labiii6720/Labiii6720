@@ -155,6 +155,8 @@ async function frageFeld(feld: Feld, bestehend: string | undefined): Promise<str
       sag(`  ✗ ${fehler}${versuch < 3 ? ", bitte nochmals." : "."}`);
       continue;
     }
+    const warnung = e.wert ? feld.warnen?.(e.wert) : undefined;
+    if (warnung) sag(`  ⚠ ${warnung}`);
     if (e.erzeugt && e.wert) {
       sag(`  ✓ Erzeugt: ${e.wert}`);
       sag("    Jetzt in Home Assistant bzw. im Kurzbefehl eintragen – ich zeige ihn nicht nochmals an.");

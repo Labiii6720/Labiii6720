@@ -5,9 +5,8 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
 import type Anthropic from "@anthropic-ai/sdk";
 
-// Befund: Der FrageIntent war der einzige Weg zu Claude ohne PIN-Sperre: «Alexa, frag Butler Jarvis 4711» ging an
-// Claude und in data/chat.json, ungezählt; die späte Antwort stand samt Frage ungeschwärzt in Telegram (auch der
-// Fehlertext). Temp-Ordner, Attrappen, kein Netz.
+// Alexa FrageIntent: was nach der PIN aussieht (pinEingabe), geht weder an Claude noch in data/chat.json oder nach
+// Telegram; Alexa spricht den einen Satz, nie die Eingabe; nie gezählt. Temp-Ordner, Attrappen, kein Netz.
 const temp = mkdtempSync(join(tmpdir(), "jarvis-alexa-pin-"));
 process.chdir(temp);
 process.once("exit", () => rmSync(temp, { recursive: true, force: true }));
@@ -91,28 +90,24 @@ afterEach(() => {
   state.notfall = { aktiv: false };
 });
 
-describe("Alexa FrageIntent: die PIN geht nie an Claude", () => {
-  it("«4711», «4 7 1 1», «4712.»: Hinweis, nichts an Claude, nichts in data/chat.json, nichts nach Telegram; auditiert, nicht gezählt", async () => {
-    for (const t of ["4711", "4 7 1 1", "4712."]) {
-      missbrauchZuruecksetzen();
-      assert.equal(await frage(t), "<speak>Die PIN bitte nie sprechen, Sir. Nichts gesendet.</speak>", t);
-    }
+const PIN_SSML = "<speak>Das sieht aus wie eine PIN, Sir. Ich schicke es nicht weiter.</speak>";
+
+describe("Alexa FrageIntent: PIN-förmige Fragen gehen nie an Claude", () => {
+  it("«4711», «4712», «4 7 1 1», «4712.», «meine PIN ist 4711»: derselbe Satz, nichts an Claude, nichts in data/chat.json, nichts nach Telegram; nicht gezählt", async () => {
+    const eingaben = ["4711", "4712", "4 7 1 1", "4712.", "meine PIN ist 4711"];
+    for (const t of eingaben) assert.equal(await frage(t), PIN_SSML, t);
     await new Promise((r) => setTimeout(r, 20));
     assert.equal(anClaude, 0);
     assert.equal(existsSync(CHAT), false);
     assert.deepEqual(telegram, []);
-    assert.equal(auditZeilen("pin_im_chat").length, 3);
-    assert.ok(auditZeilen("pin_im_chat").every((z) => z.includes('"quelle":"alexa"')));
-    // Am Echo spricht jeder im Raum: kein Beitrag zum Notfall-Zähler
+    assert.equal(auditZeilen("pin_eingabe").length, eingaben.length);
+    assert.ok(auditZeilen("pin_eingabe").every((z) => z.includes('"kanal":"alexa"')));
     assert.equal(auditZeilen("abuse_signal").length, 0);
     assert.ok(!readFileSync(AUDIT, "utf8").includes("4711"));
   });
 
   it("fünf PIN-förmige Alexa-Fragen hintereinander lösen keinen Notfall aus", async () => {
-    // Befund: jeder in Hörweite konnte mit fünf gesprochenen Zahlen Notaus, Werkzeuge aus und «Tokens erneuern» auslösen
-    for (const t of ["1234", "4711", "1.2.5.0.", "9 9 9 9", "0000"]) {
-      assert.equal(await frage(t), "<speak>Die PIN bitte nie sprechen, Sir. Nichts gesendet.</speak>", t);
-    }
+    for (const t of ["1234", "4711", "9 9 9 9", "0000", "47-11"]) assert.equal(await frage(t), PIN_SSML, t);
     await new Promise((r) => setTimeout(r, 20));
     assert.equal(Boolean(state.notfall?.aktiv), false, "kein Notfall");
     assert.equal(Boolean(state.paused), false, "kein Notaus");
@@ -120,37 +115,33 @@ describe("Alexa FrageIntent: die PIN geht nie an Claude", () => {
     assert.deepEqual(telegram, [], "kein Alarm nach Telegram");
   });
 
-  it("die rechtzeitige Antwort ist geschwärzt, bevor Alexa sie vorliest (auch «4*7*1*1»)", async () => {
-    // Befund: innerhalb des Budgets ging die Antwort roh über Amazon, nach dem Budget geschwärzt per Telegram.
-    // Geschwärzt wird, was der Nutzer selbst in PIN-Form sagte; vorgelesen «PIN» statt «&lt;PIN&gt;»
-    claudeAntwort = "Die 4711 gilt noch, Sir. Alt war 4*7*1*1, Schlüssel sk-ant-abcdefghijkl123.";
-    const s = await frage("ob die 4711 noch gilt");
+  it("Fehltreffer gehen an Claude: Uhrzeit, Betrag, Datum, Telefonnummer, Satz ohne PIN-Wort", async () => {
+    for (const t of ["14.30", "12.50", "25.10.2026", "079 123 45 67", "Termin um 1430 mit Müller"]) assert.notEqual(await frage(t), PIN_SSML, t);
+    assert.equal(anClaude, 5);
+  });
+
+  it("die rechtzeitige Antwort: Zahlen bleiben lesbar, Schlüssel geschwärzt", async () => {
+    claudeAntwort = "Die Postleitzahl von Basel ist 4051, Sir. Schlüssel sk-ant-abcdefghijkl123.";
+    const s = await frage("welche Postleitzahl hat Basel");
     assert.equal(anClaude, 1);
-    assert.ok(!/4\D{0,2}7\D{0,2}1\D{0,2}1/.test(s), s);
     assert.ok(!s.includes("abcdefghijkl"), s);
-    assert.ok(!s.includes("&lt;PIN&gt;"), s);
-    assert.match(s, /^<speak>Die PIN gilt noch, Sir\. Alt war PIN, Schlüssel sk-ant-&lt;schlüssel/);
+    assert.match(s, /^<speak>Die Postleitzahl von Basel ist 4051, Sir\. Schlüssel sk-ant-&lt;schlüssel/);
     assert.deepEqual(telegram, []);
   });
 
-  it("ein Satz mit der PIN geht an Claude; die späte Antwort in Telegram ist samt Echo geschwärzt", async () => {
+  it("die späte Antwort in Telegram samt Echo, der Fehlertext ohne Zugangsdaten", async () => {
     config.alexaBudgetMs = 5;
     claudeVerzoegerung = 40;
-    claudeAntwort = "Die 4711 gilt noch, Sir.";
-    assert.match(await frage("ob die 4711 noch gilt"), /Das Ergebnis kommt per Telegram/);
+    claudeAntwort = "Bestellung 1042 ist unterwegs, Sir.";
+    assert.match(await frage("wo ist Bestellung 1042"), /Das Ergebnis kommt per Telegram/);
     await warteAufTelegram();
-    assert.equal(anClaude, 1);
-    assert.deepEqual(telegram, ["Zu deiner Frage per Alexa («ob die <PIN> noch gilt»):\n\nDie <PIN> gilt noch, Sir."]);
-  });
+    assert.deepEqual(telegram, ["Zu deiner Frage per Alexa («wo ist Bestellung 1042»):\n\nBestellung 1042 ist unterwegs, Sir."]);
 
-  it("auch der Fehlertext der späten Antwort ist geschwärzt", async () => {
-    config.alexaBudgetMs = 5;
-    claudeVerzoegerung = 40;
-    claudeFehler = new Error("kaputt bei 4 7 1 1");
+    telegram.length = 0;
+    claudeFehler = new Error("kaputt mit Bearer abcdefghijklmnop123");
     await frage("ob die Zahl noch gilt");
     await warteAufTelegram();
     assert.equal(telegram.length, 1);
-    assert.ok(!/4\s*7\s*1\s*1/.test(telegram[0]!), telegram[0]);
-    assert.match(telegram[0]!, /Das hat nicht geklappt: kaputt bei <PIN>$/);
+    assert.match(telegram[0]!, /Das hat nicht geklappt: kaputt mit Bearer <token>$/);
   });
 });

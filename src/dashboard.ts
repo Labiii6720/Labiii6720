@@ -1,7 +1,7 @@
 import { timingSafeEqual } from "node:crypto";
 import { readFileSync } from "node:fs";
 import type { NextFunction, Request, Response } from "express";
-import { antwortGeschwaerzt, askWithBudget, chatHinweis, letzteNachrichten, pinGeschwaerzt, zugVerlauf } from "./agent.js";
+import { askWithBudget, chatHinweis, letzteNachrichten } from "./agent.js";
 import { audit } from "./audit.js";
 import { allWachen, bedingungWert, cameras, camerasNichtGeladen, dynamicWachen, neueWacheId, pruefeWache, ruheMinuten, saveWachen, snapshot, WACHEN_UNLESBAR, wacheZustand, wachenNichtGeladen, type Wache } from "./cameras.js";
 import { verbrauchVerlauf } from "./claude.js";
@@ -14,7 +14,8 @@ import { protokollFesthalten, protokolle, protokollGesperrt, protokollNamens, ru
 import { AUFTRAEGE_UNLESBAR, auftraege, auftraegeNichtGeladen, createAuftrag, getAuftrag, offeneAuftraege, type Auftrag, type Status } from "./queue.js";
 import { gesundheit, schwaerze } from "./robust.js";
 import { save, state, type Mode } from "./state.js";
-import { approveAuftrag, auftragLaeuft, denyAuftrag, hooks, notausAn, notausAus, pinFoermigLocker, pinGesperrtText, pinPruefen, pinRatenZaehlen, pinSperreRest, sendeAntwort } from "./telegram.js";
+import { PIN_EINGABE_TEXT, pinEingabe } from "./pin.js";
+import { approveAuftrag, auftragLaeuft, denyAuftrag, hooks, notausAn, notausAus, pinGesperrtText, pinPruefen, pinSperreRest, sendeAntwort } from "./telegram.js";
 import { vorgaenge, vorgaengeNichtGeladen } from "./vorgaenge.js";
 import { naechsterLauf, neueZeitplanId, normaleTage, pruefeZeitplan, saveZeitplaene, ZEITPLAENE_UNLESBAR, zeitplaene, zeitplaeneNichtGeladen, zeitplanZustand, type Zeitplan } from "./zeitplaene.js";
 
@@ -180,25 +181,19 @@ export async function chat(req: Request, res: Response): Promise<void> {
     await ausloesen("Über die Kommandozentrale ausgelöst.");
     return void res.json({ ok: true, reply: "🚨 Notfall ausgelöst." });
   }
-  // Wie in Telegram: was die PIN sein könnte (richtig oder nicht, gleiche Antwort), geht weder an Claude noch in die
-  // Historie oder nach Telegram. Gehört in den PIN-Dialog der Freigabe. Auch mit Satzzeichen am Ende («4711.»).
-  if (pinFoermigLocker(text) !== undefined) {
-    audit("pin_im_chat", { quelle: "dashboard" });
-    pinRatenZaehlen(text);
-    return void res.status(400).json({ ok: false, error: "pin", text: "Die PIN gehört nicht in den Chat, Sir. Nichts gesendet." });
+  // Wie in Telegram: was nach der PIN aussieht (pinEingabe), geht weder an Claude noch in die Historie oder nach
+  // Telegram; gleiche Antwort, nicht gezählt.
+  if (pinEingabe(text)) {
+    audit("pin_eingabe", { kanal: "dashboard" });
+    return void res.status(400).json({ ok: false, error: "pin", text: PIN_EINGABE_TEXT });
   }
   if (notfallAktiv()) return void res.status(423).json(NOTFALL_GESPERRT);
   audit("chat", { quelle: "dashboard", zeichen: text.length });
-  // Echo und späte Antwort gehen nach Telegram: die PIN darin (etwa mitten in einem Satz, von Claude wiederholt) geschwärzt
-  const echo = pinGeschwaerzt(schwaerze(text)).slice(0, 60);
-  // Im Notaus/Notfall nichts davon (askWithBudget, sendeAntwort). Verlauf vor dem Zug erfasst: ein /neu während der
-  // Antwort leert sonst, wogegen geschwärzt wird (zugVerlauf)
+  // Echo und Antworten ohne Token und Schlüssel; im Notaus/Notfall nichts davon (askWithBudget, sendeAntwort)
+  const echo = schwaerze(text).slice(0, 60);
   const frage = `[Kommandozentrale] ${text}`;
-  const verlauf = zugVerlauf(frage);
-  const reply = await askWithBudget(frage, _chatFrist.ms, hooks, (r, eintrag) => sendeAntwort(`Zur Frage aus der Zentrale («${echo}»):\n\n${antwortGeschwaerzt(schwaerze(r), "<PIN>", verlauf())}`, eintrag));
-  // Auch die rechtzeitige Antwort geschwärzt (die PIN, von Claude wiederholt, gehört nicht auf den Bildschirm);
-  // Zahlen aus Werkzeugen (Bestellung, PLZ, Jahr) bleiben lesbar (antwortGeschwaerzt)
-  res.json({ ok: true, reply: reply === undefined ? "Das braucht länger, die Antwort kommt per Telegram." : antwortGeschwaerzt(schwaerze(reply), "<PIN>", verlauf()), queued: reply === undefined });
+  const reply = await askWithBudget(frage, _chatFrist.ms, hooks, (r, eintrag) => sendeAntwort(`Zur Frage aus der Zentrale («${echo}»):\n\n${schwaerze(r)}`, eintrag));
+  res.json({ ok: true, reply: reply === undefined ? "Das braucht länger, die Antwort kommt per Telegram." : schwaerze(reply), queued: reply === undefined });
 }
 
 /**

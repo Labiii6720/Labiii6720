@@ -161,7 +161,7 @@ describe("gesture.js: Befunde im Browser", { skip: chrome ? false : "kein Chromi
     const warten = new Promise<void>((r) => { freigeben = r; });
     await page.route("**/events", async (r) => {
       await warten;
-      await r.fulfill({ status: 400, contentType: "application/json", body: JSON.stringify({ ok: false, error: "pin", text: "Die PIN gehört nicht in den Chat, Sir. Nichts gesendet." }) });
+      await r.fulfill({ status: 400, contentType: "application/json", body: JSON.stringify({ ok: false, error: "pin", text: "Das sieht aus wie eine PIN, Sir. Ich schicke es nicht weiter." }) });
     });
     const anfrage = page.waitForRequest("**/events");
     await sage(page, "4 7 1 1");
@@ -170,7 +170,7 @@ describe("gesture.js: Befunde im Browser", { skip: chrome ? false : "kein Chromi
     assert.equal(await page.textContent("#toast"), "» …");
     assert.equal(await page.textContent("#reply"), "› …");
     freigeben();
-    await page.waitForFunction(() => document.getElementById("reply")?.textContent === "Die PIN gehört nicht in den Chat, Sir. Nichts gesendet.");
+    await page.waitForFunction(() => document.getElementById("reply")?.textContent === "Das sieht aus wie eine PIN, Sir. Ich schicke es nicht weiter.");
     const texte = await lies(page, "__texte");
     assert.ok(texte.length > 0);
     assert.deepEqual(texte.filter((t) => /\d/.test(t)), [], JSON.stringify(texte));

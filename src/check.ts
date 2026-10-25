@@ -3,7 +3,7 @@ import { existsSync } from "node:fs";
 import { config, opt } from "./config.js";
 import { istNurLesen, sicherungVorhanden } from "./datei.js";
 import { gesundheit, schwaerze } from "./robust.js";
-import { pruefeZeitfenster } from "./setup.js";
+import { pinWarnung, pruefeZeitfenster } from "./setup.js";
 import { day, state, stateNichtGeladen, zustandDefekt } from "./state.js";
 
 /**
@@ -218,6 +218,11 @@ export async function selbsttest(nur?: string[], beiBefund?: (b: Befund) => void
     if (!gesten.mediapipeOrdner()) throw new Error("Handmodell ok, aber Paket @mediapipe/tasks-vision fehlt: npm ci");
     return `${gesten.MODELL_PFAD} vorhanden, Prüfsumme ok`;
   }, "Handmodell fehlt: npm run gesten:modell");
+  await lauf("PIN", Boolean(config.pin), async () => {
+    const warnung = pinWarnung(config.pin!);
+    if (warnung) throw new Error(warnung);
+    return "mit Ziffern: PIN-förmige Eingaben gehen nirgends hin";
+  }, "keine PIN (JARVIS_PIN)");
   await lauf("Sicherheit", true, async () => {
     const warn: string[] = [];
     if (!config.pin) warn.push("keine PIN (JARVIS_PIN)");

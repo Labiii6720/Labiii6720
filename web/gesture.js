@@ -30,9 +30,13 @@ function toast(msg) {
 
 function status(text, klasse = "off") { $("st").textContent = text; $("st").className = klasse; }
 
-/** Sieht das Transkript nach einer gesprochenen PIN aus («4 7 1 1», «47-11.»)? Ohne Kenntnis der PIN: nur 4–12 Ziffern. */
+/**
+ * Sieht das Transkript nach einer PIN aus («4711», «4 7 1 1», «47-11.»)? Der Browser kennt weder PIN noch Länge: nur 4–8
+ * Ziffern, ggf. in Gruppen mit Leerzeichen oder Bindestrich. Was an Claude geht, entscheidet der Server (pin.ts).
+ */
 function pinVerdacht(t) {
-  return /^\d{4,12}$/.test(String(t).replace(/[\s.,;:!?'"«»‹›„“”‚‘’`\-–—]/g, ""));
+  const s = String(t).replace(/^[\s!«»‹›"'„“”‚‘’]+/, "").replace(/[\s.,!?;:«»‹›"'„“”‚‘’]+$/, "");
+  return /^\d+(?:[ -]\d+)*$/.test(s) && /^\d{4,8}$/.test(s.replace(/\D/g, ""));
 }
 
 // ---------- Jarvis-Brücke ----------
@@ -54,7 +58,7 @@ async function jarvis(text) {
     });
     const data = await res.json().catch(() => null);
     // Hielt der Dienst die Eingabe für die PIN, nicht stehen lassen: nur sein Hinweis erscheint
-    if (data && data.error === "pin") { $("reply").textContent = data.text || "Die PIN gehört nicht in den Chat."; $("jv").textContent = "VERBUNDEN"; $("jv").className = "live"; return; }
+    if (data && data.error === "pin") { $("reply").textContent = data.text || "Das sieht aus wie eine PIN, Sir. Ich schicke es nicht weiter."; $("jv").textContent = "VERBUNDEN"; $("jv").className = "live"; return; }
     if (res.status === 401) return hinweis("Token stimmt nicht, Sir.");
     // Ohne JARVIS_EVENT_TOKEN gibt es /events nicht: HTML-404 statt JSON
     if (res.status === 404 && !data) return hinweis("Ereignisse sind aus (JARVIS_EVENT_TOKEN fehlt), Sir.");

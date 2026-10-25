@@ -184,6 +184,21 @@ describe("scripts/setup.ts (End-zu-End)", () => {
     assert.equal(statSync(join(dir, "workspace")).mode & 0o777, 0o700, "Arbeitsordner vor dem Kindprozess mit 700 angelegt");
   });
 
+  it("PIN ohne Ziffern: Warnung beim Feld und Befund «PIN» in der Prüfung, gespeichert wird sie trotzdem", async () => {
+    const dir = neuesVerzeichnis();
+    const lauf = await fahreRoh(dir, ["Sesamoeffne", "", "", "", "", "", ""], ["--abschnitt", "sicherheit", "--env", join(dir, ".env")]);
+    assert.equal(lauf.code, 0, lauf.out + lauf.err);
+    assert.ok(lauf.out.includes("⚠ PIN ohne Ziffern – bitte eine Ziffern-PIN wählen"), lauf.out);
+    assert.ok(lauf.out.includes("❌ PIN: PIN ohne Ziffern – bitte eine Ziffern-PIN wählen"), lauf.out);
+    assert.ok(!lauf.out.includes("Sesamoeffne"), "PIN nicht in der Konsole");
+    assert.equal(parseEnv(readFileSync(join(dir, ".env"), "utf8")).JARVIS_PIN, "Sesamoeffne");
+    // Mit Ziffern: keine Warnung
+    const zweites = neuesVerzeichnis();
+    const ziffern = await fahreRoh(zweites, ["4711", "", "", "", "", "", ""], ["--abschnitt", "sicherheit", "--ohne-pruefung", "--env", join(zweites, ".env")]);
+    assert.equal(ziffern.code, 0, ziffern.out + ziffern.err);
+    assert.ok(!ziffern.out.includes("PIN ohne Ziffern"), ziffern.out);
+  });
+
   it("Prüfung meldet Fehler, Rückfrage endet am Pipe-Ende: kein Abbruch, Exit 0", async () => {
     const dir = neuesVerzeichnis();
     const lauf = await fahreRoh(dir, ["1234", "", "", "auto", "", "", ""], ["--abschnitt", "sicherheit", "--env", join(dir, ".env")]);

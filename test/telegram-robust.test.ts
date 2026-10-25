@@ -1089,7 +1089,7 @@ describe("Nachprüfung Runde 2: Offset, Neustart, Notaus", () => {
     await bis(() => gesendet().length > 0);
     assert.equal(claudeGefragt, false);
     assert.ok(aufrufe.some((x) => x.method === "deleteMessage"));
-    assert.deepEqual(gesendet(), ["Keine Freigabe wartet auf eine PIN, Sir. Nachricht gelöscht."]);
+    assert.deepEqual(gesendet(), ["Das sieht aus wie eine PIN, Sir. Ich schicke es nicht weiter."]);
     // ebenso im laufenden Modul ohne wartende Freigabe
     let gefragt = false;
     abhaengigkeiten.handleMessage = async () => { gefragt = true; return "ok"; };
@@ -1630,7 +1630,7 @@ describe("Gesamtprüfung Runde 1: Notfall gibt nichts heraus, PIN, Sprachnachric
     assert.ok(aufrufe.some((x) => x.method === "getFile"));
     assert.ok(aufrufe.some((x) => x.method === "deleteMessage"));
     assert.ok(!gesendet().some((t) => t.includes("4711")), "die PIN steht nicht im Chat");
-    assert.deepEqual(gesendet(), ["Die PIN bitte tippen, Sir, nie sprechen. Sprachnachricht gelöscht."]);
+    assert.deepEqual(gesendet(), ["Das sieht aus wie eine PIN, Sir. Ich schicke es nicht weiter."]);
     assert.equal(claude, 0);
   });
 
@@ -1902,7 +1902,7 @@ describe("Gesamtprüfung Runde 3: nur echte PIN-Versuche zählen, /vorgang im No
     // die Freigabe wartet nicht mehr: die PIN wird gelöscht, nichts läuft
     aufrufe = [];
     await handleUpdate(nachricht(9912, "4711"));
-    assert.deepEqual(gesendet(), ["Keine Freigabe wartet auf eine PIN, Sir. Nachricht gelöscht."]);
+    assert.deepEqual(gesendet(), ["Das sieht aus wie eine PIN, Sir. Ich schicke es nicht weiter."]);
     assert.equal(getAuftrag(a.id)?.status, "offen");
     assert.equal(reminders.length, 0);
   });

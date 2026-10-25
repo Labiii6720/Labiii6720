@@ -91,6 +91,25 @@ describe("selbsttest(nur)", () => {
     assert.equal(unbekannt[1].info, "unbekannte Prüfung");
   });
 
+  it("Befund «PIN»: ohne Ziffern Warnung, mit Ziffern ok, ohne PIN «fehlt» – ohne Netz, die PIN steht nie im Befund", async () => {
+    const { config } = await import("../src/config.js");
+    const vorher = config.pin;
+    try {
+      aufrufe = 0;
+      config.pin = "Sesamoeffne";
+      assert.deepEqual(await selbsttest(["PIN"]), [{ name: "PIN", status: "fehler", info: "PIN ohne Ziffern – bitte eine Ziffern-PIN wählen" }]);
+      config.pin = "4711";
+      const ok = await selbsttest(["PIN"]);
+      assert.equal(ok[0]!.status, "ok");
+      assert.ok(!ok[0]!.info.includes("4711"));
+      config.pin = undefined;
+      assert.equal((await selbsttest(["PIN"]))[0]!.status, "fehlt");
+      assert.equal(aufrufe, 0);
+    } finally {
+      config.pin = vorher;
+    }
+  });
+
   it("Prüfung ohne Netz läuft allein (kein fetch)", async () => {
     aufrufe = 0;
     const b = await selbsttest(["Sicherheit"]);

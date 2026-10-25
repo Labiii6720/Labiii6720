@@ -2,7 +2,7 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import { closeSync, constants, mkdirSync, openSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { audit, throttled } from "./audit.js";
 import { basename } from "node:path";
-import { addSystemNote, antwortGeschwaerzt, antwortZurueckhalten, chatHinweis, handleMessage, pausiertText, pinGeschwaerzt, resetHistory, runAuftrag, stufeVerschaerft, zugVerlauf } from "./agent.js";
+import { addSystemNote, antwortZurueckhalten, chatHinweis, handleMessage, pausiertText, resetHistory, runAuftrag, stufeVerschaerft } from "./agent.js";
 import { config } from "./config.js";
 import { AUFTRAEGE_UNLESBAR, auftraegeNichtGeladen, getAuftrag, offeneAuftraege, saveAuftraege, setStatus, type Auftrag } from "./queue.js";
 import { save, state, zustandsHinweis, type Mode } from "./state.js";
@@ -24,6 +24,7 @@ import { berichtText, verdichteJetzt, vorschauText } from "./verdichtung.js";
 import { eintragsHinweise, ladeListe, postausgangEintrag } from "./datei.js";
 import { finanzUebersicht, RECHNUNGEN_UNLESBAR, rechnungen, rechnungenNichtGeladen, wochenberichtText } from "./finanzen.js";
 import { PROFIL_UNLESBAR, profilNichtGeladen } from "./profil.js";
+import { PIN_EINGABE_TEXT, pinEingabe } from "./pin.js";
 
 const API = () => `https://api.telegram.org/bot${config.telegramToken}`;
 /** Ohne Token und Chat-ID geht nichts hinaus (sonst Aufrufe an …/botundefined) und nichts in den Postausgang. */
@@ -743,84 +744,6 @@ function verfallenText(v: NonNullable<typeof pinVerfallen>, sprache: boolean): s
   return `#${v.id} ist nicht mehr offen, Sir. ${sprache ? nieSprechen : "Nachricht gelöscht."}`;
 }
 
-/** Sieht die Eingabe nach einer (vertippten) PIN aus? Kein Befehl, kein Satz, kaum länger als die PIN. */
-function pinAehnlich(eingabe: string): boolean {
-  return eingabe.length > 0 && pinVersuch(eingabe) && eingabe.length <= Math.max(12, (config.pin ?? "").length + 2);
-}
-
-/**
- * Könnte die Eingabe die PIN sein? PIN-ähnlich, mindestens 4 Zeichen und von derselben Art (nur Ziffern; mit Ziffern;
- * ohne Ziffern). Die PIN selbst gehört immer dazu. Ohne wartende Abfrage bekommt alles davon dieselbe Antwort und
- * wird gleich gezählt; sonst verriete die Antwort, welche Eingabe die PIN ist. Reine Klassenprüfung; die Wege zu
- * Claude prüfen über pinFoermigLocker.
- */
-function pinFoermig(eingabe: string): boolean {
-  const pin = config.pin;
-  if (!pin || !pinAehnlich(eingabe) || eingabe.length < Math.min(4, pin.length)) return false;
-  if (/^\d+$/.test(pin)) return /^\d+$/.test(eingabe);
-  return /\d/.test(pin) === /\d/.test(eingabe);
-}
-
-/** Anführungszeichen, die Autokorrektur und Spracherkennung um eine Eingabe setzen */
-const ANFUEHRUNG = `«»‹›"'„“”‚‘’`;
-const RAND_VORN = new RegExp(`^[\\s!${ANFUEHRUNG}]+`);
-const RAND_HINTEN = new RegExp(`[\\s.!?,;:${ANFUEHRUNG}]+$`);
-/** Ziffern mit Trennern dazwischen am Stück: Leerraum, Komma, Punkt, Bindestriche (gesprochene Ziffern, «47-11») */
-const ZIFFERN_TRENNER = /^\d+(?:[\s.,\-–—]+\d+)+$/;
-/** Dasselbe nur mit Leerraum und Bindestrichen («47 11», «47-11») */
-const ZIFFERN_LEER_STRICH = /^\d+(?:[\s\-–—]+\d+)+$/;
-
-/**
- * Ziffern mit Trennern, die als PIN gelten: zusammen genau so viele Ziffern wie die PIN, und entweder einzeln gesetzt
- * («4 7 1 1», «4, 7, 1, 1», «4.7.1.1»: Spracherkennung) oder nur mit Leerraum und Bindestrichen getrennt («47 11»,
- * «47-11»). Nicht: Uhrzeit, Betrag, Datum mit Punkt oder Komma («14.30», «120.50», «25.10.2026»). Gruppen mit Leerraum
- * oder Bindestrich treffen bei passender Ziffernzahl auch Uhrzeit, Spanne, Telefonnummer oder ISO-Datum («14 30»,
- * «14-16», bei zehn Stellen «079 123 45 67», bei acht «2026-10-25»): abgewiesen wie die PIN (pinGeschwaerzt schwärzt
- * dieselbe Klasse), aber nie gezählt (`getrennt`). Hängt nur von der Länge der PIN ab, nie vom Wert.
- */
-function gesprocheneZiffern(t: string, laenge: number): { ziffern: string; getrennt: boolean } | undefined {
-  if (!ZIFFERN_TRENNER.test(t)) return undefined;
-  const gruppen = t.match(/\d+/g) ?? [];
-  const ziffern = gruppen.join("");
-  if (ziffern.length !== laenge) return undefined;
-  if (gruppen.every((g) => g.length === 1)) return { ziffern, getrennt: false };
-  return ZIFFERN_LEER_STRICH.test(t) ? { ziffern, getrennt: true } : undefined;
-}
-
-/** Wie pinFoermigLocker, dazu ob die Fassung nur aus Gruppen mit Leerraum oder Bindestrich stammt (nicht gezählt). */
-function pinFoermigTreffer(eingabe: string): { fassung: string; getrennt: boolean } | undefined {
-  const t = eingabe.trim();
-  const ohneRand = t.replace(RAND_VORN, "").replace(RAND_HINTEN, "");
-  const fassung = [t, t.replace(/[\s.!?,;:]+$/, ""), ohneRand].find(pinFoermig);
-  if (fassung !== undefined) return { fassung, getrennt: false };
-  const pin = config.pin ?? "";
-  if (!/^\d+$/.test(pin)) return undefined;
-  const g = gesprocheneZiffern(ohneRand, pin.length);
-  return g !== undefined && pinFoermig(g.ziffern) ? { fassung: g.ziffern, getrennt: g.getrennt } : undefined;
-}
-
-/**
- * Wie pinFoermig, aber Leerraum und Satzzeichen am Ende («4711.», «4711!», Autokorrektur, Spracherkennung), ein «!»
- * davor (starkes Modell) und Anführungszeichen ändern nichts; bei einer Ziffern-PIN auch Trenner zwischen den Ziffern
- * nicht («4 7 1 1», «47-11», «4, 7, 1, 1.», siehe gesprocheneZiffern). Liefert die PIN-förmige Fassung (fürs Zählen)
- * oder undefined. Für jeden Weg zu Claude: Telegram (Text und Sprache), Gesprächsfeld der Kommandozentrale, /events
- * (Konsole, Kurzbefehl, Sprach-Satellit), Alexa (FrageIntent).
- */
-export function pinFoermigLocker(eingabe: string): string | undefined {
-  return pinFoermigTreffer(eingabe)?.fassung;
-}
-
-/**
- * PIN-förmige Eingabe ohne wartende Abfrage: zählt als Missbrauch (5 in 5 Minuten → Notfall), richtig oder falsch.
- * Nicht bei einer PIN ohne Ziffern: sonst zählte jedes «Danke». Nicht bei Gruppen mit Leerraum oder Bindestrich
- * («14 30», «14-16», «47 11»): die sehen auch wie Uhrzeit, Spanne oder Telefonnummer aus, fünf Antworten auf Rückfragen
- * lösten sonst den Notfall aus. Abgewiesen werden sie trotzdem; die gleiche Antwort verrät nichts.
- */
-export function pinRatenZaehlen(eingabe: string): void {
-  const treffer = pinFoermigTreffer(eingabe);
-  if (treffer !== undefined && !treffer.getrennt && /\d/.test(config.pin ?? "")) abuseSignal("pin");
-}
-
 /** Freigabe von einer anderen Oberfläche (Dashboard). Sensible Aufträge brauchen die PIN im selben Schritt. */
 export async function approveAuftrag(a: Auftrag, pin?: string): Promise<string> {
   if (a.status !== "offen") return `#${a.id} ist bereits ${a.status}.`;
@@ -1153,17 +1076,14 @@ export async function handleUpdate(u: Update): Promise<void> {
     }
     if (!text) return void await sendText("Da habe ich nichts verstanden.");
     spoken = true;
-    // Etwas PIN-Förmiges gesprochen (ohne wartende Freigabe), richtig oder falsch: kein Echo, nie an Claude, gleiche
-    // Antwort und gleich gezählt. Ein Satzzeichen am Ende (Spracherkennung) ändert daran nichts.
-    if (pinFoermigLocker(text) !== undefined) {
-      pendingPin = undefined;
+    // PIN-förmig gesprochen: kein Echo, nie an Claude (wie getippt, unten)
+    if (pinEingabe(text)) {
       await apiRobust("deleteMessage", { chat_id: owner(), message_id: m.message_id }).catch(() => undefined);
-      audit("pin_gesprochen", {});
-      pinRatenZaehlen(text);
-      return void await sendText("Die PIN bitte tippen, Sir, nie sprechen. Sprachnachricht gelöscht.");
+      audit("pin_eingabe", { kanal: "telegram_sprache" });
+      return void await sendText(PIN_EINGABE_TEXT);
     }
-    // Echo geschwärzt (Token, Schlüssel, PIN-Förmiges im Satz nach Klasse); Claude bekommt den Satz unverändert
-    await sendText(`🎙 ${pinGeschwaerzt(schwaerze(text))}`);
+    // Echo ohne Token und Schlüssel; Claude bekommt den Satz unverändert
+    await sendText(`🎙 ${schwaerze(text)}`);
   }
 
   // /weiter bzw. /entwarnung im Notaus ist nie die PIN: die wartende Freigabe verfällt (sie muss nach dem Notaus
@@ -1207,22 +1127,17 @@ export async function handleUpdate(u: Update): Promise<void> {
     return;
   }
 
-  // Ab hier wartet keine Abfrage. Die Antwort hängt nie davon ab, ob die Eingabe die PIN ist: sonst liesse sich die PIN
-  // über den Chat ungezählt durchprobieren, bis die Antwort wechselt.
-  // Abfrage eben verfallen und jetzt etwas PIN-Artiges (richtig, vertippt, verspätet): löschen, nie an Claude.
-  if (verfallen !== undefined && pinAehnlich(text)) {
+  // Ab hier wartet keine Abfrage. Was nach der PIN aussieht (pinEingabe, nur nach Klasse), geht nie an Claude oder in die
+  // Historie; die Antwort hängt nie davon ab, ob es die PIN ist, und gezählt wird nichts.
+  if (pinEingabe(text)) {
     await apiRobust("deleteMessage", { chat_id: owner(), message_id: m.message_id }).catch(() => undefined);
-    audit("pin_verfallen", { id: verfallen.id, grund: verfallen.grund });
-    pinRatenZaehlen(text);
-    return void await sendText(verfallenText(verfallen, false));
-  }
-  // Ohne Abfrage etwas, das die PIN sein könnte (etwa die PIN nach einem Neustart erneut geliefert): löschen, nie an
-  // Claude und in die Historie, gleich gezählt. Ein Satzzeichen am Ende («4711.») ändert daran nichts.
-  if (pinFoermigLocker(text) !== undefined) {
-    await apiRobust("deleteMessage", { chat_id: owner(), message_id: m.message_id }).catch(() => undefined);
-    audit("pin_ohne_freigabe", {});
-    pinRatenZaehlen(text);
-    return void await sendText("Keine Freigabe wartet auf eine PIN, Sir. Nachricht gelöscht.");
+    // Abfrage eben verfallen: der Hinweis dazu (hängt nur vom Auftrag ab, nicht von der Eingabe)
+    if (verfallen !== undefined) {
+      audit("pin_verfallen", { id: verfallen.id, grund: verfallen.grund });
+      return void await sendText(verfallenText(verfallen, false));
+    }
+    audit("pin_eingabe", { kanal: "telegram" });
+    return void await sendText(PIN_EINGABE_TEXT);
   }
 
   if (text.startsWith("/")) {
@@ -1242,8 +1157,6 @@ export async function handleUpdate(u: Update): Promise<void> {
   try {
     let reply: string;
     let eintrag: object | undefined;
-    // Vor dem Zug erfasst: leert ein anderer Kanal währenddessen die Historie (resetHistory), zählt die Frage trotzdem
-    const verlauf = zugVerlauf(text);
     try {
       reply = await abhaengigkeiten.handleMessage(text, hooks, { onAntwort: (e) => void (eintrag = e) });
     } catch (e) {
@@ -1266,10 +1179,8 @@ export async function handleUpdate(u: Update): Promise<void> {
       await sendText(pausiertText()).catch(log);
       return;
     }
-    // Hinaus nur geschwärzt (wie späte Antworten und Verlauf): die gemeinsame Historie kann aus anderen Kanälen eine
-    // PIN im Satz oder ein Token enthalten. Nur was vom Nutzer in PIN-Form stammt (Eingaben, Notizen, Profil),
-    // Bestellnummer, PLZ und Jahr aus Werkzeugen bleiben lesbar (antwortGeschwaerzt). Die Historie bleibt unverändert.
-    const hinaus = antwortGeschwaerzt(schwaerze(reply), "<PIN>", verlauf());
+    // Hinaus ohne Token und Schlüssel (die gemeinsame Historie kann Werkzeugfehler mit Zugangsdaten enthalten)
+    const hinaus = schwaerze(reply);
     // Die Antwort ist bezahlt und in der Historie: scheitert nur Telegram, bleibt sie im Postausgang statt verloren zu gehen.
     const r = await sendeTeile(hinaus, {}, () => state.paused || notfallAktiv());
     if (!r.ok) {

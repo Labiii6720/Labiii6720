@@ -6,8 +6,8 @@ import { afterEach, beforeEach, describe, it } from "node:test";
 import type Anthropic from "@anthropic-ai/sdk";
 import type { Request, Response } from "express";
 
-// Befund: Eine in der Gesten-Konsole gesprochene (oder im Kurzbefehl getippte) PIN ging über POST /events
-// (frage_sync, frage) ungefiltert an Claude und in data/chat.json. Temp-Ordner, Attrappen, kein Netz.
+// POST /events (frage_sync aus Konsole, Kurzbefehl, Satellit; frage aus Home Assistant): was nach der PIN aussieht
+// (pinEingabe), geht weder an Claude noch in data/chat.json; gleiche Antwort, nie gezählt. Temp-Ordner, Attrappen, kein Netz.
 const temp = mkdtempSync(join(tmpdir(), "jarvis-events-pin-"));
 process.chdir(temp);
 process.once("exit", () => rmSync(temp, { recursive: true, force: true }));
@@ -66,7 +66,7 @@ async function sende(body: unknown): Promise<{ status: number; body: any }> {
 }
 const ruhe = async () => { for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r)); };
 
-const PIN_ANTWORT = { ok: false, error: "pin", text: "Die PIN gehört nicht in den Chat, Sir. Nichts gesendet." };
+const PIN_ANTWORT = { ok: false, error: "pin", text: "Das sieht aus wie eine PIN, Sir. Ich schicke es nicht weiter." };
 
 beforeEach(() => {
   setzeWarten(async () => {}, () => 0.5);
@@ -88,9 +88,9 @@ afterEach(() => {
   state.notfall = { aktiv: false };
 });
 
-describe("POST /events: die PIN geht nie an Claude", () => {
-  it("frage_sync aus der Konsole (gesprochen, mit Satzzeichen, mit Leerraum) und als Stimme: 400 pin, nichts an Claude, nichts in data/chat.json", async () => {
-    const eingaben: [string, string | undefined][] = [["4711", undefined], ["4711.", undefined], [" 4711! ", "stimme"], ["4712", undefined]];
+describe("POST /events: PIN-förmige Eingaben gehen nie an Claude", () => {
+  it("frage_sync getippt und gesprochen (kanal «stimme»), richtig oder falsch: 400 mit demselben Text, nichts an Claude, nicht gezählt", async () => {
+    const eingaben: [string, string | undefined][] = [["4711", undefined], ["4711.", undefined], [" 4711! ", "stimme"], ["4712", undefined], ["4 7 1 1", "stimme"], ["meine PIN ist 4711", undefined]];
     for (const [text, kanal] of eingaben) {
       const r = await sende({ event: "frage_sync", text, ...(kanal ? { kanal } : {}) });
       assert.equal(r.status, 400, text);
@@ -100,63 +100,62 @@ describe("POST /events: die PIN geht nie an Claude", () => {
     assert.deepEqual(anClaude, []);
     assert.equal(existsSync(CHAT), false, "kein Eintrag in der Historie");
     assert.deepEqual(telegram, []);
-    assert.equal(auditZeilen("pin_im_chat").length, 4);
-    assert.ok(auditZeilen("pin_im_chat").every((z) => z.includes('"quelle":"events"')));
-    assert.equal(auditZeilen("abuse_signal").length, 3, "getippt zählt wie in Telegram und in der Kommandozentrale, gesprochen nicht");
+    assert.equal(auditZeilen("pin_eingabe").length, eingaben.length);
+    assert.ok(auditZeilen("pin_eingabe").every((z) => z.includes('"kanal":"events"')));
+    assert.equal(auditZeilen("abuse_signal").length, 0, "nie gezählt");
     assert.ok(!readFileSync(AUDIT, "utf8").includes("4711"), "die PIN steht nicht im Audit");
   });
 
-  it("Sprach-Satellit (kanal «stimme») und frage aus Home Assistant: abgewiesen, auditiert, nie gezählt – kein Notfall", async () => {
-    // Befund: Der Satellit reicht jeden erkannten Satz als frage_sync mit kanal «stimme» weiter. Fünf im Raum gesprochene
-    // Zahlen (Gast, Fernseher, Postleitzahl als Antwort auf eine Rückfrage) lösten über abuseSignal den Notfall aus.
-    const vorher = auditZeilen("abuse_signal").length;
-    for (const text of ["4711", "4 7 1 1", "4051", "2026", "4712", "0815"]) {
-      const r = await sende({ event: "frage_sync", text, kanal: "stimme" });
-      assert.equal(r.status, 400, text);
-      assert.deepEqual(r.body, PIN_ANTWORT, text);
+  it("Satellit: zehn gesprochene Zahlen in PIN-Form lösen keinen Notfall aus", async () => {
+    for (let i = 0; i < 10; i++) {
+      const r = await sende({ event: "frage_sync", text: `40${50 + i}`, kanal: "stimme" });
+      assert.equal(r.status, 400);
     }
-    const haus = await sende({ event: "frage", text: "4711" });
-    assert.equal(haus.status, 400);
     await ruhe();
-    assert.equal(auditZeilen("abuse_signal").length, vorher, "nicht als Missbrauch gezählt");
     assert.equal(state.notfall?.aktiv ?? false, false, "kein Notfall");
     assert.equal(state.paused ?? false, false);
-    assert.deepEqual(anClaude, []);
-    assert.deepEqual(telegram, []);
-    // Gegenprobe: getippt (Konsole, Kurzbefehl ohne Kanal) zählt weiter
-    await sende({ event: "frage_sync", text: "4711" });
-    assert.equal(auditZeilen("abuse_signal").length, vorher + 1);
+    assert.equal(auditZeilen("abuse_signal").length, 0);
   });
 
   it("frage (Antwort per Telegram): ebenso abgewiesen, nichts an Claude, nichts nach Telegram", async () => {
-    const r = await sende({ event: "frage", text: "4711?" });
-    assert.equal(r.status, 400);
-    assert.deepEqual(r.body, PIN_ANTWORT);
+    for (const text of ["4711?", "4712"]) {
+      const r = await sende({ event: "frage", text });
+      assert.equal(r.status, 400);
+      assert.deepEqual(r.body, PIN_ANTWORT);
+    }
     await ruhe();
     assert.deepEqual(anClaude, []);
     assert.equal(existsSync(CHAT), false);
     assert.deepEqual(telegram, []);
   });
 
-  it("ein Satz geht weiter an Claude; kommt die Antwort spät per Telegram, stehen Echo und Antwort ohne PIN", async () => {
-    const sofort = await sende({ event: "frage_sync", text: "Wie wird das Wetter?" });
-    assert.equal(sofort.status, 200);
-    assert.equal(sofort.body.reply, "Gern, Sir.");
-    assert.equal(anClaude.length, 1);
+  it("Fehltreffer gehen an Claude: Uhrzeit, Betrag, Datum, Telefonnummer, Satz ohne PIN-Wort", async () => {
+    for (const text of ["14.30", "12.50", "25.10.2026", "079 123 45 67", "Termin um 1430 mit Müller"]) {
+      const r = await sende({ event: "frage_sync", text, kanal: "stimme" });
+      assert.equal(r.status, 200, text);
+    }
+    assert.equal(anClaude.length, 5);
+  });
 
-    // Auch die rechtzeitige Antwort (Konsole, Satellit) ohne PIN, die der Nutzer im Satz nannte
-    claudeAntwort = "Die 4711 gilt noch, Sir.";
-    const geschwaerzt = await sende({ event: "frage_sync", text: "Gilt die 47 11 noch?", kanal: "stimme" });
-    assert.equal(geschwaerzt.status, 200);
-    assert.equal(geschwaerzt.body.reply, "Die <PIN> gilt noch, Sir.");
-    assert.equal(anClaude.length, 2);
+  it("Antworten ohne PIN-Schwärzung, Schlüssel und Token weiter geschwärzt; späte Antwort samt Echo per Telegram", async () => {
+    claudeAntwort = "Die Postleitzahl ist 4051. Schlüssel sk-ant-abcdefgh1234 und Bearer abcdefghijkl, Sir.";
+    const sofort = await sende({ event: "frage_sync", text: "Welche Postleitzahl hat Basel?" });
+    assert.equal(sofort.status, 200);
+    assert.equal(sofort.body.reply, "Die Postleitzahl ist 4051. Schlüssel sk-ant-<schlüssel> und Bearer <token>, Sir.");
 
     claudeVerzoegerung = 4000;
-    claudeAntwort = "Die 4711 merke ich mir nicht, Sir.";
-    const spaet = await sende({ event: "frage_sync", text: "Gilt 4711 noch als PIN?", budget: 1 });
+    claudeAntwort = "Bestellung 1042 ist unterwegs, Sir.";
+    const spaet = await sende({ event: "frage_sync", text: "Wo ist Bestellung 1042?", budget: 1 });
     assert.equal(spaet.body.queued, true);
     for (let i = 0; i < 600 && telegram.length === 0; i++) await new Promise((r) => setTimeout(r, 10));
-    assert.equal(telegram.length, 1);
-    assert.match(telegram[0]!, /^Zu Ihrer Frage von unterwegs \(«Gilt <PIN> noch als PIN\?»\):\n\nDie <PIN> merke ich mir nicht, Sir\.$/);
+    assert.deepEqual(telegram, ["Zu Ihrer Frage von unterwegs («Wo ist Bestellung 1042?»):\n\nBestellung 1042 ist unterwegs, Sir."]);
+  });
+
+  it("frage aus Home Assistant: Antwort per Telegram, Zugangsdaten geschwärzt", async () => {
+    claudeAntwort = "Schlüssel sk-ant-abcdefgh1234 und bot987654321:ZYXwvuTSRqpoNMLkji, Sir.";
+    const r = await sende({ event: "frage", text: "Welche Zugangsdaten stehen im Log?" });
+    assert.equal(r.body.queued, true);
+    for (let i = 0; i < 100 && telegram.length === 0; i++) await new Promise((r) => setTimeout(r, 10));
+    assert.deepEqual(telegram, ["Schlüssel sk-ant-<schlüssel> und bot<token>, Sir."]);
   });
 });

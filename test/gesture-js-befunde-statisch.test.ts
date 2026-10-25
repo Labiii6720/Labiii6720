@@ -29,6 +29,13 @@ describe("gesture.js: Befunde (statisch)", () => {
     assert.doesNotMatch(js, /textContent = "› " \+ text\b/);
   });
 
+  it("pinVerdacht ohne Kenntnis der PIN: 4–8 Ziffern, ggf. mit Leerzeichen oder Bindestrich; Uhrzeit, Betrag, Datum nicht", () => {
+    const quelle = js.slice(js.indexOf("function pinVerdacht("), js.indexOf("\n}\n", js.indexOf("function pinVerdacht(")) + 2);
+    const pinVerdacht = new Function(`${quelle}; return pinVerdacht;`)() as (t: string) => boolean;
+    for (const t of ["4711", "4 7 1 1", "47-11", "4711.", "«4711»", "!4711", "12345678"]) assert.equal(pinVerdacht(t), true, t);
+    for (const t of ["471", "123456789", "14.30", "12.50", "25.10.2026", "079 123 45 67", "Wecker auf 6 Uhr 30", "4,7,1,1"]) assert.equal(pinVerdacht(t), false, t);
+  });
+
   it("Leertaste: nicht auf Knöpfen und Feldern, nicht bei Tastenwiederholung", () => {
     assert.match(js, /if \(e\.code !== "Space" \|\| e\.repeat\) return;/);
     assert.match(js, /closest\("button, input, textarea, select, \[contenteditable\]"\)\) return;/);
