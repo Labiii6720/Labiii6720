@@ -221,15 +221,22 @@ export function kurzFuerStimme(text: string, max = HINWEIS_MAX_ZEICHEN): string 
   return `${(wort >= max / 2 ? schnitt.slice(0, wort) : schnitt).replace(/[\s.;:,!?]+$/, "")}…`;
 }
 
+/** «A», «A und B», «A, B und C» */
+function aufzaehlen(teile: string[]): string {
+  return teile.length < 2 ? teile.join("") : `${teile.slice(0, -1).join(", ")} und ${teile[teile.length - 1]}`;
+}
+
 /**
  * Ein Satz zu den offenen Aufträgen für Alexa, Briefing und Sprachausgabe; leer, wenn keiner offen ist.
  * Bereits gestartete (Status noch «offen», gestartetAm gesetzt) gelten nicht als wartend und bekommen einen eigenen Satz.
  * Höchstens drei werden genannt, der Rest gezählt. Reiner Text, kein SSML (escaped wird in alexa.ts).
+ * `details: false` (Alexa mit ALEXA_FREIGABEN_DETAILS=off): nur Anzahl und Nummern, keine Zusammenfassung –
+ * der Text geht über Amazon (Leitplanke 9). Standard ausführlich (Telegram, TTS, Satellit).
  */
 export function freigabenHinweis(
   auftraege: Auftrag[],
   anrede: string,
-  opts: { form?: "sie" | "du"; dashboard?: boolean } = {},
+  opts: { form?: "sie" | "du"; dashboard?: boolean; details?: boolean } = {},
 ): string {
   // Gestartete Aufträge (laufend oder nach Absturz unklar) warten nicht mehr auf Freigabe; eigener Satz ohne Inhalt
   const offen = auftraege.filter((a) => a.status === "offen" && !a.gestartetAm);
@@ -248,28 +255,38 @@ export function freigabenHinweis(
   const kopf = n === 1
     ? `Ein Auftrag wartet auf ${du ? "deine" : "Ihre"} Freigabe, ${anrede}: `
     : `Es warten ${zahlwort(n)} Aufträge auf ${du ? "deine" : "Ihre"} Freigabe, ${anrede}: `;
-  const genannt = offen.slice(0, HINWEIS_MAX_NENNEN).map((a) => {
-    const was = kurzFuerStimme(a.summary ?? "");
-    return was ? `Nummer ${a.id}, ${was}` : `Nummer ${a.id}`;
-  });
-  const rest = n - genannt.length;
-  const restText = rest > 0 ? `, und ${rest === 1 ? "ein weiterer" : `${zahlwort(rest)} weitere`}` : "";
   const wege = opts.dashboard === false ? "per Telegram" : "per Telegram oder Dashboard";
-  const satz = `${kopf}${genannt.join("; ")}${restText}. Freigeben geht ${wege}.`;
+  const ersteDrei = offen.slice(0, HINWEIS_MAX_NENNEN);
+  const rest = n - ersteDrei.length;
+  const weitere = rest === 1 ? "ein weiterer" : `${zahlwort(rest)} weitere`;
+  let liste: string;
+  if (opts.details === false) {
+    // Nur Nummern: weder Zusammenfassung noch Werkzeug oder Stufe
+    const nummern = ersteDrei.map((a) => `Nummer ${a.id}`);
+    liste = aufzaehlen(rest > 0 ? [...nummern, weitere] : nummern);
+  } else {
+    const genannt = ersteDrei.map((a) => {
+      const was = kurzFuerStimme(a.summary ?? "");
+      return was ? `Nummer ${a.id}, ${was}` : `Nummer ${a.id}`;
+    });
+    liste = `${genannt.join("; ")}${rest > 0 ? `, und ${weitere}` : ""}`;
+  }
+  const satz = `${kopf}${liste}. Freigeben geht ${wege}.`;
   return gestartetText ? `${satz} ${gestartetText}` : satz;
 }
 
 /**
  * Hinweis zu den aktuell offenen Aufträgen mit Anrede, Form und Dashboard aus der Konfiguration.
  * Im Notaus/Notfall keine Inhalte: Freigaben sind gesperrt, und /alexa ist über den Tunnel erreichbar.
+ * `details: false` nur Anzahl und Nummern (Alexa, siehe freigabenHinweis).
  */
-export function aktuellerFreigabenHinweis(): string {
+export function aktuellerFreigabenHinweis(opts: { details?: boolean } = {}): string {
   if (state.paused) {
     return state.notfall?.aktiv
       ? `Notfall aktiv, ${config.anrede}. Freigaben ruhen; aufheben nur mit /entwarnung in Telegram.`
       : `Notaus aktiv, ${config.anrede}. Freigaben ruhen bis /weiter in Telegram.`;
   }
-  return freigabenHinweis(offeneAuftraege(), config.anrede, { form: config.form, dashboard: dashboardErreichbar() });
+  return freigabenHinweis(offeneAuftraege(), config.anrede, { form: config.form, dashboard: dashboardErreichbar(), details: opts.details });
 }
 
 /** Dashboard wirklich eingebunden? Gleiche Bedingung wie in server.ts: ohne JARVIS_EVENT_TOKEN gibt es kein /dashboard. */

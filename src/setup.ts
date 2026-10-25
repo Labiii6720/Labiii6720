@@ -39,6 +39,8 @@ export interface Abschnitt {
   felder: Feld[];
   /** Befund-Namen aus check.ts, die direkt nach dem Abschnitt laufen */
   checks?: string[];
+  /** Download, den der Assistent im Abschnitt anbietet (läuft als Kindprozess im Zielordner) */
+  angebot?: "gesten-modell";
 }
 
 // ---------- Prüffunktionen ----------
@@ -219,6 +221,7 @@ export const ABSCHNITTE: Abschnitt[] = [
       { key: "ALEXA_VOICE", frage: "Andere Stimme", hinweis: "z. B. Hans; leer = Alexa-Stimme", art: "text" },
       { key: "ALEXA_NACHT", frage: "Leise Nachtstimme im Fenster", hinweis: "HH:MM-HH:MM, über Mitternacht möglich; off = nur im Nachtmodus", art: "zeit", standard: "22:00-06:30", pruefen: pruefeZeitfenster },
       { key: "ALEXA_BUDGET_MS", frage: "Wartezeit von Alexa auf eine Antwort (ms)", art: "zahl", standard: "6500", pruefen: pruefeZahl },
+      { key: "ALEXA_FREIGABEN_DETAILS", frage: "Offene Freigaben per Alexa mit Zusammenfassung", hinweis: "off empfohlen = nur Anzahl und Nummern (der Text geht über Amazon)", art: "wahl", wahl: ["off", "on"], standard: "off", pruefen: anAus },
     ],
     checks: ["Alexa-Skill"],
   },
@@ -358,6 +361,15 @@ export const ABSCHNITTE: Abschnitt[] = [
       { key: "WATCHDOG_MINUTEN", frage: "Watchdog: Störung nach so vielen Minuten per Telegram melden", hinweis: "0 = aus", art: "zahl", standard: "10", pruefen: pruefeZahl },
       { key: "ZEITPLAN_NACHHOLEN_MIN", frage: "Verpasste Zeitpläne bis so viele Minuten später nachholen", hinweis: "0 = nur zur Minute", art: "zahl", standard: "60", pruefen: pruefeZahl },
     ],
+  },
+  {
+    name: "gesten",
+    titel: "Gesten-Konsole",
+    beschreibung: "Handtracking unter /gesture, ganz ohne CDN. MediaPipe kommt mit npm ci, das Handmodell (7,8 MB von Google, Prüfsumme fest) einmalig nach vendor/mediapipe/.",
+    optional: true,
+    felder: [],
+    checks: ["Gesten-Modell"],
+    angebot: "gesten-modell",
   },
 ];
 

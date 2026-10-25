@@ -530,6 +530,8 @@ body.abgemeldet .seg-oben, body.abgemeldet .uhr, body.abgemeldet #notausKnopf, b
 .msg.laeuft .laufband { width: 180px; margin: 10px 0 0 16px; }
 .msg.fehler .txt { box-shadow: inset 1px 0 0 var(--krit-text); color: var(--t2); }
 .msg-hinweis { display: flex; gap: 6px; align-items: center; margin: 8px 0 0 16px; font-size: 12.5px; color: var(--t3); }
+.chat-quelle { display: flex; gap: 6px; align-items: center; margin: 0; font-size: 12.5px; color: var(--t3); }
+.msg.frueher .txt { color: var(--t2); }
 .eingabe .knopf[disabled] { opacity: .45; }
 /* Protokoll in Tagesgruppen */
 .prot .vtag { margin: 0; }

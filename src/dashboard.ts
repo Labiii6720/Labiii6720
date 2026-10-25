@@ -1,7 +1,7 @@
 import { timingSafeEqual } from "node:crypto";
 import { readFileSync } from "node:fs";
 import type { NextFunction, Request, Response } from "express";
-import { askWithBudget } from "./agent.js";
+import { askWithBudget, chatHinweis, letzteNachrichten, pinGeschwaerzt } from "./agent.js";
 import { audit } from "./audit.js";
 import { allWachen, bedingungWert, cameras, camerasNichtGeladen, dynamicWachen, neueWacheId, pruefeWache, ruheMinuten, saveWachen, snapshot, WACHEN_UNLESBAR, wacheZustand, wachenNichtGeladen, type Wache } from "./cameras.js";
 import { verbrauchVerlauf } from "./claude.js";
@@ -14,7 +14,7 @@ import { protokollFesthalten, protokolle, protokollGesperrt, protokollNamens, ru
 import { AUFTRAEGE_UNLESBAR, auftraege, auftraegeNichtGeladen, createAuftrag, getAuftrag, offeneAuftraege, type Auftrag, type Status } from "./queue.js";
 import { gesundheit, schwaerze } from "./robust.js";
 import { save, state, type Mode } from "./state.js";
-import { approveAuftrag, auftragLaeuft, denyAuftrag, hooks, notausAn, notausAus, pinGesperrtText, pinPruefen, pinSperreRest, sendText } from "./telegram.js";
+import { approveAuftrag, auftragLaeuft, denyAuftrag, hooks, notausAn, notausAus, pinFoermigLocker, pinGesperrtText, pinPruefen, pinRatenZaehlen, pinSperreRest, sendeAntwort } from "./telegram.js";
 import { vorgaenge, vorgaengeNichtGeladen } from "./vorgaenge.js";
 import { naechsterLauf, neueZeitplanId, normaleTage, pruefeZeitplan, saveZeitplaene, ZEITPLAENE_UNLESBAR, zeitplaene, zeitplaeneNichtGeladen, zeitplanZustand, type Zeitplan } from "./zeitplaene.js";
 
@@ -169,6 +169,9 @@ export async function auftragAction(req: Request, res: Response): Promise<void> 
   res.json({ ok: true, text, status: a.status });
 }
 
+/** Nur für Tests: wie lange /api/chat auf die Antwort wartet, bevor sie per Telegram nachkommt. */
+export const _chatFrist = { ms: 60_000 };
+
 export async function chat(req: Request, res: Response): Promise<void> {
   const text = String((req.body ?? {}).text ?? "").slice(0, 4000).trim();
   if (!text) return void res.status(400).json({ ok: false, error: "text fehlt" });
@@ -177,10 +180,38 @@ export async function chat(req: Request, res: Response): Promise<void> {
     await ausloesen("Über die Kommandozentrale ausgelöst.");
     return void res.json({ ok: true, reply: "🚨 Notfall ausgelöst." });
   }
+  // Wie in Telegram: was die PIN sein könnte (richtig oder nicht, gleiche Antwort), geht weder an Claude noch in die
+  // Historie oder nach Telegram. Gehört in den PIN-Dialog der Freigabe. Auch mit Satzzeichen am Ende («4711.»).
+  if (pinFoermigLocker(text) !== undefined) {
+    audit("pin_im_chat", { quelle: "dashboard" });
+    pinRatenZaehlen(text);
+    return void res.status(400).json({ ok: false, error: "pin", text: "Die PIN gehört nicht in den Chat, Sir. Nichts gesendet." });
+  }
   if (notfallAktiv()) return void res.status(423).json(NOTFALL_GESPERRT);
   audit("chat", { quelle: "dashboard", zeichen: text.length });
-  const reply = await askWithBudget(`[Kommandozentrale] ${text}`, 60_000, hooks, async (r) => void (await sendText(`Zur Frage aus der Zentrale («${text.slice(0, 60)}»):\n\n${r}`)));
+  // Echo und späte Antwort gehen nach Telegram: die PIN darin (etwa mitten in einem Satz, von Claude wiederholt) geschwärzt
+  const echo = pinGeschwaerzt(schwaerze(text)).slice(0, 60);
+  // Im Notaus/Notfall nichts davon (askWithBudget, sendeAntwort)
+  const reply = await askWithBudget(`[Kommandozentrale] ${text}`, _chatFrist.ms, hooks, (r, eintrag) => sendeAntwort(`Zur Frage aus der Zentrale («${echo}»):\n\n${pinGeschwaerzt(schwaerze(r))}`, eintrag));
   res.json({ ok: true, reply: reply ?? "Das braucht länger, die Antwort kommt per Telegram.", queued: reply === undefined });
+}
+
+/**
+ * GET /api/chat/verlauf: die letzten fünf Nachrichten aus dem Chat (nur Text, geschwärzt, gekürzt), älteste zuerst.
+ * Im Notaus keine: eben zurückgehaltene Antworten (runLoop) gehören nicht heraus, bis er aufgehoben ist.
+ */
+export function chatVerlauf(_req: Request, res: Response): void {
+  if (notfallAktiv()) return void res.status(423).json(NOTFALL_GESPERRT);
+  if (state.paused) return void res.json({ ok: true, nachrichten: [], pausiert: true, text: "Notaus aktiv, Sir. Der Verlauf ruht, bis der Notaus aufgehoben ist." });
+  let nachrichten: ReturnType<typeof letzteNachrichten> = [];
+  try {
+    nachrichten = letzteNachrichten(5);
+  } catch (e) {
+    // Zweite Verteidigung: ein Lesefehler leert nur die Anzeige, kein 500 (sonst «Verbindung gestört»)
+    console.error("Chat-Verlauf:", schwaerze(e instanceof Error ? e.message : String(e)));
+  }
+  const hinweis = chatHinweis();
+  res.json({ ok: true, nachrichten, ...(hinweis ? { unlesbar: true, text: hinweis } : {}) });
 }
 
 export async function kameraBild(req: Request, res: Response): Promise<void> {

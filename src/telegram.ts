@@ -2,7 +2,7 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import { closeSync, constants, mkdirSync, openSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { audit, throttled } from "./audit.js";
 import { basename } from "node:path";
-import { addSystemNote, handleMessage, pausiertText, resetHistory, runAuftrag, stufeVerschaerft } from "./agent.js";
+import { addSystemNote, antwortZurueckhalten, chatHinweis, handleMessage, pausiertText, resetHistory, runAuftrag, stufeVerschaerft } from "./agent.js";
 import { config } from "./config.js";
 import { AUFTRAEGE_UNLESBAR, auftraegeNichtGeladen, getAuftrag, offeneAuftraege, saveAuftraege, setStatus, type Auftrag } from "./queue.js";
 import { save, state, zustandsHinweis, type Mode } from "./state.js";
@@ -250,6 +250,23 @@ export async function sendText(text: string, extra: Record<string, unknown> = {}
   const r = await sendeTeile(text, extra);
   if (!r.ok) throw r.fehler;
   return r.messageId;
+}
+
+/**
+ * Späte Antwort von Claude (askWithBudget: Kommandozentrale, /events, Alexa; Ereignis «frage»), wie in handleUpdate:
+ * im Notaus oder Notfall nichts senden; kommt er während des Versands (auch zwischen den Wiederholungen), bleibt der
+ * Rest zurück, nicht im Postausgang, und die Antwort (`eintrag` aus onAntwort) gilt als zurückgehalten. Bei einer
+ * Störung wartet nur der nicht zugestellte Rest im Postausgang.
+ */
+export async function sendeAntwort(text: string, eintrag?: object): Promise<void> {
+  const gesperrt = () => Boolean(state.paused) || notfallAktiv();
+  if (gesperrt()) return antwortZurueckhalten(eintrag);
+  const r = await sendeTeile(text, {}, gesperrt);
+  if (r.ok) return;
+  if (r.abgebrochen || gesperrt()) return antwortZurueckhalten(eintrag);
+  if (fehlerArt(r.fehler) === "client") throw r.fehler;
+  log(r.fehler);
+  ablegen(r.rest);
 }
 
 // ---------- Postausgang ----------
@@ -704,7 +721,8 @@ function pinAehnlich(eingabe: string): boolean {
 /**
  * Könnte die Eingabe die PIN sein? PIN-ähnlich, mindestens 4 Zeichen und von derselben Art (nur Ziffern; mit Ziffern;
  * ohne Ziffern). Die PIN selbst gehört immer dazu. Ohne wartende Abfrage bekommt alles davon dieselbe Antwort und
- * wird gleich gezählt; sonst verriete die Antwort, welche Eingabe die PIN ist.
+ * wird gleich gezählt; sonst verriete die Antwort, welche Eingabe die PIN ist. Reine Klassenprüfung; die Wege zu
+ * Claude prüfen über pinFoermigLocker.
  */
 function pinFoermig(eingabe: string): boolean {
   const pin = config.pin;
@@ -713,12 +731,34 @@ function pinFoermig(eingabe: string): boolean {
   return /\d/.test(pin) === /\d/.test(eingabe);
 }
 
+/** Anführungszeichen, die Autokorrektur und Spracherkennung um eine Eingabe setzen */
+const ANFUEHRUNG = `«»‹›"'„“”‚‘’`;
+const RAND_VORN = new RegExp(`^[\\s!${ANFUEHRUNG}]+`);
+const RAND_HINTEN = new RegExp(`[\\s.!?,;:${ANFUEHRUNG}]+$`);
+/** Zwischen zwei Ziffern: Leerraum, Komma, Punkt, Bindestriche (einzeln gesprochene Ziffern, «47-11») */
+const ZIFFERN_TRENNER = /(?<=\d)[\s.,\-–—]+(?=\d)/g;
+
+/**
+ * Wie pinFoermig, aber Leerraum und Satzzeichen am Ende («4711.», «4711!», Autokorrektur, Spracherkennung), ein «!»
+ * davor (starkes Modell) und Anführungszeichen ändern nichts; bei einer Ziffern-PIN auch Trenner zwischen den Ziffern
+ * nicht («4 7 1 1», «47-11», «4, 7, 1, 1.»). Liefert die PIN-förmige Fassung (fürs Zählen) oder undefined. Für jeden
+ * Weg zu Claude: Telegram (Text und Sprache), Gesprächsfeld der Kommandozentrale, /events (Konsole, Kurzbefehl,
+ * Sprach-Satellit), Alexa (FrageIntent).
+ */
+export function pinFoermigLocker(eingabe: string): string | undefined {
+  const t = eingabe.trim();
+  const ohneRand = t.replace(RAND_VORN, "").replace(RAND_HINTEN, "");
+  const fassungen = [t, t.replace(/[\s.!?,;:]+$/, ""), ohneRand];
+  if (/^\d+$/.test(config.pin ?? "")) fassungen.push(ohneRand.replace(ZIFFERN_TRENNER, ""));
+  return fassungen.find(pinFoermig);
+}
+
 /**
  * PIN-förmige Eingabe ohne wartende Abfrage: zählt als Missbrauch (5 in 5 Minuten → Notfall), richtig oder falsch.
  * Nicht bei einer PIN ohne Ziffern: sonst zählte jedes «Danke». Die gleiche Antwort verrät dort trotzdem nichts.
  */
-function pinRatenZaehlen(eingabe: string): void {
-  if (pinFoermig(eingabe) && /\d/.test(config.pin ?? "")) abuseSignal("pin");
+export function pinRatenZaehlen(eingabe: string): void {
+  if (pinFoermigLocker(eingabe) !== undefined && /\d/.test(config.pin ?? "")) abuseSignal("pin");
 }
 
 /** Freigabe von einer anderen Oberfläche (Dashboard). Sensible Aufträge brauchen die PIN im selben Schritt. */
@@ -1055,12 +1095,11 @@ export async function handleUpdate(u: Update): Promise<void> {
     spoken = true;
     // Etwas PIN-Förmiges gesprochen (ohne wartende Freigabe), richtig oder falsch: kein Echo, nie an Claude, gleiche
     // Antwort und gleich gezählt. Ein Satzzeichen am Ende (Spracherkennung) ändert daran nichts.
-    const gesprochen = [text, text.replace(/[.!?,;:]+$/, "")].find(pinFoermig);
-    if (gesprochen !== undefined) {
+    if (pinFoermigLocker(text) !== undefined) {
       pendingPin = undefined;
       await apiRobust("deleteMessage", { chat_id: owner(), message_id: m.message_id }).catch(() => undefined);
       audit("pin_gesprochen", {});
-      pinRatenZaehlen(gesprochen);
+      pinRatenZaehlen(text);
       return void await sendText("Die PIN bitte tippen, Sir, nie sprechen. Sprachnachricht gelöscht.");
     }
     await sendText(`🎙 ${text}`);
@@ -1117,8 +1156,8 @@ export async function handleUpdate(u: Update): Promise<void> {
     return void await sendText(verfallenText(verfallen, false));
   }
   // Ohne Abfrage etwas, das die PIN sein könnte (etwa die PIN nach einem Neustart erneut geliefert): löschen, nie an
-  // Claude und in die Historie, gleich gezählt.
-  if (pinFoermig(text)) {
+  // Claude und in die Historie, gleich gezählt. Ein Satzzeichen am Ende («4711.») ändert daran nichts.
+  if (pinFoermigLocker(text) !== undefined) {
     await apiRobust("deleteMessage", { chat_id: owner(), message_id: m.message_id }).catch(() => undefined);
     audit("pin_ohne_freigabe", {});
     pinRatenZaehlen(text);
@@ -1141,8 +1180,9 @@ export async function handleUpdate(u: Update): Promise<void> {
   await typing();
   try {
     let reply: string;
+    let eintrag: object | undefined;
     try {
-      reply = await abhaengigkeiten.handleMessage(text, hooks);
+      reply = await abhaengigkeiten.handleMessage(text, hooks, { onAntwort: (e) => void (eintrag = e) });
     } catch (e) {
       log(e);
       // Notaus kam während der Claude-Anfrage (claudeAufruf bricht dann die Wiederholungen ab): der Pausenhinweis
@@ -1157,7 +1197,9 @@ export async function handleUpdate(u: Update): Promise<void> {
       return;
     }
     // Notaus kam nach der Rückgabe von runLoop, aber vor dem Senden: keine Antwort mehr in einen womöglich kompromittierten Chat.
+    // Markiert, damit auch der Verlauf der Kommandozentrale sie nicht zeigt.
     if (state.paused || notfallAktiv()) {
+      antwortZurueckhalten(eintrag);
       await sendText(pausiertText()).catch(log);
       return;
     }
@@ -1165,8 +1207,11 @@ export async function handleUpdate(u: Update): Promise<void> {
     const r = await sendeTeile(reply, {}, () => state.paused || notfallAktiv());
     if (!r.ok) {
       // Notaus während des Versands, auch während der Wiederholungen eines Teils: der Rest geht weder raus
-      // noch in den Postausgang (womöglich kompromittierter Chat)
-      if (r.abgebrochen || state.paused || notfallAktiv()) return;
+      // noch in den Postausgang (womöglich kompromittierter Chat), und der Verlauf der Kommandozentrale zeigt sie nicht
+      if (r.abgebrochen || state.paused || notfallAktiv()) {
+        antwortZurueckhalten(eintrag);
+        return;
+      }
       log(r.fehler);
       // client: Nachricht selbst unbrauchbar, Wiederholen hilft nicht; sonst nur den nicht zugestellten Rest ablegen
       if (fehlerArt(r.fehler) !== "client") ablegen(r.rest);
@@ -1442,6 +1487,7 @@ export const CAMERAS_UNLESBAR =
  */
 export function dateiHinweise(): string[] {
   const zustand = zustandsHinweis();
+  const chat = chatHinweis();
   return [
     ...(zustand ? [zustand] : []),
     ...(profilNichtGeladen ? [PROFIL_UNLESBAR] : []),
@@ -1453,6 +1499,7 @@ export function dateiHinweise(): string[] {
     ...(postausgangNichtGeladen ? [POSTAUSGANG_UNLESBAR] : []),
     ...(rechnungenNichtGeladen ? [RECHNUNGEN_UNLESBAR] : []),
     ...(auftraegeNichtGeladen ? [AUFTRAEGE_UNLESBAR] : []),
+    ...(chat ? [`⚠️ ${chat}`] : []),
     ...eintragsHinweise(),
   ];
 }

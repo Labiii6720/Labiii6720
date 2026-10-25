@@ -57,6 +57,8 @@ export const config = {
   alexaVoice: opt("ALEXA_VOICE"),
   /** Alexa spricht in diesem Fenster leiser (HH:MM-HH:MM, über Mitternacht möglich); off = nur im Nachtmodus */
   alexaNacht: opt("ALEXA_NACHT") ?? "22:00-06:30",
+  /** on = Alexa nennt bei offenen Freigaben auch die Zusammenfassungen; off (Standard) = nur Anzahl und Nummern (Text geht über Amazon) */
+  alexaFreigabenDetails: opt("ALEXA_FREIGABEN_DETAILS") === "on",
   /** busy = Claude sieht nur belegte Zeiten, details = auch Titel und Orte */
   outlookMode: (opt("OUTLOOK_MODE") === "details" ? "details" : "busy") as "busy" | "details",
   /** Ab dieser Uhrzeit wird das Tagesbriefing im Hintergrund vorbereitet */

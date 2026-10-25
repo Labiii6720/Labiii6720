@@ -93,6 +93,14 @@ describe("PIN ohne wartende Abfrage: die Antwort verrät nicht, welche Eingabe s
     assert.deepEqual(await antwortAuf("000000"), richtig);
   });
 
+  it("getippt mit Satzzeichen am Ende («4711.», «4712!», «4711?»): dieselbe Antwort, gelöscht, nie an Claude, gezählt", async () => {
+    const richtig = await antwortAuf("4711");
+    const vorher = missbrauch();
+    for (const t of ["4711.", "4712!", "4711?"]) assert.deepEqual(await antwortAuf(t), richtig, t);
+    assert.equal(missbrauch() - vorher, 3);
+    assert.ok(!existsSync(join(temp, "data", "chat.json")) || !readFileSync(join(temp, "data", "chat.json"), "utf8").includes("4711"));
+  });
+
   it("fünf PIN-Versuche über den Chat lösen den Notfall aus, auch wenn der letzte stimmt", async () => {
     const vorher = missbrauch();
     for (const versuch of ["0000", "0001", "0002", "0003"]) await antwortAuf(versuch);

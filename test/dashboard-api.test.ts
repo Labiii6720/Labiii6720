@@ -937,7 +937,7 @@ describe("server.ts: Routen der Kommandozentrale über HTTP", () => {
     ["PUT", "/api/zeitplaene/1", {}], ["DELETE", "/api/zeitplaene/1"], ["GET", "/api/wachen"], ["POST", "/api/wachen", { kamera: "garten", frage: "x", alle_minuten: 10 }],
     ["PUT", "/api/wachen/1", {}], ["DELETE", "/api/wachen/1"], ["POST", "/api/chat", { text: "Hallo" }], ["POST", "/api/modus", { modus: "nacht" }],
     ["POST", "/api/auftrag", { id: 1, aktion: "nein" }], ["GET", "/api/audit"], ["GET", "/api/finanzen"], ["GET", "/api/kamera/garten"],
-    ["POST", "/api/protokoll", { name: "x" }], ["GET", "/api/geraete"],
+    ["POST", "/api/protokoll", { name: "x" }], ["GET", "/api/geraete"], ["GET", "/api/chat/verlauf"],
   ];
 
   it("Auth: ohne Token, mit falschem Token und mit Query-Token 401", async () => {
@@ -951,6 +951,16 @@ describe("server.ts: Routen der Kommandozentrale über HTTP", () => {
     assert.equal(r.status, 200);
     assert.equal(JSON.parse(r.text).tage.length, 7);
     assert.equal(r.kopf["cache-control"], "no-store");
+  });
+
+  it("GET /api/chat/verlauf ohne data/chat.json: 200 mit leerer Liste, ohne Hinweis, API-Kopfzeilen", async () => {
+    const r = await http("GET", "/api/chat/verlauf", mitToken);
+    assert.equal(r.status, 200);
+    assert.deepEqual(JSON.parse(r.text), { ok: true, nachrichten: [] });
+    assert.equal(r.kopf["cache-control"], "no-store");
+    assert.equal(r.kopf["x-content-type-options"], "nosniff");
+    assert.equal(r.kopf["referrer-policy"], "no-referrer");
+    assert.equal((await http("GET", "/api/chat/verlauf", { "cf-ray": "8a1b2c3d4e5f-ZRH", ...mitToken })).status, 404, "nie über den Tunnel");
   });
 
   it("/dashboard/app.js und app.css nur hinter lanOnly, mit CSP", async () => {
@@ -971,9 +981,15 @@ describe("server.ts: Routen der Kommandozentrale über HTTP", () => {
         assert.equal(r.kopf.allow, undefined, `OPTIONS ${pfad}`);
       }
     }
-    // Die Konsole (EVENTS_VIA_TUNNEL aus): auch GET über den Tunnel 404, aus dem Heimnetz erreichbar
-    assert.equal((await http("GET", "/gesture", { "cf-ray": "8a1b2c3d4e5f-ZRH" })).status, 404);
-    assert.equal((await http("GET", "/gesture")).status, 200);
+    // Die Konsole (EVENTS_VIA_TUNNEL aus): auch GET über den Tunnel 404, aus dem Heimnetz erreichbar – samt ihren Dateien
+    for (const pfad of ["/gesture", "/gesture/app.js", "/gesture/app.css", "/gesture/mp/vision_bundle.mjs", "/gesture/mp/wasm/vision_wasm_internal.wasm", "/gesture/mp/wasm/vision_wasm_nosimd_internal.js"]) {
+      for (const tunnel of [{ "cf-ray": "8a1b2c3d4e5f-ZRH" }, { "cf-connecting-ip": "203.0.113.7" }] as Record<string, string>[]) {
+        assert.equal((await http("GET", pfad, tunnel)).status, 404, `${pfad} über den Tunnel`);
+        assert.equal((await http("OPTIONS", pfad, tunnel)).status, 404, `OPTIONS ${pfad} über den Tunnel`);
+      }
+      assert.equal((await http("GET", pfad)).status, 200, pfad);
+    }
+    assert.equal((await http("GET", "/gesture/mp/hand_landmarker.task", { "cf-ray": "8a1b2c3d4e5f-ZRH" })).status, 404);
     // Aus dem Heimnetz antwortet der Router wie bisher (keine Daten, nur die Methoden)
     assert.equal((await http("OPTIONS", "/api/zeitplaene")).status, 200);
     assert.equal((await http("OPTIONS", "/gesture")).status, 200);

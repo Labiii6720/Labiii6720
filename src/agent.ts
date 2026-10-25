@@ -1,6 +1,6 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { anthropic as claude, claudeAufruf, trackUsage } from "./claude.js";
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { audit } from "./audit.js";
 import { config } from "./config.js";
 import { state } from "./state.js";
@@ -10,14 +10,39 @@ import { ROOT } from "./workspace.js";
 import { persona } from "./persona.js";
 import { beraterPrompt } from "./berater.js";
 import { schwaerze } from "./robust.js";
+import { sichereDefekt } from "./datei.js";
 
-type Msg = Anthropic.MessageParam;
+/** `zurueckgehalten`: im Notaus nicht ausgegebene Antwort (runLoop). Bleibt für Claude, nie in der Anzeige; geht nicht an die API. */
+type Msg = Anthropic.MessageParam & { zurueckgehalten?: true };
+
+/** Ohne das eigene Feld: die API nimmt keine unbekannten Felder an. */
+const fuerApi = (m: Msg): Anthropic.MessageParam => {
+  if (!m.zurueckgehalten) return m;
+  const { zurueckgehalten: _z, ...rest } = m;
+  return rest;
+};
 
 const CHAT_FILE = "data/chat.json";
 const MAX_TURNS = 40;
 
+/** Beim Start vorhanden, aber kein lesbares JSON-Array: der Verlauf beginnt leer (für den Hinweis im Dashboard). */
+export let chatNichtGeladen = false;
+
 function loadHistory(): Msg[] {
-  try { return JSON.parse(readFileSync(CHAT_FILE, "utf8")) as Msg[]; } catch { return []; }
+  let roh: string;
+  try {
+    roh = readFileSync(CHAT_FILE, "utf8");
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== "ENOENT") chatNichtGeladen = true;
+    return [];
+  }
+  try {
+    const h = JSON.parse(roh) as unknown;
+    // Kein Array (von Hand bearbeitet): sonst bräche der erste Chat-Zug an h.push
+    if (Array.isArray(h)) return h as Msg[];
+  } catch { /* unten */ }
+  chatNichtGeladen = true;
+  return [];
 }
 let history: Msg[] = loadHistory();
 
@@ -32,11 +57,124 @@ function dropImages(): void {
   }
 }
 
+/**
+ * War chat.json beim Start unlesbar: vor dem ersten Speichern einmal sichern (`.defekt`, 600). Gelingt das nicht
+ * (etwa EACCES), bleibt die Datei unberührt und der Verlauf bis zum Neustart nur im Speicher.
+ */
+let chatSicherung: { stand: "offen" } | { stand: "gesichert"; pfad: string } | { stand: "entfernt" } | { stand: "gesperrt" } = { stand: "offen" };
+
+/** Hinweis bei unlesbarer chat.json (Dashboard, dateiHinweise), ohne Inhalt; undefined, wenn sie lesbar war. */
+export function chatHinweis(): string | undefined {
+  if (!chatNichtGeladen) return undefined;
+  switch (chatSicherung.stand) {
+    case "gesperrt":
+      return `${CHAT_FILE} war beim Start unlesbar und liess sich nicht sichern, Sir. Ich überschreibe sie nicht; der Verlauf gilt bis zum Neustart nur im Speicher.`;
+    case "gesichert":
+      return `${CHAT_FILE} war beim Start unlesbar, Sir (Sicherung unter ${chatSicherung.pfad}). Der Verlauf beginnt seither neu.`;
+    case "entfernt":
+      return `${CHAT_FILE} war beim Start unlesbar, Sir. Sie wurde inzwischen entfernt; der Verlauf beginnt seither neu.`;
+    default:
+      return `${CHAT_FILE} war beim Start unlesbar, Sir. Vor dem ersten Speichern sichere ich sie unter ${CHAT_FILE}.defekt; der Verlauf beginnt neu.`;
+  }
+}
+
+/** true, wenn gespeichert werden darf; legt dafür bei Bedarf einmal die Sicherung an. */
+function speichernErlaubt(): boolean {
+  if (!chatNichtGeladen || chatSicherung.stand === "gesichert" || chatSicherung.stand === "entfernt") return true;
+  if (chatSicherung.stand === "gesperrt") return false;
+  // Inzwischen entfernt: nichts mehr zu verlieren
+  if (!existsSync(CHAT_FILE)) {
+    chatSicherung = { stand: "entfernt" };
+    return true;
+  }
+  const kopie = sichereDefekt(CHAT_FILE, { gleicheWiederverwenden: true });
+  if (kopie) {
+    chatSicherung = { stand: "gesichert", pfad: kopie };
+    console.error(`Chat-Verlauf: ${CHAT_FILE} war unlesbar, Kopie unter ${kopie}. Der Verlauf beginnt neu.`);
+    return true;
+  }
+  chatSicherung = { stand: "gesperrt" };
+  console.error(`Chat-Verlauf: ${CHAT_FILE} unlesbar und nicht zu sichern – ich überschreibe sie nicht, der Verlauf bleibt bis zum Neustart im Speicher.`);
+  return false;
+}
+
 function saveHistory(): void {
   dropImages();
+  if (!speichernErlaubt()) return;
   mkdirSync("data", { recursive: true, mode: 0o700 });
   writeFileSync(`${CHAT_FILE}.tmp`, JSON.stringify(history), { mode: 0o600 });
   renameSync(`${CHAT_FILE}.tmp`, CHAT_FILE);
+}
+
+export interface ChatNachricht { rolle: "nutzer" | "jarvis"; text: string }
+
+/** Kanal-Präfixe vor Nutzertexten (dashboard.ts, events.ts): in der Anzeige weg. */
+const KANAL_PRAEFIX = /^\[(?:Kommandozentrale|Ereignis aus dem Haus|Kurzbefehl|Kanal: Stimme, die Antwort wird vorgelesen)\]\s*/;
+/** Nicht vom Nutzer: Systemnotizen und automatische Läufe (Zeitplan, Rückblick, Zielcheck). */
+const KEIN_NUTZER = /^\[(?:Systemnotiz|[^\]\n]*läuft automatisch)\]/;
+const MAX_ANZEIGE = 2000;
+
+const textBloecke = (content: unknown): string =>
+  typeof content === "string"
+    ? content
+    : Array.isArray(content)
+      ? content.map((b) => (b && typeof b === "object" && (b as { type?: unknown }).type === "text" && typeof (b as { text?: unknown }).text === "string" ? (b as { text: string }).text : "")).join("")
+      : "";
+
+/**
+ * JARVIS_PIN (ab 4 Zeichen) im Text durch «<PIN>» ersetzen, auch mit Leerraum, Komma, Punkt oder Bindestrich zwischen
+ * den Zeichen («4 7 1 1», «47-11»: Spracherkennung); zweite Schicht hinter pinFoermigLocker (Dashboard-Chat, /events, Alexa).
+ */
+export function pinGeschwaerzt(text: string): string {
+  const pin = config.pin;
+  if (!pin || pin.length < 4) return text;
+  const muster = Array.from(pin).map((z) => z.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("[\\s.,\\-–—]*");
+  return text.replace(new RegExp(muster, "g"), "<PIN>");
+}
+
+/**
+ * Die letzten n Nachrichten mit sichtbarem Text, älteste zuerst: nur Textblöcke, ohne Werkzeug-Schritte (Antworten
+ * mit tool_use sah der Nutzer nie, nur die letzte), ohne im Notaus zurückgehaltene Antworten, ohne Systemnotizen und
+ * automatische Läufe, Kanal-Präfixe entfernt, geschwärzt (auch die PIN) und gekürzt. Liest nur, was übergeben wird
+ * (und config.pin); Einträge unbekannter Form fallen weg.
+ */
+export function sichtbareNachrichten(verlauf: unknown, n = 5): ChatNachricht[] {
+  if (!Array.isArray(verlauf)) return [];
+  const aus: ChatNachricht[] = [];
+  for (let i = verlauf.length - 1; i >= 0 && aus.length < n; i--) {
+    const m = verlauf[i] as { role?: unknown; content?: unknown } | null;
+    if (!m || typeof m !== "object") continue;
+    let text: string;
+    if (m.role === "user") {
+      text = textBloecke(m.content).trim();
+      if (KEIN_NUTZER.test(text)) continue;
+      text = text.replace(KANAL_PRAEFIX, "").trim();
+    } else if (m.role === "assistant") {
+      // Im Notaus zurückgehalten (runLoop, telegram.ts): auch hier nie zeigen
+      if ((m as { zurueckgehalten?: unknown }).zurueckgehalten === true) continue;
+      if (Array.isArray(m.content) && m.content.some((b) => b && typeof b === "object" && (b as { type?: unknown }).type === "tool_use")) continue;
+      text = textBloecke(m.content).trim();
+    } else continue;
+    if (!text) continue;
+    const s = Array.from(pinGeschwaerzt(schwaerze(text)));
+    aus.push({ rolle: m.role === "user" ? "nutzer" : "jarvis", text: s.length > MAX_ANZEIGE ? `${s.slice(0, MAX_ANZEIGE - 1).join("")}…` : s.join("") });
+  }
+  return aus.reverse();
+}
+
+/** Für das Dashboard: die letzten n Nachrichten des Chats (dieselbe Historie, keine Kopie). */
+export const letzteNachrichten = (n = 5): ChatNachricht[] => sichtbareNachrichten(history, n);
+
+/**
+ * Notaus kam nach runLoop, vor oder während des Sendens (telegram.ts): diese Antwort (Eintrag aus RunOptions.onAntwort)
+ * als zurückgehalten markieren, damit sie auch der Verlauf der Kommandozentrale nicht zeigt. Über den Verweis, nicht
+ * «die letzte»: inzwischen kann ein weiterer Zug geantwortet haben.
+ */
+export function antwortZurueckhalten(eintrag: object | undefined): void {
+  const m = eintrag as Msg | undefined;
+  if (!m || m.zurueckgehalten) return;
+  m.zurueckgehalten = true;
+  if (history.includes(m)) saveHistory();
 }
 
 /** Gespräch vergessen (/neu). */
@@ -115,6 +253,8 @@ export interface RunOptions {
   history?: Msg[];
   /** Fortschritt: nach jedem Werkzeugaufruf */
   onStep?: (step: number, tool: string) => void;
+  /** Historien-Eintrag der ausgegebenen Antwort (für antwortZurueckhalten); nicht bei pausiertText() */
+  onAntwort?: (eintrag: object) => void;
 }
 
 /** Verarbeitet eine Nutzernachricht im Chat; Anfragen laufen nacheinander. «!» am Anfang = starkes Modell. */
@@ -156,22 +296,28 @@ async function runLoop(text: string, hooks: AgentHooks, opts: RunOptions & { his
 
   let reply = "";
   let step = 0;
+  let letzte: Msg | undefined;
   for (let loop = 0; loop < maxLoops; loop++) {
     const msg = await claudeAufruf("chat", () =>
       anthropic.messages.create(
-        { model, max_tokens: opts.stark ? 8000 : 2500, system: systemPrompt(), tools: toolParams, messages: h },
+        { model, max_tokens: opts.stark ? 8000 : 2500, system: systemPrompt(), tools: toolParams, messages: h.map(fuerApi) },
         { timeout: 300_000 },
       ),
     );
     trackUsage(msg);
-    h.push({ role: "assistant", content: msg.content as Anthropic.ContentBlockParam[] });
+    const antwort: Msg = { role: "assistant", content: msg.content as Anthropic.ContentBlockParam[] };
+    h.push(antwort);
+    letzte = antwort;
     reply = msg.content.map((b) => (b.type === "text" ? b.text : "")).join("").trim();
 
     const uses = msg.content.filter((b): b is Anthropic.ToolUseBlock => b.type === "tool_use");
     if (msg.stop_reason !== "tool_use" || uses.length === 0) {
       // Notaus/Notfall kam während des letzten Aufrufs: die fertige Antwort kann Daten enthalten und darf nicht
-      // mehr in einen womöglich kompromittierten Chat. Sie bleibt in der Historie, ausgegeben wird nur pausiertText().
+      // mehr in einen womöglich kompromittierten Chat. Sie bleibt in der Historie, ausgegeben wird nur pausiertText();
+      // markiert, damit auch der Verlauf der Kommandozentrale sie nicht zeigt. (Nach Werkzeugrunden unten trägt die
+      // letzte Antwort tool_use und erscheint ohnehin nicht.)
       if (state.paused) {
+        antwort.zurueckgehalten = true;
         if (isChat) saveHistory();
         return pausiertText();
       }
@@ -197,6 +343,7 @@ async function runLoop(text: string, hooks: AgentHooks, opts: RunOptions & { his
     if (loop === maxLoops - 1) reply = `${reply}\n\n(Limit von ${maxLoops} Werkzeugrunden erreicht, Zwischenstand.)`.trim();
   }
   if (isChat) saveHistory();
+  if (letzte) opts.onAntwort?.(letzte);
   return reply || "Erledigt.";
 }
 
@@ -286,15 +433,34 @@ export async function runAuftrag(a: Auftrag, ctx: ToolContext): Promise<string> 
   return typeof out === "string" ? out : out.text;
 }
 
+/** Notaus oder Notfall (state.notfall direkt, wie pausiertText) */
+const gesperrt = (): boolean => Boolean(state.paused) || Boolean(state.notfall?.aktiv);
+
 /**
- * Antwort mit Zeitbudget (für Alexa): kommt sie rechtzeitig, wird sie gesprochen.
- * Sonst läuft die Arbeit weiter und das Ergebnis geht über `later` raus (Telegram).
+ * Antwort mit Zeitbudget (Alexa, Kommandozentrale, /events frage_sync): kommt sie rechtzeitig, geht sie direkt zurück.
+ * Sonst läuft die Arbeit weiter und das Ergebnis geht über `later` raus (Telegram, mit sendeAntwort). Im Notaus oder
+ * Notfall ruft es `later` gar nicht erst auf: weder Antwort noch Pausenhinweis noch Fehlertext, also auch kein Echo der
+ * Frage in einen womöglich übernommenen Chat; die Antwort gilt dann als zurückgehalten. `eintrag` (Historie) braucht
+ * `later` fürs Zurückhalten, falls der Notaus erst während des Versands kommt.
  */
-export async function askWithBudget(text: string, ms: number, hooks: AgentHooks, later: (reply: string) => Promise<void>): Promise<string | undefined> {
-  const work = handleMessage(text, hooks);
+export async function askWithBudget(
+  text: string,
+  ms: number,
+  hooks: AgentHooks,
+  later: (reply: string, eintrag?: object) => Promise<void>,
+): Promise<string | undefined> {
+  let eintrag: object | undefined;
+  const work = handleMessage(text, hooks, { onAntwort: (e) => void (eintrag = e) });
   const timeout = new Promise<undefined>((r) => setTimeout(() => r(undefined), ms).unref());
   const reply = await Promise.race([work, timeout]);
   if (reply !== undefined) return reply;
-  work.then(later).catch((e) => later(`Das hat nicht geklappt: ${e instanceof Error ? e.message : String(e)}`).catch(() => undefined));
+  const fehlerText = (e: unknown) => `Das hat nicht geklappt: ${pinGeschwaerzt(schwaerze(e instanceof Error ? e.message : String(e)))}`;
+  void work
+    .then(
+      (r) => (gesperrt() ? antwortZurueckhalten(eintrag) : later(r, eintrag)),
+      (e) => (gesperrt() ? undefined : later(fehlerText(e))),
+    )
+    // Scheitert der Versand selbst, kein zweiter Versuch mit dessen Fehlertext (ginge ebenso wenig hinaus)
+    .catch((e) => console.error("Späte Antwort nicht zugestellt:", pinGeschwaerzt(schwaerze(e instanceof Error ? e.message : String(e)))));
   return undefined;
 }

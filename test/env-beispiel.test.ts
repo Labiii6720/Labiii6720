@@ -34,6 +34,12 @@ describe(".env.example ↔ gelesene Schlüssel", () => {
     assert.deepEqual(fehlend, [], `fehlen in .env.example: ${fehlend.join(", ")}`);
   });
 
+  it("ALEXA_FREIGABEN_DETAILS: Standard off in .env.example, config.ts schaltet nur mit «on» ein", () => {
+    const config = readFileSync(join(projekt, "src", "config.ts"), "utf8");
+    assert.equal(parseEnv(beispiel).ALEXA_FREIGABEN_DETAILS, "off");
+    assert.match(config, /alexaFreigabenDetails: opt\("ALEXA_FREIGABEN_DETAILS"\) === "on",/);
+  });
+
   it("Preise für /kosten: auskommentiert, Standardwerte wie in config.ts, keine aktiven Werte", () => {
     const config = readFileSync(join(projekt, "src", "config.ts"), "utf8");
     const aktiv = parseEnv(beispiel);

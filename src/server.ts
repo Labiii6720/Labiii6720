@@ -1,5 +1,7 @@
 import express from "express";
 import { timingSafeEqual } from "node:crypto";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ExpressAdapter } from "ask-sdk-express-adapter";
 import { config, opt } from "./config.js";
@@ -12,10 +14,11 @@ import { handleEvent } from "./events.js";
 import { startWatch } from "./watch.js";
 import { handlePanic } from "./notfall.js";
 import {
-  auditTail, auftraegeJson, auftragAction, chat, DASHBOARD_CSP, dashboardAuth, finanzenJson, geraete, kameraBild, kostenJson, modus, notaus, notfallAusloesen, notfallSperre,
+  auditTail, auftraegeJson, auftragAction, chat, chatVerlauf, DASHBOARD_CSP, dashboardAuth, finanzenJson, geraete, kameraBild, kostenJson, modus, notaus, notfallAusloesen, notfallSperre,
   protokollAction, statusJson, wacheAendern, wacheAnlegen, wacheLoeschen, wachenJson, zeitplaeneJson, zeitplanAendern, zeitplanAnlegen, zeitplanLoeschen,
 } from "./dashboard.js";
 import { gesundheit, schwaerze } from "./robust.js";
+import { GESTEN_CSP, MEDIAPIPE_DATEIEN, mediapipeOrdner, modellPfad } from "./gesten.js";
 import { vorgaengeNachNeustart } from "./vorgaenge.js";
 
 const app = express();
@@ -23,8 +26,17 @@ app.disable("x-powered-by");
 
 /** Heimnetz, Tailscale oder localhost. cloudflared verbindet von 127.0.0.1, deshalb zählen zusätzlich die Tunnel-Header. */
 const PRIVATE = /^(::1|::ffff:)?(127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.)|^::1$|^fe80:|^fc|^fd/i;
-/** Nur diese Pfade öffnet EVENTS_VIA_TUNNEL=on (die Konsole ist eine Seite ohne Daten, /events verlangt das Token). */
-const TUNNEL_SCHALTBAR = new Set(["/events", "/gesture"]);
+/** Feste Dateien der Gesten-Konsole (Whitelist, kein express.static); alle ohne Daten. */
+const GESTEN_WEB: Record<string, { datei: string; typ: string }> = {
+  "/gesture/app.js": { datei: "gesture.js", typ: "text/javascript; charset=utf-8" },
+  "/gesture/app.css": { datei: "gesture.css", typ: "text/css; charset=utf-8" },
+};
+const GESTEN_MODELL = "/gesture/mp/hand_landmarker.task";
+/**
+ * Nur diese Pfade öffnet EVENTS_VIA_TUNNEL=on (die Konsole ist eine Seite ohne Daten, /events verlangt das Token).
+ * Die Dateien der Konsole folgen genau ihrer Regel, jeder andere Unterpfad von /gesture bleibt über den Tunnel 404.
+ */
+const TUNNEL_SCHALTBAR = new Set(["/events", "/gesture", ...Object.keys(GESTEN_WEB), ...Object.keys(MEDIAPIPE_DATEIEN), GESTEN_MODELL]);
 /** Tunnel → 404. Dashboard, /status.json und /api/* bleiben auch mit EVENTS_VIA_TUNNEL=on gesperrt (Leitplanke 6). */
 const lanOnly = (req: express.Request, res: express.Response, next: express.NextFunction) => {
   const viaTunnel = Boolean(req.headers["cf-connecting-ip"] || req.headers["cf-ray"]);
@@ -79,10 +91,33 @@ if (config.panicToken) app.post("/notfall", sicher(handlePanic));
 
 // Gesten- und Sprachkonsole (Webcam-Handtracking im Browser). lanOnly auch vor dem Router: sonst beantwortet er
 // OPTIONS (200 + Allow) selbst, und die Konsole wäre über den Tunnel aufzählbar (Leitplanke 6).
+// Alles kommt vom eigenen Server (MediaPipe aus node_modules, Modell aus vendor/), unter strenger CSP: kein fremder Code im
+// Ursprung, der den Token aus localStorage lesen könnte.
 app.use("/gesture", lanOnly);
-app.get("/gesture", lanOnly, (_req, res) => {
-  res.sendFile(fileURLToPath(new URL("../web/gesture.html", import.meta.url)));
-});
+const gestenKopf = (res: express.Response, typ: string) => {
+  res.setHeader("Content-Security-Policy", GESTEN_CSP);
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("Referrer-Policy", "no-referrer");
+  res.setHeader("X-Frame-Options", "DENY");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Content-Type", typ);
+};
+/** Absoluter Pfad oder undefined → 404 (fehlende Datei, Paket nicht installiert) */
+const gestenDatei = (typ: string, pfad: () => string | undefined) => (_req: express.Request, res: express.Response) => {
+  const p = pfad();
+  if (!p || !existsSync(p)) return void res.status(404).end();
+  gestenKopf(res, typ);
+  // Pfade nur aus der Whitelist: auch ein Projektordner unter einem Punkt-Ordner (~/.local/…) liefert aus
+  res.sendFile(p, { dotfiles: "allow" });
+};
+const web = (datei: string) => fileURLToPath(new URL(`../web/${datei}`, import.meta.url));
+app.get("/gesture", lanOnly, gestenDatei("text/html; charset=utf-8", () => web("gesture.html")));
+for (const [pfad, { datei, typ }] of Object.entries(GESTEN_WEB)) app.get(pfad, lanOnly, gestenDatei(typ, () => web(datei)));
+const mp = mediapipeOrdner();
+if (!mp) console.error("Gesten-Konsole: Paket @mediapipe/tasks-vision fehlt (npm ci), Handtracking aus.");
+for (const [pfad, { datei, typ }] of Object.entries(MEDIAPIPE_DATEIEN)) app.get(pfad, lanOnly, gestenDatei(typ, () => (mp ? join(mp, datei) : undefined)));
+// Fehlt das Modell (npm run gesten:modell), 404: die Seite zeigt dann einen Hinweis
+app.get(GESTEN_MODELL, lanOnly, gestenDatei("application/octet-stream", () => modellPfad()));
 
 // Kommandozentrale: der Kern. Seite und API nur aus dem Heimnetz/Tailscale (nie über den Tunnel), API zusätzlich mit Token.
 if (config.dashboard && config.eventToken) {
@@ -115,6 +150,7 @@ if (config.dashboard && config.eventToken) {
   app.get("/status.json", lanOnly, apiKopf, dashboardAuth, sicher(statusJson));
   app.post("/api/auftrag", lanOnly, apiKopf, dashboardAuth, notfallSperre, json, sicher(auftragAction));
   app.post("/api/chat", lanOnly, apiKopf, dashboardAuth, notfallSperre, json, sicher(chat));
+  app.get("/api/chat/verlauf", lanOnly, apiKopf, dashboardAuth, notfallSperre, sicher(chatVerlauf));
   app.post("/api/protokoll", lanOnly, apiKopf, dashboardAuth, notfallSperre, json, sicher(protokollAction));
   app.post("/api/modus", lanOnly, apiKopf, dashboardAuth, notfallSperre, json, sicher(modus));
   app.get("/api/kamera/:name", lanOnly, apiKopf, dashboardAuth, notfallSperre, sicher(kameraBild));

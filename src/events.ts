@@ -1,12 +1,12 @@
 import { timingSafeEqual } from "node:crypto";
 import type { Request, Response } from "express";
-import { addSystemNote, askWithBudget, handleMessage } from "./agent.js";
+import { addSystemNote, askWithBudget, handleMessage, pinGeschwaerzt } from "./agent.js";
 import { save, state, type Mode } from "./state.js";
 import { briefingTeile, briefingText, briefingVerbinden, briefingVersandLaeuft, type BriefingTeile } from "./brain.js";
 import { audit, throttled } from "./audit.js";
 import { config } from "./config.js";
 import { day } from "./state.js";
-import { hooks, sendeSpaeter, sendText, sendVoiceReply } from "./telegram.js";
+import { hooks, pinFoermigLocker, pinRatenZaehlen, sendeAntwort, sendeSpaeter, sendText, sendVoiceReply } from "./telegram.js";
 import { onCameraEvent } from "./watch.js";
 import { abuseSignal, notfallAktiv } from "./notfall.js";
 import { schwaerze } from "./robust.js";
@@ -45,6 +45,18 @@ export const briefingEreignis = {
  */
 function briefingBereit(teile: BriefingTeile | undefined): teile is BriefingTeile {
   return teile !== undefined && teile.bereit !== false && Boolean(teile.text) && day().briefing?.text === teile.text;
+}
+
+/**
+ * Wie in Telegram und im Gesprächsfeld der Kommandozentrale: was die PIN sein könnte (gesprochen in der Konsole, im
+ * Kurzbefehl, auch «4711.»), geht weder an Claude noch in die Historie; gleiche Antwort, gleich gezählt. true = beantwortet.
+ */
+function pinAbweisen(text: string, res: Response): boolean {
+  if (pinFoermigLocker(text) === undefined) return false;
+  audit("pin_im_chat", { quelle: "events" });
+  pinRatenZaehlen(text);
+  res.status(400).json({ ok: false, error: "pin", text: `Die PIN gehört nicht in den Chat, ${config.anrede}. Nichts gesendet.` });
+  return true;
 }
 
 /** Notaus oder Notfall: dann keine Briefing-Daten mehr an Claude oder Telegram. */
@@ -120,9 +132,11 @@ async function briefingNachliefern(schonZugestellt: boolean): Promise<void> {
  *   { "event": "nachricht", "text": "…" }           → Text 1:1 per Telegram (über den Postausgang: im Notfall
  *                                                     zurückgehalten bis /entwarnung, bei Störung nachgereicht)
  *   { "event": "frage", "text": "…" }               → Jarvis bearbeitet den Text mit allen Werkzeugen, Antwort per Telegram
+ *                                                     (geschwärzt; im Notaus/Notfall keine)
  *   { "event": "frage_sync", "text": "…", "budget": 25000, "kanal": "stimme" }
  *                                                   → Antwort kommt direkt zurück (Gesten-Konsole, Siri-Kurzbefehl); dauert es
- *                                                     länger als budget ms, kommt sie per Telegram nach
+ *                                                     länger als budget ms, kommt sie per Telegram nach. Bei frage und
+ *                                                     frage_sync gilt: PIN-förmig → 400 { ok: false, error: "pin", text }
  *   { "event": "kontext", "text": "Angekommen: Arbeit", "modus": "fokus" }
  *                                                   → stiller Hinweis fürs Gespräch, optional Modus wechseln (Kurzbefehl-Automationen)
  *   { "event": "kamera", "kamera": "raum", "label": "person", "zonen": [], "id": "…" } → Kamera-Meldung nach den Regeln in cameras.json
@@ -207,16 +221,23 @@ export async function handleEvent(req: Request, res: Response): Promise<void> {
         break;
       case "frage": {
         if (!text) throw new Error("text fehlt");
+        if (pinAbweisen(text, res)) return;
         res.json({ ok: true, queued: true }); // nicht warten, Jarvis braucht evtl. länger
-        const reply = await handleMessage(`[Ereignis aus dem Haus] ${text}`, hooks);
-        await sendText(reply);
+        let eintrag: object | undefined;
+        const reply = await handleMessage(`[Ereignis aus dem Haus] ${text}`, hooks, { onAntwort: (e) => void (eintrag = e) });
+        // Wie frage_sync: geschwärzt (auch die PIN, von Claude wiederholt); im Notaus/Notfall nichts, auch kein Pausenhinweis
+        await sendeAntwort(pinGeschwaerzt(schwaerze(reply)), eintrag);
         return;
       }
       case "frage_sync": {
         if (!text) throw new Error("text fehlt");
+        if (pinAbweisen(text, res)) return;
         const budget = budgetMs(body.budget);
         const prefix = body.kanal === "stimme" ? "[Kanal: Stimme, die Antwort wird vorgelesen] " : "[Kurzbefehl] ";
-        const reply = await askWithBudget(prefix + text, budget, hooks, async (r) => void (await sendText(`Zu Ihrer Frage von unterwegs («${text.slice(0, 60)}»):\n\n${r}`)));
+        // Echo und späte Antwort gehen nach Telegram: die PIN darin (mitten in einem Satz, von Claude wiederholt) geschwärzt
+        const echo = pinGeschwaerzt(schwaerze(text)).slice(0, 60);
+        // Im Notaus/Notfall nichts davon (askWithBudget, sendeAntwort)
+        const reply = await askWithBudget(prefix + text, budget, hooks, (r, eintrag) => sendeAntwort(`Zu Ihrer Frage von unterwegs («${echo}»):\n\n${pinGeschwaerzt(schwaerze(r))}`, eintrag));
         if (reply === undefined) res.json({ ok: true, queued: true, reply: `Das braucht einen Moment, ${config.anrede}. Die Antwort kommt per Telegram.` });
         else res.json({ ok: true, reply });
         return;

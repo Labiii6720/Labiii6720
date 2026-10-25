@@ -30,8 +30,8 @@ const PRUEF_MS = TEST_MS > 0 ? TEST_MS : 10_000;
 /** Höchstlänge eines Fehlertexts im Befund (pruefe kürzt darauf; listenBefund bleibt darunter). */
 const BEFUND_MAX = 140;
 
-async function pruefe(name: string, eingerichtet: boolean, test: () => Promise<string>): Promise<Befund> {
-  if (!eingerichtet) return { name, status: "fehlt", info: "nicht eingerichtet" };
+async function pruefe(name: string, eingerichtet: boolean, test: () => Promise<string>, fehltInfo = "nicht eingerichtet"): Promise<Befund> {
+  if (!eingerichtet) return { name, status: "fehlt", info: fehltInfo };
   try {
     return { name, status: "ok", info: await test() };
   } catch (e) {
@@ -48,10 +48,10 @@ export async function selbsttest(nur?: string[], beiBefund?: (b: Befund) => void
   const b: Befund[] = [];
   const gewuenscht = nur?.length ? new Set(nur.map((n) => n.trim().toLowerCase())) : undefined;
   const bekannt = new Set<string>();
-  const lauf = async (name: string, eingerichtet: boolean, test: () => Promise<string>) => {
+  const lauf = async (name: string, eingerichtet: boolean, test: () => Promise<string>, fehltInfo?: string) => {
     bekannt.add(name.toLowerCase());
     if (gewuenscht && !gewuenscht.has(name.toLowerCase())) return;
-    const befund = await pruefe(name, eingerichtet, test);
+    const befund = await pruefe(name, eingerichtet, test, fehltInfo);
     b.push(befund);
     beiBefund?.(befund);
   };
@@ -209,6 +209,15 @@ export async function selbsttest(nur?: string[], beiBefund?: (b: Befund) => void
     return `${d.LISTEN.length - fehlen} Listen in data/ lesbar${fehlen ? `, ${fehlen} noch nicht angelegt` : ""}, ${eintraege} gültige Einträge`;
   });
   await lauf("Protokolle", true, async () => `${Object.keys((await import("./protokolle.js")).protokolle).length} Protokoll(e)`);
+  // Nur lesend: Datei im Arbeitsordner, Grösse und SHA-256 wie beim Download; dazu das Paket aus node_modules
+  const gesten = await import("./gesten.js");
+  await lauf("Gesten-Modell", existsSync(gesten.modellPfad()), async () => {
+    const z = gesten.modellZustand();
+    if (z.zustand === "fehlt") throw new Error("Handmodell fehlt: npm run gesten:modell");
+    if (z.zustand === "falsch") throw new Error(`${gesten.MODELL_PFAD}: Prüfsumme falsch (${z.bytes} Bytes) – löschen, dann npm run gesten:modell`);
+    if (!gesten.mediapipeOrdner()) throw new Error("Handmodell ok, aber Paket @mediapipe/tasks-vision fehlt: npm ci");
+    return `${gesten.MODELL_PFAD} vorhanden, Prüfsumme ok`;
+  }, "Handmodell fehlt: npm run gesten:modell");
   await lauf("Sicherheit", true, async () => {
     const warn: string[] = [];
     if (!config.pin) warn.push("keine PIN (JARVIS_PIN)");

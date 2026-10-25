@@ -12,3 +12,4 @@ frigate/config.yml
 protokolle.json
 cameras.json
 __pycache__/
+vendor/

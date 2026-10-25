@@ -4,6 +4,7 @@ import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSyn
 import { createServer, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { after, describe, it } from "node:test";
 import { parseEnv } from "node:util";
 
@@ -22,10 +23,10 @@ function fahre(dir: string, antworten: string[], extra: string[] = [], sigint = 
  * JARVIS_CHECK_TIMEOUT_MS=300 verkürzt das Prüf-Zeitlimit je Dienst in src/check.ts (im Betrieb 10 s): scripts/setup.ts reicht
  * die Umgebung an das Prüf-Kind durch (entfernt nur die Konfigurationsschlüssel aus .env.example).
  */
-function fahreRoh(dir: string, antworten: string[], argumente: string[], sigint = false): Promise<Lauf> {
+function fahreRoh(dir: string, antworten: string[], argumente: string[], sigint = false, extraEnv: Record<string, string> = {}): Promise<Lauf> {
   return new Promise((fertig) => {
     const kind = spawn(process.execPath, ["--import", "tsx", skript, "--beispiel", join(dir, ".env.example"), ...argumente], {
-      cwd: projekt, timeout: 60_000, env: { ...process.env, ANTHROPIC_API_KEY: "", TELEGRAM_BOT_TOKEN: "", JARVIS_CHECK_TIMEOUT_MS: "300" },
+      cwd: projekt, timeout: 60_000, env: { ...process.env, ANTHROPIC_API_KEY: "", TELEGRAM_BOT_TOKEN: "", JARVIS_CHECK_TIMEOUT_MS: "300", ...extraEnv },
     });
     let out = "";
     let err = "";
@@ -370,6 +371,33 @@ describe("scripts/setup.ts (End-zu-End)", () => {
       for (const s of sockets) s.destroy();
       await new Promise<void>((r) => server.close(() => r()));
     }
+  });
+
+  it("--abschnitt gesten lädt das Handmodell gleich; Fehler (Attrappe 404) behält nichts, .env bleibt unberührt", async () => {
+    const dir = neuesVerzeichnis();
+    const env = join(dir, ".env");
+    writeFileSync(env, "PORT=4000\n", { mode: 0o600 });
+    // fetch-Attrappe für das Download-Kind (NODE_OPTIONS erbt es): nie das echte Netz
+    const attrappe = join(dir, "fetch-attrappe.mjs");
+    writeFileSync(attrappe, 'globalThis.fetch = async () => new Response("nicht da", { status: 404 });\n');
+    const lauf = await fahreRoh(dir, [], ["--ohne-pruefung", "--abschnitt", "gesten", "--env", env], false, { NODE_OPTIONS: `--import ${pathToFileURL(attrappe).href}` });
+    assert.equal(lauf.code, 0, lauf.out + lauf.err);
+    assert.ok(lauf.out.includes("── Gesten-Konsole ──"), lauf.out);
+    assert.ok(!lauf.out.includes("[j/N]"), "mit --abschnitt gilt der Abschnitt als gewählt: keine Rückfrage");
+    assert.ok(lauf.out.includes("Handmodell nicht geladen (HTTP 404)"), lauf.out);
+    assert.ok(lauf.out.includes("Kein Handmodell gespeichert, Sir."), lauf.out);
+    assert.ok(!existsSync(join(dir, "vendor")), "nichts behalten");
+    assert.equal(readFileSync(env, "utf8"), "PORT=4000\n", "Abschnitt ohne Felder schreibt die .env nicht");
+    assert.ok(!existsSync(`${env}.bak`));
+  });
+
+  it("Abschnitt Gesten-Konsole im Gesamtlauf: Rückfrage, Enter überspringt den Download", async () => {
+    const dir = neuesVerzeichnis();
+    const lauf = await fahre(dir, ersteAntworten(), [], false);
+    assert.equal(lauf.code, 0, lauf.out + lauf.err);
+    assert.ok(lauf.out.includes("Handmodell jetzt laden bzw. prüfen (npm run gesten:modell)? [j/N]"), lauf.out);
+    assert.ok(lauf.out.includes("Später: npm run gesten:modell"));
+    assert.ok(!existsSync(join(dir, "vendor")));
   });
 
   it("--hilfe und unbekannte Option", async () => {

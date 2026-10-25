@@ -319,7 +319,7 @@ describe("Schema ↔ .env.example", () => {
     const namen = s.ABSCHNITTE.map((a) => a.name);
     assert.deepEqual([...namen].sort(), [...new Set(namen)].sort());
     assert.ok(namen.every((n) => /^[a-z]+$/.test(n)));
-    const bekannt = ["Claude-API", "Telegram", "WHOOP", "Google Kalender", "Outlook-Kalender", "Gmail", "Home Assistant", "Frigate", "MQTT", "Shopify", "Browser", "Werkstatt", "3D-Drucker", "Slicer", "Stimme (STT/TTS)", "Alexa-Skill", "Protokolle", "Sicherheit"];
+    const bekannt = ["Claude-API", "Telegram", "WHOOP", "Google Kalender", "Outlook-Kalender", "Gmail", "Home Assistant", "Frigate", "MQTT", "Shopify", "Browser", "Werkstatt", "3D-Drucker", "Slicer", "Stimme (STT/TTS)", "Alexa-Skill", "Protokolle", "Gesten-Modell", "Sicherheit"];
     for (const a of s.ABSCHNITTE) for (const c of a.checks ?? []) assert.ok(bekannt.includes(c), `unbekannter Check ${c} in ${a.name}`);
     for (const a of s.ABSCHNITTE) for (const f of a.felder) if (f.art === "wahl") assert.ok(f.wahl?.length && f.pruefen, `wahl ohne Liste/Prüfung: ${f.key}`);
     const felder = s.ABSCHNITTE.flatMap((a) => a.felder);

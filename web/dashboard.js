@@ -184,6 +184,7 @@
     letzteSig = {};
     bilderLeeren();
     gespraech.verlauf = []; gespraech.laeuft = false; gespraech.entwurf = ""; gespraech.gen++;
+    gespraech.frueher = null; gespraech.frueherHinweis = ""; gespraech.veraltet = true; gespraech.laedt = false;
     rueckmeldungLeeren();
     // Verborgene Bereiche behalten sonst ihren letzten Aufbau (etwa den Gesprächsverlauf); der sichtbare zeichnet gleich neu
     for (const k of Object.keys(BEREICHE)) if (k !== aktuell) V(k).replaceChildren();
@@ -207,7 +208,13 @@
     const t = Date.parse(d.zeit);
     if (Number.isFinite(t)) versatz = t - Date.now();
     const vorher = Q.status ? Boolean(Q.status.notfall) : null;
+    const warPausiert = Q.status ? Boolean(Q.status.pausiert) : null;
     Q.status = d;
+    // Notaus an oder aus: der Gesprächsverlauf gilt neu (im Notaus liefert der Server keinen)
+    if (warPausiert !== null && warPausiert !== Boolean(d.pausiert)) {
+      gespraech.veraltet = true;
+      if (aktuell === "gespraech" && !d.notfall) void holeBereich();
+    }
     if (vorher !== null && vorher !== Boolean(d.notfall)) {
       // Notfall: keine Inhalte im Speicher behalten. Entwarnung: alles neu aufbauen.
       leereQuellen();
@@ -239,7 +246,7 @@
     if (!angemeldet) return;
     if (Q.status && Q.status.notfall) { rendern(); return; }
     const namen = fremdeFehlerWeg();
-    await Promise.all([...namen].map(holeQuelle));
+    await Promise.all([...[...namen].map(holeQuelle), aktuell === "gespraech" && gespraech.veraltet ? verlaufLaden() : null]);
     stoerungZeigen();
     rendern();
   }
@@ -1656,20 +1663,53 @@
   }
   $("dlgBild").addEventListener("close", () => { delete $("dlgBild").dataset.kam; $("bildGross").removeAttribute("src"); });
 
-  /* ---------- Gespräch: Verlauf nur im Speicher dieser Seite (beim Abmelden und im Notfall weg) ---------- */
-  const gespraech = { verlauf: [], laeuft: false, entwurf: "", gen: 0 };
+  /*
+   * Gespräch: die letzten fünf Nachrichten aus dem Chat (GET /api/chat/verlauf, beim Öffnen des Bereichs neu), darunter die
+   * eigenen dieses Besuchs. Alles nur im Speicher dieser Seite (beim Abmelden und im Notfall weg).
+   * frueher: Nachrichten vom Server (null = noch nicht geladen); seq: laufende Nummer der eigenen Einträge.
+   */
+  const gespraech = { verlauf: [], laeuft: false, entwurf: "", gen: 0, frueher: null, frueherHinweis: "", veraltet: true, laedt: false, seq: 0 };
+  function anhaengen(m) { gespraech.verlauf.push({ ...m, seq: ++gespraech.seq }); }
+  async function verlaufLaden() {
+    const g = gespraech;
+    // Während eine Frage läuft, nicht: ihre Nachricht stünde sonst doppelt da. chatSenden holt das danach nach.
+    if (g.laedt || g.laeuft) return;
+    g.veraltet = false; g.laedt = true;
+    const gen = g.gen, seq = g.seq;
+    const r = await api("/api/chat/verlauf");
+    if (gen !== g.gen) return; // inzwischen geleert (Abmelden, Notfall): leereQuellen hat laedt schon zurückgesetzt
+    g.laedt = false;
+    if (!angemeldet || (Q.status && Q.status.notfall) || r.status === 401) return;
+    const d = r.daten;
+    if (r.status === 200 && d && d.ok && Array.isArray(d.nachrichten)) {
+      g.frueher = d.nachrichten.filter((m) => m && typeof m.text === "string" && (m.rolle === "nutzer" || m.rolle === "jarvis")).slice(-5);
+      g.frueherHinweis = d.pausiert ? ohneSymbol(d.text || "Notaus aktiv, Sir. Der Verlauf ruht.")
+        : d.unlesbar ? ohneSymbol(d.text || "data/chat.json war unlesbar, Sir.") : "";
+      // Was vor dem Abruf gesendet und beantwortet war, steht jetzt im Verlauf des Servers
+      g.verlauf = g.verlauf.filter((m) => m.seq > seq);
+    } else {
+      if (g.frueher === null) g.frueher = [];
+      g.frueherHinweis = fehlerText(r, "Den Verlauf konnte ich nicht laden");
+    }
+  }
   function nachricht(m) {
     const ich = m.wer === "ich";
-    return h("div", { class: "msg " + (ich ? "ich" : "jv") + (m.fehler ? " fehler" : "") },
-      h("span", { class: "wer", text: (ich ? "Sie" : "Jarvis") + " · " + zeit(m.zeit) }), h("div", { class: "txt", text: m.text }),
+    return h("div", { class: "msg " + (ich ? "ich" : "jv") + (m.fehler ? " fehler" : "") + (m.frueher ? " frueher" : "") },
+      h("span", { class: "wer", text: (ich ? "Sie" : "Jarvis") + (m.zeit ? " · " + zeit(m.zeit) : "") }), h("div", { class: "txt", text: m.text }),
       m.hinweis ? h("p", { class: "msg-hinweis" }, ikon("info", true), m.hinweis) : null);
   }
   function renderGespraech(v) {
     v.append(kopf("gespraech", "Gespräch", "Dasselbe Gedächtnis wie in Telegram."));
     if (Q.status && Q.status.notfall) { v.append(gesperrtKarte()); return; }
     const g = gespraech;
-    const log = h("div", { class: "chat", id: "chatLog" },
-      g.verlauf.length ? g.verlauf.map(nachricht) : h("p", { class: "ruhig chat-leer", text: "Fragen Sie, Sir. Ich antworte hier als Text; was länger dauert, schicke ich per Telegram." }),
+    const frueher = Array.isArray(g.frueher) ? g.frueher : [];
+    const quelle = g.frueher === null ? h("p", { class: "chat-quelle", text: "Ich hole den Verlauf …" })
+      : frueher.length ? h("p", { class: "chat-quelle" }, ikon("info", true), "Die letzten fünf Nachrichten aus dem Chat.") : null;
+    const log = h("div", { class: "chat", id: "chatLog" }, quelle,
+      g.frueherHinweis ? h("p", { class: "chat-quelle" }, ikon("warn", true), g.frueherHinweis) : null,
+      frueher.map((m) => nachricht({ wer: m.rolle === "nutzer" ? "ich" : "jv", text: m.text, zeit: m.zeit, frueher: true })),
+      g.verlauf.length ? g.verlauf.map(nachricht)
+        : frueher.length || g.frueher === null ? null : h("p", { class: "ruhig chat-leer", text: "Fragen Sie, Sir. Ich antworte hier als Text; was länger dauert, schicke ich per Telegram." }),
       g.laeuft ? h("div", { class: "msg jv laeuft" }, h("span", { class: "wer", text: "Jarvis" }), h("div", { class: "txt" }, ikon("lauf", true), "läuft …"), h("div", { class: "laufband", "aria-hidden": "true" }, h("i"))) : null);
     const inp = h("input", { class: "feld", id: "chatIn", placeholder: "Sagen Sie es mir, Sir …", "aria-label": "Nachricht an Jarvis", autocomplete: "off", maxlength: 4000 });
     inp.value = g.entwurf;
@@ -1683,7 +1723,8 @@
     const text = g.entwurf.trim();
     if (!text || g.laeuft) return;
     const gen = g.gen;
-    g.verlauf.push({ wer: "ich", text, zeit: jetzt().toISOString() });
+    anhaengen({ wer: "ich", text, zeit: jetzt().toISOString() });
+    const eigene = g.seq;
     g.entwurf = ""; g.laeuft = true;
     // «Senden» ist während der Antwort gesperrt und hält keinen Fokus (Tab+Enter, in Chromium auch ein Klick):
     // der Fokus geht ins Eingabefeld, dort bleibt er über beide Neuaufbauten – nie auf <body>
@@ -1696,18 +1737,22 @@
     g.laeuft = false;
     if (r.status === 200 && r.daten && r.daten.ok) {
       if (r.daten.queued) {
-        g.verlauf.push({ wer: "jv", text: "Das braucht länger, Sir.", zeit: jetzt().toISOString(), hinweis: "Die Antwort kommt per Telegram." });
+        anhaengen({ wer: "jv", text: "Das braucht länger, Sir.", zeit: jetzt().toISOString(), hinweis: "Die Antwort kommt per Telegram." });
         ansageAktiv("Jarvis: Das braucht länger. Die Antwort kommt per Telegram.");
       } else {
         const antwort = typeof r.daten.reply === "string" && r.daten.reply ? r.daten.reply : "…";
-        g.verlauf.push({ wer: "jv", text: antwort, zeit: jetzt().toISOString() });
+        anhaengen({ wer: "jv", text: antwort, zeit: jetzt().toISOString() });
         ansageAktiv("Jarvis: " + antwort);
       }
     } else {
+      // Der Server hielt die Eingabe für die PIN: auch hier nicht stehen lassen
+      if (r.daten && r.daten.error === "pin") g.verlauf = g.verlauf.filter((m) => m.seq !== eigene);
       const t = fehlerText(r, "Das kam nicht an");
-      g.verlauf.push({ wer: "jv", text: t, zeit: jetzt().toISOString(), fehler: true });
+      anhaengen({ wer: "jv", text: t, zeit: jetzt().toISOString(), fehler: true });
       ansageAktiv(t);
     }
+    // Während der Frage wurde der Bereich neu geöffnet: den Verlauf jetzt holen
+    if (g.veraltet && aktuell === "gespraech") await verlaufLaden();
     rendern();
   }
 
@@ -1747,7 +1792,7 @@
     zeitplaene: { titel: "Zeitpläne & Wachen", quellen: ["zeitplaene", "wachen"], render: renderZeitplaene, status: (st) => st && [st.notfall, st.pausiert, st.kameras], takt: STD },
     kameras: { titel: "Kameras", quellen: [], render: renderKameras, zustand: () => [...bilder].map(([k, b]) => [k, Boolean(b.url), b.fehler]),
       status: (st) => st && [st.notfall, st.kameras, st.camerasUnlesbar], takt: STD },
-    gespraech: { titel: "Gespräch", quellen: [], render: renderGespraech, zustand: () => [gespraech.verlauf.length, gespraech.laeuft, gespraech.gen], status: nurNotfall, takt: STD },
+    gespraech: { titel: "Gespräch", quellen: [], render: renderGespraech, zustand: () => [gespraech.verlauf.length, gespraech.laeuft, gespraech.gen, gespraech.frueher, gespraech.frueherHinweis], status: nurNotfall, takt: STD },
     protokoll: { titel: "Protokoll", quellen: ["audit"], render: renderProtokoll, zustand: () => filterP, status: nurNotfall, takt: STD },
     sicherheit: { titel: "Sicherheit", quellen: [], render: renderSicherheit },
   };
@@ -1893,6 +1938,8 @@
     });
     document.title = "JARVIS · " + BEREICHE[aktuell].titel;
     letzteSig[aktuell] = null;
+    // Gespräch: beim Öffnen den Verlauf neu holen (holeBereich über zyklen)
+    if (aktuell === "gespraech") gespraech.veraltet = true;
     fremdeFehlerWeg();
     stoerungZeigen(true);
     rendern();

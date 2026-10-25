@@ -235,6 +235,13 @@ async function abschnittDurchlaufen(a: Abschnitt, zeilen: EnvZeile[], o: Optione
   if (a.optional && !o.alle && !o.abschnitt) {
     if (!(await jaNein("Jetzt einrichten?"))) { sag("  Übersprungen."); return; }
   }
+  // Nach «Jetzt einrichten? j» oder --abschnitt gleich laden; nur bei --alle (ohne Rückfrage zum Abschnitt) eigens fragen
+  if (a.angebot === "gesten-modell") await gestenModellAnbieten(wurzel, o.alle && !o.abschnitt);
+  if (!a.felder.length) {
+    // Nichts in die .env: nur das Angebot und die Prüfung
+    if (!o.ohnePruefung && a.checks?.length) { sag("  Prüfe …"); await pruefeImKind(wurzel, envPfad, a.checks); }
+    return;
+  }
   for (;;) {
     const neu = new Map<string, string>(); // erst nach vollständiger Eingabe schreiben
     for (const feld of a.felder) {
@@ -251,6 +258,31 @@ async function abschnittDurchlaufen(a: Abschnitt, zeilen: EnvZeile[], o: Optione
     if (!fehler) return;
     if (!(await jaNein("  Werte dieses Abschnitts nochmals eingeben?", true))) return;
   }
+}
+
+/**
+ * Handmodell der Gesten-Konsole laden (scripts/gesten-modell.ts im Kindprozess, Arbeitsordner = Zielordner): prüft Grösse und
+ * SHA-256 und behält bei einer Abweichung nichts. Ist es schon da und richtig, meldet das Skript nur das.
+ */
+async function gestenModellAnbieten(wurzel: string, fragen: boolean): Promise<void> {
+  if (fragen && !(await jaNein("  Handmodell jetzt laden bzw. prüfen (npm run gesten:modell)?", true))) {
+    sag("  Später: npm run gesten:modell");
+    return;
+  }
+  if (tty) stumm = true; // keine Frage offen: Vorausgetipptes nicht echoen
+  const ok = await new Promise<boolean>((fertig) => {
+    const env: NodeJS.ProcessEnv = { ...process.env };
+    for (const k of alleSchluessel()) delete env[k];
+    const kind = spawn(process.execPath, ["--import", import.meta.resolve("tsx"), join(projekt, "scripts", "gesten-modell.ts")], { cwd: wurzel, env, stdio: ["ignore", "pipe", "pipe"], timeout: 600_000 });
+    laufendesKind = kind;
+    const zeige = (chunk: Buffer) => { for (const t of chunk.toString().split("\n")) if (t.trim()) sag(`    ${t.trim()}`); };
+    kind.stdout.on("data", zeige);
+    kind.stderr.on("data", zeige);
+    kind.on("error", (e) => { sag(`    Download nicht gestartet: ${e.message}`); fertig(false); });
+    kind.on("close", (code) => { laufendesKind = undefined; fertig(code === 0); });
+  });
+  stumm = false;
+  if (!ok) sag("  Kein Handmodell gespeichert, Sir. Die Konsole zeigt dann einen Hinweis; später: npm run gesten:modell");
 }
 
 /** Von diesem Lauf angelegte Ordner: deren Rechte dürfen auch ausserhalb des Projekts nachgezogen werden. */

@@ -2,8 +2,9 @@ import * as Alexa from "ask-sdk-core";
 import type { ErrorHandler, HandlerInput, RequestHandler } from "ask-sdk-core";
 import { config } from "./config.js";
 import { aktuellerFreigabenHinweis, briefingTeile, cardioText, dashboardErreichbar, morningDone } from "./brain.js";
-import { askWithBudget } from "./agent.js";
-import { hooks, sendText } from "./telegram.js";
+import { askWithBudget, pinGeschwaerzt } from "./agent.js";
+import { audit } from "./audit.js";
+import { hooks, pinFoermigLocker, pinRatenZaehlen, sendeAntwort } from "./telegram.js";
 import { forSpeech } from "./voice.js";
 import { sagt } from "./persona.js";
 import { state, type Mode } from "./state.js";
@@ -102,6 +103,12 @@ const nurSchriftlich = () =>
 
 const nichtsWartet = () => `Nichts wartet auf ${config.form === "du" ? "dich" : "Sie"}, ${config.anrede}.`;
 
+/**
+ * Freigaben-Hinweis für Alexa: Was Alexa sagt, geht als Text über Amazon (Leitplanke 9). Darum standardmässig
+ * nur Anzahl und Nummern; Zusammenfassungen nur mit ALEXA_FREIGABEN_DETAILS=on. Telegram und Satellit bleiben ausführlich.
+ */
+export const alexaFreigabenHinweis = () => aktuellerFreigabenHinweis({ details: config.alexaFreigabenDetails });
+
 const ZAHL = String.raw`(?:\d+|[a-zäöü]*(?:zehn|zig)|eins|zwei|drei|vier|fünf|sechs|sieben|acht|neun|elf|zwölf)(?![a-zäöü\d])`;
 
 /**
@@ -139,11 +146,11 @@ const sperrHinweis = () =>
 
 const sperrSprechen = (i: HandlerInput) => sprich(i, [`Briefing und Gesundheitswerte ruhen, ${config.anrede}.`, sperrHinweis()]);
 
-/** Briefing, kurze Pause, offene Freigaben */
+/** Briefing, kurze Pause, offene Freigaben (die Telegram-Kopie aus briefingTeile bleibt ausführlich) */
 const briefingSprechen = async (i: HandlerInput) => {
   if (gesperrt()) return sperrSprechen(i);
   const t = await briefingTeile();
-  return sprich(i, [t.text, t.hinweis]);
+  return sprich(i, [t.text, alexaFreigabenHinweis()]);
 };
 
 /** «Alexa, öffne Butler Jarvis» und beide Routinen landen hier: erst Cardio, danach Tagesbriefing. */
@@ -168,7 +175,7 @@ const Briefing: RequestHandler = {
 /** «Alexa, frag Butler Jarvis nach offenen Aufträgen»: nur vorlesen. */
 const Freigaben: RequestHandler = {
   canHandle: (i) => isIntent(i, "FreigabenIntent"),
-  handle: (i) => sprich(i, aktuellerFreigabenHinweis() || nichtsWartet()),
+  handle: (i) => sprich(i, alexaFreigabenHinweis() || nichtsWartet()),
 };
 
 /** Freie Frage: «Alexa, frag Butler Jarvis, was heute in Basel los ist» */
@@ -177,12 +184,22 @@ const Frage: RequestHandler = {
   handle: async (i) => {
     const frage = Alexa.getSlotValue(i.requestEnvelope, "frage")?.trim();
     if (!frage) return sprich(i, "Ich höre.", "Ich höre.");
+    // Wie in Telegram, Kommandozentrale und /events: was die PIN sein könnte, geht weder an Claude noch in die
+    // Historie oder nach Telegram; gleiche Antwort, gleich gezählt
+    if (pinFoermigLocker(frage) !== undefined) {
+      audit("pin_im_chat", { quelle: "alexa" });
+      pinRatenZaehlen(frage);
+      return sprich(i, `Die PIN bitte nie sprechen, ${config.anrede}. Nichts gesendet.`);
+    }
     // Nichts freigeben, aber den Stand nennen (im Notaus/Notfall nur dessen Hinweis)
-    if (istFreigabeWunsch(frage)) return sprich(i, [nurSchriftlich(), aktuellerFreigabenHinweis() || nichtsWartet()]);
+    if (istFreigabeWunsch(frage)) return sprich(i, [nurSchriftlich(), alexaFreigabenHinweis() || nichtsWartet()]);
     const telegram = Boolean(config.telegramToken && config.telegramOwner);
-    const later = async (reply: string) => {
-      if (telegram) await sendText(`Zu deiner Frage per Alexa («${frage}»):\n\n${reply}`);
-      else console.log("Antwort ohne Telegram-Zustellung:", reply);
+    // Echo und späte Antwort geschwärzt (auch die PIN mitten im Satz); im Notaus/Notfall nichts (askWithBudget, sendeAntwort)
+    const echo = pinGeschwaerzt(schwaerze(frage)).slice(0, 60);
+    const later = async (reply: string, eintrag?: object) => {
+      const r = pinGeschwaerzt(schwaerze(reply));
+      if (telegram) await sendeAntwort(`Zu deiner Frage per Alexa («${echo}»):\n\n${r}`, eintrag);
+      else console.log("Antwort ohne Telegram-Zustellung:", r);
     };
     const reply = await askWithBudget(frage, config.alexaBudgetMs, hooks, later);
     if (reply === undefined) {

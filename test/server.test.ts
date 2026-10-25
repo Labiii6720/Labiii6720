@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { request } from "node:http";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
@@ -93,7 +93,7 @@ describe("server.ts: Start und Netzsperren", () => {
     const tunnel: Record<string, string>[] = [{ "cf-connecting-ip": "203.0.113.7" }, { "cf-ray": "8a1b2c3d4e5f-ZRH" }];
     const ziele: [string, string][] = [
       ["GET", "/status.json"], ["POST", "/api/auftrag"], ["GET", "/api/finanzen"], ["GET", "/dashboard"],
-      ["POST", "/api/chat"], ["GET", "/api/kamera/garten"], ["GET", "/api/audit"],
+      ["POST", "/api/chat"], ["GET", "/api/chat/verlauf"], ["GET", "/api/kamera/garten"], ["GET", "/api/audit"],
       ["GET", "/dashboard/app.js"], ["GET", "/dashboard/app.css"], ["GET", "/api/auftraege"], ["GET", "/api/kosten"],
       ["GET", "/api/zeitplaene"], ["POST", "/api/zeitplaene"], ["PUT", "/api/zeitplaene/1"], ["DELETE", "/api/zeitplaene/1"],
       ["GET", "/api/wachen"], ["POST", "/api/wachen"], ["PUT", "/api/wachen/1"], ["DELETE", "/api/wachen/1"],
@@ -186,5 +186,83 @@ describe("server.ts: Start und Netzsperren", () => {
   it("ungültiges JSON an /api/* mit Token aus dem Heimnetz: ebenfalls ohne Stacktrace", async () => {
     const r = await anfrage(port, "POST", "/api/chat", { authorization: `Bearer ${TOKEN}` }, "{");
     assert.doesNotMatch(r.text, /SyntaxError|node_modules|at parse/);
+  });
+});
+
+describe("server.ts: Gesten-Konsole ohne CDN (feste Dateien, CSP, Netzregel)", () => {
+  const CSP =
+    "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self' blob: data:; media-src 'self' blob: mediastream:; " +
+    "connect-src 'self'; worker-src 'self' blob:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; object-src 'none'";
+  const DATEIEN: [string, RegExp][] = [
+    ["/gesture", /^text\/html; charset=utf-8$/i],
+    ["/gesture/app.js", /^text\/javascript; charset=utf-8$/i],
+    ["/gesture/app.css", /^text\/css; charset=utf-8$/i],
+    ["/gesture/mp/vision_bundle.mjs", /^text\/javascript; charset=utf-8$/i],
+    ["/gesture/mp/wasm/vision_wasm_internal.js", /^text\/javascript; charset=utf-8$/i],
+    ["/gesture/mp/wasm/vision_wasm_internal.wasm", /^application\/wasm$/i],
+    ["/gesture/mp/wasm/vision_wasm_nosimd_internal.js", /^text\/javascript; charset=utf-8$/i],
+    ["/gesture/mp/wasm/vision_wasm_nosimd_internal.wasm", /^application\/wasm$/i],
+  ];
+  const MODELL = "/gesture/mp/hand_landmarker.task";
+
+  it("Whitelist aus dem Heimnetz: 200, richtiger Typ, CSP mit genauem Wortlaut, nosniff, no-referrer, DENY", async () => {
+    for (const [pfad, typ] of DATEIEN) {
+      const r = await anfrage(port, "GET", pfad);
+      assert.equal(r.status, 200, pfad);
+      assert.match(String(r.kopf["content-type"]), typ, pfad);
+      assert.equal(r.kopf["content-security-policy"], CSP, pfad);
+      assert.equal(r.kopf["x-content-type-options"], "nosniff", pfad);
+      assert.equal(r.kopf["referrer-policy"], "no-referrer", pfad);
+      assert.equal(r.kopf["x-frame-options"], "DENY", pfad);
+      assert.ok(r.text.length > 0, pfad);
+    }
+    const seite = await anfrage(port, "GET", "/gesture");
+    assert.doesNotMatch(seite.text, /<script(?![^>]*\ssrc=)[^>]*>/i, "kein Inline-Skript");
+    assert.doesNotMatch(seite.text, /https?:\/\//i, "nichts von aussen");
+  });
+
+  it("Handmodell: ohne Datei 404, mit Datei im Arbeitsordner 200 (application/octet-stream)", async () => {
+    assert.equal((await anfrage(port, "GET", MODELL)).status, 404);
+    mkdirSync(join(temp, "vendor", "mediapipe"), { recursive: true });
+    writeFileSync(join(temp, "vendor", "mediapipe", "hand_landmarker.task"), "attrappe");
+    try {
+      const r = await anfrage(port, "GET", MODELL);
+      assert.equal(r.status, 200);
+      assert.equal(r.text, "attrappe");
+      assert.equal(r.kopf["content-type"], "application/octet-stream");
+      assert.equal(r.kopf["content-security-policy"], CSP);
+      // über den Tunnel nur, weil EVENTS_VIA_TUNNEL=on die Konsole öffnet
+      assert.equal((await anfrage(port, "GET", MODELL, { "cf-ray": "8a1b2c3d4e5f-ZRH" })).status, 200);
+    } finally {
+      rmSync(join(temp, "vendor"), { recursive: true, force: true });
+    }
+    assert.equal((await anfrage(port, "GET", MODELL)).status, 404);
+  });
+
+  it("nichts ausserhalb der Whitelist: kein Ordner von node_modules, vendor oder web", async () => {
+    mkdirSync(join(temp, "vendor", "mediapipe"), { recursive: true });
+    writeFileSync(join(temp, "vendor", "mediapipe", "anderes.task"), "x");
+    try {
+      for (const pfad of [
+        "/gesture/mp/vision_bundle.cjs", "/gesture/mp/vision_bundle.mjs.map", "/gesture/mp/vision_bundle_mjs.js.map", "/gesture/mp/package.json",
+        "/gesture/mp/wasm/", "/gesture/mp/wasm/x.wasm", "/gesture/mp/anderes.task", "/gesture/mp/%2e%2e/package.json", "/gesture/mp/../../package.json",
+        "/gesture/gesture.js", "/gesture/gesture.html", "/gesture/dashboard.js", "/node_modules/@mediapipe/tasks-vision/vision_bundle.mjs",
+        "/vendor/mediapipe/hand_landmarker.task", "/vendor/mediapipe/anderes.task", "/gesture/mp/wasm/vision_wasm_internal.wasm.map",
+      ]) {
+        assert.equal((await anfrage(port, "GET", pfad)).status, 404, pfad);
+      }
+    } finally {
+      rmSync(join(temp, "vendor"), { recursive: true, force: true });
+    }
+  });
+
+  it("EVENTS_VIA_TUNNEL=on: die Dateien der Konsole folgen genau ihrer Regel, jeder andere Unterpfad bleibt 404", async () => {
+    for (const kopf of [{ "cf-ray": "8a1b2c3d4e5f-ZRH" }, { "cf-connecting-ip": "203.0.113.7" }] as Record<string, string>[]) {
+      for (const [pfad] of DATEIEN) assert.equal((await anfrage(port, "GET", pfad, kopf)).status, 200, `${pfad} über den Tunnel`);
+      for (const pfad of ["/gesture/mp", "/gesture/mp/", "/gesture/mp/wasm", "/gesture/x", "/gesture/mp/vision_bundle.cjs"]) {
+        assert.equal((await anfrage(port, "GET", pfad, kopf)).status, 404, `${pfad} über den Tunnel`);
+        assert.equal((await anfrage(port, "OPTIONS", pfad, kopf)).status, 404, `OPTIONS ${pfad} über den Tunnel`);
+      }
+    }
   });
 });

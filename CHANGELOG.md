@@ -2,6 +2,13 @@
 
 Kurz und nur das Wichtigste. Details stehen im README.
 
+## 0.23
+- Gesten-Konsole ohne CDN: MediaPipe aus `@mediapipe/tasks-vision` (exakt 0.10.14, Lockfile mit Prüfsumme), das Handmodell einmalig per `npm run gesten:modell` nach `vendor/mediapipe/` (Grösse und SHA-256 geprüft, atomar). Der Dienst liefert nur eine feste Liste von Dateien unter strenger CSP (`GESTEN_CSP`), ohne Modell 404 und Hinweis in der Konsole; Selbsttest-Befund «Gesten-Modell», Angebot im Setup-Abschnitt Gesten-Konsole. Das Feld «Jarvis-Adresse» entfällt.
+- Alexa nennt bei offenen Freigaben nur Anzahl und Nummern (`ALEXA_FREIGABEN_DETAILS=off`, Standard; `on` mit Zusammenfassung). Telegram, Sprachnachricht und Satellit bleiben ausführlich.
+- Kommandozentrale, Gespräch: die letzten fünf Nachrichten aus dem Chat (`GET /api/chat/verlauf`), nur sichtbarer Text, geschwärzt (auch die PIN), ohne Werkzeug-Schritte, Systemnotizen und im Notaus zurückgehaltene Antworten; im Notaus ruht er. Eine unlesbare `data/chat.json` wird vor dem ersten Speichern nach `.defekt` gesichert (sonst nicht überschrieben), mit Hinweis im Dashboard und in `/status`.
+- Gesprächsfeld der Kommandozentrale und `/events` (`frage`, `frage_sync`: Gesten-Konsole, Kurzbefehl, Sprach-Satellit): PIN-förmige Eingaben gehen wie in Telegram weder an Claude noch in die Historie oder nach Telegram (400 `error: "pin"`, gezählt). Ebenso der Alexa-FrageIntent. Überall, auch in Telegram getippt oder gesprochen, ändern ein Satzzeichen am Ende («4711.»), ein «!» davor, Anführungszeichen und Trenner zwischen den Ziffern («4 7 1 1», «47-11») daran nichts; die späte Antwort per Telegram ist geschwärzt (auch die PIN, auch beim Ereignis `frage`).
+- Späte Antworten (Kommandozentrale, `/events`, Alexa) gehen im Notaus oder Notfall nicht mehr nach Telegram, auch kein Echo der Frage und kein Pausenhinweis; ein Notaus während des Versands hält den Rest zurück wie in Telegram.
+
 ## 0.22.2
 - Kommandozentrale: Ein begonnener Auftrag, der nach einem Absturz nicht mehr läuft (`laeuft: false` in `/status.json` und `/api/auftraege`), erscheint als «Ergebnis unklar – bitte prüfen» mit «Wegräumen» statt dauerhaft als «läuft».
 - Aufträge: Kürzen auf 200 schont offene und begonnene; der Zähler wird beim Start aus dem Altbestand in `state.json` gesichert (einmal nach dem Update von 0.21, auch über `scripts/try.ts`); ein Knopf zu einem Auftrag ohne gesendete Freigabe gilt als veraltet.

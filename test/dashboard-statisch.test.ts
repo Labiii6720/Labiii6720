@@ -37,7 +37,7 @@ describe("Kommandozentrale: statische Schutzzusagen", () => {
   });
 
   it("Token-Schlüssel kollidiert nicht mit der Gesten-Konsole (gleicher Ursprung, «jarvis.» + Feld-ID)", () => {
-    const gesture = readFileSync(resolve(web, "gesture.html"), "utf8");
+    const gesture = readFileSync(resolve(web, "gesture.js"), "utf8");
     const key = js.match(/const TOKEN_KEY = "([^"]+)"/)?.[1];
     assert.ok(key, "TOKEN_KEY gefunden");
     const liste = gesture.match(/for \(const id of \[([^\]]+)\]\)[^\n]*\n[^\n]*localStorage\.getItem\("jarvis\." \+ id\)/)?.[1];

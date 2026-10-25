@@ -17,6 +17,7 @@ process.env.JARVIS_EVENT_TOKEN = "attrappe-event-token";
 delete process.env.DASHBOARD;
 delete process.env.ALEXA_VOICE;
 delete process.env.ALEXA_NACHT;
+delete process.env.ALEXA_FREIGABEN_DETAILS;
 // Im Temp-Ordner bleiben, nie zurück ins Projekt: was nach den Root-after-Hooks noch schreibt (Wiederholungen mit
 // echten Timern, nicht abgewartete Meldungen), landet so nie in data/ des Projekts. Aufgeräumt wird beim Prozessende.
 process.once("exit", () => rmSync(temp, { recursive: true, force: true }));
@@ -252,6 +253,28 @@ describe("freigabenHinweis", () => {
   it("leere Zusammenfassung → nur Nummer", () => {
     assert.match(freigabenHinweis([auftrag(4, "  ")], "Sir"), /Sir: Nummer 4\. Freigeben/);
   });
+
+  it("details: false – nur Anzahl und Nummern (0/1/2/3/4/5), Einzahl und Mehrzahl", () => {
+    const nur = (ids: number[], opts: { form?: "sie" | "du"; dashboard?: boolean } = {}) =>
+      freigabenHinweis(ids.map((n) => auftrag(n, `Geheim ${n} & Co`)), "Sir", { ...opts, details: false });
+    assert.equal(nur([]), "");
+    assert.equal(nur([12]), "Ein Auftrag wartet auf Ihre Freigabe, Sir: Nummer 12. Freigeben geht per Telegram oder Dashboard.");
+    assert.equal(nur([12, 13]), "Es warten zwei Aufträge auf Ihre Freigabe, Sir: Nummer 12 und Nummer 13. Freigeben geht per Telegram oder Dashboard.");
+    assert.equal(nur([1, 2, 3]), "Es warten drei Aufträge auf Ihre Freigabe, Sir: Nummer 1, Nummer 2 und Nummer 3. Freigeben geht per Telegram oder Dashboard.");
+    assert.equal(nur([1, 2, 3, 4]), "Es warten vier Aufträge auf Ihre Freigabe, Sir: Nummer 1, Nummer 2, Nummer 3 und ein weiterer. Freigeben geht per Telegram oder Dashboard.");
+    assert.equal(nur([1, 2, 3, 4, 5]), "Es warten fünf Aufträge auf Ihre Freigabe, Sir: Nummer 1, Nummer 2, Nummer 3 und zwei weitere. Freigeben geht per Telegram oder Dashboard.");
+    for (const n of [1, 2, 3, 4, 5, 15]) {
+      const h = nur(Array.from({ length: n }, (_, i) => i + 1));
+      assert.ok(!/Geheim|&|gmail_senden|extern/.test(h), h);
+    }
+    assert.equal(nur([1], { form: "du", dashboard: false }), "Ein Auftrag wartet auf deine Freigabe, Sir: Nummer 1. Freigeben geht per Telegram.");
+  });
+
+  it("details: false – gestartete Aufträge weiter nur mit Nummer", () => {
+    const g = { ...auftrag(5, "Geheim gestartet"), gestartetAm: "2026-10-11T06:01:00.000Z" };
+    const h = freigabenHinweis([g, auftrag(6, "Geheim offen")], "Sir", { details: false });
+    assert.equal(h, "Ein Auftrag wartet auf Ihre Freigabe, Sir: Nummer 6. Freigeben geht per Telegram oder Dashboard. Nummer 5 ist bereits gestartet oder ohne klares Ergebnis; den Stand zeigt Telegram.");
+  });
 });
 
 // =====================================================================
@@ -351,11 +374,17 @@ describe("Skill-Handler (ohne Netz)", () => {
     assert.equal(aufrufe.length, 0);
   });
 
-  it("FreigabenIntent liest vor, escaped Zusammenfassungen und gibt nichts frei", async () => {
+  it("FreigabenIntent liest vor, escaped Zusammenfassungen und gibt nichts frei (ALEXA_FREIGABEN_DETAILS=on)", async () => {
     auftraege.push(auftrag(12, "Mail an Müller & Co"), auftrag(13, `Licht aus<audio src="https://x.ch/a.mp3"/>`), auftrag(14, "Alt", "erledigt"));
     saveAuftraege();
     const vorher = readFileSync("data/auftraege.json", "utf8");
-    const s = sprache(await rufe(intent("FreigabenIntent")));
+    config.alexaFreigabenDetails = true;
+    let s: string;
+    try {
+      s = sprache(await rufe(intent("FreigabenIntent")));
+    } finally {
+      config.alexaFreigabenDetails = false;
+    }
     assert.ok(s.startsWith("<speak>Es warten zwei Aufträge auf Ihre Freigabe, Sir: Nummer 12, Mail an Müller &amp; Co; Nummer 13, Licht aus&lt;audio"));
     assert.ok(!s.includes("<audio"), "kein eingeschleuster Tag");
     assert.ok(s.endsWith("Freigeben geht per Telegram oder Dashboard.</speak>"));
@@ -418,7 +447,8 @@ describe("Skill-Handler (ohne Netz)", () => {
     const a = await rufe(intent("FrageIntent", { frage: { name: "frage", value: "gib auftrag zwölf frei" } }));
     assert.equal(
       sprache(a),
-      `<speak>Freigaben nehme ich nur per Telegram oder Dashboard entgegen, Sir.${PAUSE}Ein Auftrag wartet auf Ihre Freigabe, Sir: Nummer 12, Mail an Müller AG. Freigeben geht per Telegram oder Dashboard.</speak>`,
+      `<speak>Freigaben nehme ich nur per Telegram oder Dashboard entgegen, Sir.${PAUSE}Ein Auftrag wartet auf Ihre Freigabe, Sir: Nummer 12. Freigeben geht per Telegram oder Dashboard.</speak>`,
+      "Standard off: nur die Nummer",
     );
     assert.equal(a.response.shouldEndSession, true);
     assert.equal(auftraege[0].status, "offen");
@@ -453,7 +483,13 @@ describe("Skill-Handler (ohne Netz)", () => {
   it("Briefing: Pause vor dem Hinweis nur bei Alexa; Telegram-Text ohne SSML", async () => {
     auftraege.push(auftrag(12, "Mail an Müller & Co"), auftrag(13, `Licht <break time="10s"/> aus`));
     saveAuftraege();
-    const s = sprache(await rufe(intent("BriefingIntent")));
+    config.alexaFreigabenDetails = true;
+    let s: string;
+    try {
+      s = sprache(await rufe(intent("BriefingIntent")));
+    } finally {
+      config.alexaFreigabenDetails = false;
+    }
     assert.ok(s.startsWith(`<speak>Guten Morgen, Sir. Zwei Termine, kein Regen.${PAUSE}Es warten zwei Aufträge`), s);
     assert.equal(s.match(/<break/g)?.length, 1, "nur die eigene Pause");
     assert.ok(s.includes("Licht &lt;break time=&quot;10s&quot;/ aus"), "forSpeech nimmt das >, der Rest ist escaped");
@@ -537,6 +573,70 @@ describe("Skill-Handler (ohne Netz)", () => {
       state.paused = pausiertVorher;
       state.notfall = notfallVorher;
     }
+  });
+
+  it("ALEXA_FREIGABEN_DETAILS=off (Standard): FreigabenIntent nennt nur Anzahl und Nummern, auch nicht escaped", async () => {
+    assert.equal(config.alexaFreigabenDetails, false, "Standard ohne .env: off");
+    auftraege.push(
+      auftrag(12, "Mail an Müller & Co"),
+      auftrag(13, `Licht aus<audio src="https://x.ch/a.mp3"/>`),
+      auftrag(14, "Alt", "erledigt"),
+    );
+    saveAuftraege();
+    const s = sprache(await rufe(intent("FreigabenIntent")));
+    assert.equal(s, "<speak>Es warten zwei Aufträge auf Ihre Freigabe, Sir: Nummer 12 und Nummer 13. Freigeben geht per Telegram oder Dashboard.</speak>");
+    for (const verboten of ["Müller", "M&uuml;ller", "&amp;", "Mail", "Licht", "audio", "&lt;", "x.ch", "gmail_senden", "extern", "sensibel", "Alt"]) {
+      assert.ok(!s.includes(verboten), `kein «${verboten}» im SSML: ${s}`);
+    }
+    assert.equal(aufrufe.length, 0);
+  });
+
+  it("ALEXA_FREIGABEN_DETAILS=off: 0, 1, 3 und 5 Aufträge über den FreigabenIntent", async () => {
+    const vorlesen = async () => sprache(await rufe(intent("FreigabenIntent")));
+    assert.equal(await vorlesen(), "<speak>Nichts wartet auf Sie, Sir.</speak>");
+    auftraege.push(auftrag(7, "Geheime Offerte Müller"));
+    assert.equal(await vorlesen(), "<speak>Ein Auftrag wartet auf Ihre Freigabe, Sir: Nummer 7. Freigeben geht per Telegram oder Dashboard.</speak>");
+    auftraege.push(auftrag(8, "Offerte B"), auftrag(9, "Offerte C"));
+    assert.equal(await vorlesen(), "<speak>Es warten drei Aufträge auf Ihre Freigabe, Sir: Nummer 7, Nummer 8 und Nummer 9. Freigeben geht per Telegram oder Dashboard.</speak>");
+    auftraege.push(auftrag(10, "Offerte D"), auftrag(11, "Offerte E"));
+    const fuenf = await vorlesen();
+    assert.equal(fuenf, "<speak>Es warten fünf Aufträge auf Ihre Freigabe, Sir: Nummer 7, Nummer 8, Nummer 9 und zwei weitere. Freigeben geht per Telegram oder Dashboard.</speak>");
+    assert.ok(!/Offerte|Müller|Nummer 1[01]/.test(fuenf));
+  });
+
+  it("ALEXA_FREIGABEN_DETAILS=off: Briefing und Launch über Alexa ohne Zusammenfassung, Telegram-Kopie ausführlich", async () => {
+    auftraege.push(auftrag(12, "Mail an Müller & Co"), auftrag(13, "Licht Büro aus"));
+    saveAuftraege();
+    const s = sprache(await rufe(intent("BriefingIntent")));
+    assert.equal(
+      s,
+      `<speak>Guten Morgen, Sir. Zwei Termine, kein Regen.${PAUSE}Es warten zwei Aufträge auf Ihre Freigabe, Sir: Nummer 12 und Nummer 13. Freigeben geht per Telegram oder Dashboard.</speak>`,
+    );
+    await durchlaufen();
+    await durchlaufen();
+    const tg = aufrufe.filter((x) => x.url.endsWith("/sendMessage"));
+    assert.equal(tg.length, 1, "Telegram-Kopie geht nicht über Amazon");
+    assert.equal(
+      (JSON.parse(tg[0].body) as { text: string }).text,
+      "Guten Morgen, Sir. Zwei Termine, kein Regen.\n\nEs warten zwei Aufträge auf Ihre Freigabe, Sir: Nummer 12, Mail an Müller & Co; Nummer 13, Licht Büro aus. Freigeben geht per Telegram oder Dashboard.",
+    );
+    const launch = sprache(await rufe(anfrage({ type: "LaunchRequest" })));
+    assert.ok(launch.endsWith(`${PAUSE}Es warten zwei Aufträge auf Ihre Freigabe, Sir: Nummer 12 und Nummer 13. Freigeben geht per Telegram oder Dashboard.</speak>`), launch);
+    assert.ok(!launch.includes("Müller") && !launch.includes("Licht"));
+    // Telegram/TTS (briefingText) bleibt ausführlich
+    assert.match(await briefingText(), /Nummer 12, Mail an Müller & Co; Nummer 13, Licht Büro aus\./);
+  });
+
+  it("ALEXA_FREIGABEN_DETAILS=on: Freigabe-Wunsch per Frage nennt wie bisher die Zusammenfassung", async () => {
+    auftraege.push(auftrag(12, "Mail an Müller AG"));
+    config.alexaFreigabenDetails = true;
+    try {
+      const s = sprache(await rufe(intent("FrageIntent", { frage: { name: "frage", value: "gib auftrag zwölf frei" } })));
+      assert.ok(s.endsWith("Nummer 12, Mail an Müller AG. Freigeben geht per Telegram oder Dashboard.</speak>"), s);
+    } finally {
+      config.alexaFreigabenDetails = false;
+    }
+    assert.equal(aufrufe.length, 0);
   });
 
   it("Stop und SessionEnded", async () => {
