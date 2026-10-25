@@ -24,10 +24,27 @@ rest_command:
       Authorization: !secret jarvis_auth
       Content-Type: application/json
     payload: '{"event": "kamera", "kamera": "{{ kamera }}", "label": "{{ label }}", "zonen": {{ zonen | default([]) | to_json }}}'
+  # Briefing als Text zum Vorlesen (Satellit im Bad), ohne Telegram. Antwort: {"ok": true, "bereit": true, "text": "…"};
+  # noch nicht fertig: {"ok": false, "bereit": false, "text": "", "nachlieferung": "telegram"} (Jarvis liefert selbst nach).
+  # Notaus/Notfall: {"ok": false, "bereit": false, "text": "", "gesperrt": true} – Ausweichen auf «briefing», das ebenfalls nichts schickt.
+  jarvis_briefing_text:
+    url: "http://JARVIS-IP:3000/events"
+    method: POST
+    timeout: 30
+    headers:
+      Authorization: !secret jarvis_auth
+      Content-Type: application/json
+    payload: '{"event": "briefing_text"}'
 
 automation:
+  # Satellit im Bad erreichbar: Jarvis liest das Briefing dort vor. Sonst (oder wenn Jarvis keinen Text liefert)
+  # wie bisher per Telegram. assist_satellite.announce gibt es ab Home Assistant 2024.12 (bitte in der HA-Doku prüfen).
+  # Die Assist-Satellit-Entität heisst je nach Sprache der Instanz …_assist_satellite oder ähnlich; deshalb wird sie
+  # über das Gerät des Sensors «Verbunden» gesucht statt geraten. Fehlt sie, greift der Fallback.
+  # IDs unter Einstellungen → Geräte → «Jarvis Satellit Bad» prüfen.
   - alias: "Jarvis: Briefing nach der Dusche"
-    description: "Fünf Minuten nachdem die Luftfeuchte im Bad wieder gesunken ist, schickt Jarvis das Tagesbriefing."
+    description: "Nach der Dusche liest der Satellit im Bad das Tagesbriefing vor; ohne Satellit kommt es per Telegram."
+    mode: single
     triggers:
       - trigger: state
         entity_id: binary_sensor.jarvis_node_1_dusche
@@ -38,9 +55,42 @@ automation:
         after: "05:00:00"
         before: "10:00:00"
     actions:
-      - action: rest_command.jarvis_event
-        data:
-          event: briefing
+      - variables:
+          satellit: >-
+            {%- set geraet = device_id('binary_sensor.jarvis_satellit_bad_verbunden') -%}
+            {{ (device_entities(geraet) if geraet else []) | select('match', 'assist_satellite[.]') | first | default('', true) }}
+      - if:
+          - condition: state
+            entity_id: binary_sensor.jarvis_satellit_bad_verbunden
+            state: "on"
+          - condition: template
+            value_template: "{{ satellit != '' and states(satellit) not in ['unavailable', 'unknown'] }}"
+        then:
+          - action: rest_command.jarvis_briefing_text
+            response_variable: antwort
+            continue_on_error: true
+          - if:
+              - condition: template
+                value_template: "{{ antwort is defined and antwort.status | default(0) == 200 and (antwort.content.text | default('')) | length > 0 }}"
+            then:
+              - action: assist_satellite.announce
+                target:
+                  entity_id: "{{ satellit }}"
+                data:
+                  message: "{{ antwort.content.text }}"
+            else:
+              # Meldet Jarvis «nicht fertig, Nachlieferung per Telegram», kommt das Briefing ohnehin; sonst Fallback
+              - if:
+                  - condition: template
+                    value_template: "{{ not (antwort is defined and antwort.status | default(0) == 200 and antwort.content.nachlieferung | default('') == 'telegram') }}"
+                then:
+                  - action: rest_command.jarvis_event
+                    data:
+                      event: briefing
+        else:
+          - action: rest_command.jarvis_event
+            data:
+              event: briefing
 
   - alias: "Jarvis: Taster lang gedrückt"
     description: "Langer Druck auf den Taster von Node 1 fragt Jarvis nach dem Zustand des Raums."
@@ -68,3 +118,32 @@ automation:
           kamera: raum
           label: person
 
+  # Satelliten nachts leiser und mit gedimmter LED (Schalter «Nachtmodus» im ESPHome-Gerät).
+  # Home Assistant macht aus «Lautstärke» die ID …_lautstarke (ä → a).
+  - alias: "Jarvis: Satellit Nachtmodus"
+    triggers:
+      - trigger: time
+        at: "22:00:00"
+        id: an
+      - trigger: time
+        at: "06:30:00"
+        id: aus
+    actions:
+      - action: "switch.turn_{{ 'on' if trigger.id == 'an' else 'off' }}"
+        target:
+          entity_id:
+            - switch.jarvis_satellit_nachtmodus
+            - switch.jarvis_satellit_bad_nachtmodus
+
+  - alias: "Jarvis: Lautstärke tagsüber 60"
+    triggers:
+      - trigger: time
+        at: "06:35:00"
+    actions:
+      - action: number.set_value
+        target:
+          entity_id:
+            - number.jarvis_satellit_lautstarke
+            - number.jarvis_satellit_bad_lautstarke
+        data:
+          value: 60

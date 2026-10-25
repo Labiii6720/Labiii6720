@@ -50,6 +50,23 @@
           ]
         },
         {
+          "name": "FreigabenIntent",
+          "slots": [],
+          "samples": [
+            "nach offenen aufträgen",
+            "nach offenen freigaben",
+            "nach meinen freigaben",
+            "offene aufträge",
+            "offene freigaben",
+            "was wartet auf mich",
+            "was wartet auf meine freigabe",
+            "was muss ich freigeben",
+            "welche aufträge sind offen",
+            "welche aufträge warten",
+            "gibt es offene freigaben"
+          ]
+        },
+        {
           "name": "FrageIntent",
           "slots": [
             {

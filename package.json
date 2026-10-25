@@ -1,6 +1,6 @@
 {
   "name": "jarvis",
-  "version": "0.14.1",
+  "version": "0.24.1",
   "scripts": {
     "start": "tsx src/server.ts",
     "whoop:auth": "tsx scripts/whoop-auth.ts",
@@ -8,11 +8,15 @@
     "try:briefing": "tsx scripts/try.ts briefing",
     "typecheck": "tsc -p tsconfig.json",
     "google:auth": "tsx scripts/google-auth.ts",
-    "check": "tsx scripts/check.ts"
+    "check": "tsx scripts/check.ts",
+    "setup": "tsx scripts/setup.ts",
+    "gesten:modell": "tsx scripts/gesten-modell.ts",
+    "test": "node --import tsx --test \"test/**/*.test.ts\""
   },
   "type": "module",
   "dependencies": {
     "@anthropic-ai/sdk": "^0.131.0",
+    "@mediapipe/tasks-vision": "0.10.14",
     "ask-sdk-core": "^2.14.0",
     "ask-sdk-express-adapter": "^2.14.0",
     "ask-sdk-model": "^1.86.0",

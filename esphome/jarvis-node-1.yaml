@@ -34,7 +34,7 @@ api:
 
 ota:
   - platform: esphome
-    encryption: {}            # nutzt den API-Schlüssel, kein separates Passwort nötig
+    password: !secret ota_password   # schützt Updates über WLAN (secrets.yaml)
 
 wifi:
   ssid: !secret wifi_ssid

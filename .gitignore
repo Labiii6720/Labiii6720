@@ -1,5 +1,7 @@
 node_modules/
 .env
+.env.bak
+.env.tmp
 data/
 service-account.json
 *.log
@@ -10,3 +12,4 @@ frigate/config.yml
 protokolle.json
 cameras.json
 __pycache__/
+vendor/
