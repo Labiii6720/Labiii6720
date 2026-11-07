@@ -43,6 +43,10 @@ class JarvisAgent(conversation.ConversationEntity):
                 timeout=budget / 1000 + 10,
             ) as res:
                 data = await res.json()
+            # Jarvis hielt den Satz für die PIN (nie an Claude): seinen Hinweis sprechen statt «nicht erreichbar»
+            if data.get("error") == "pin":
+                response.async_set_speech(str(data.get("text", "")))
+                return conversation.ConversationResult(response=response, conversation_id=user_input.conversation_id)
             if res.status != 200 or not data.get("ok"):
                 raise RuntimeError(data.get("error", f"HTTP {res.status}"))
             response.async_set_speech(str(data.get("reply", "")))

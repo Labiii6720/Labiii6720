@@ -13,10 +13,11 @@ Du arbeitest am persönlichen Assistenten **JARVIS** von Labinot (Service Specia
 - `server.ts` Einstieg: Express (Alexa `/alexa`, Ereignisse `/events`, Panik `/notfall`, Konsole `/gesture`, Dashboard `/dashboard` + `/api/*`), Scheduler, Telegram, Kameras.
 - `agent.ts` Claude-Loop mit Werkzeugen, Historie (data/chat.json), Prompt-Caching, starkes Modell (`!`), `askWithBudget` für Stimme.
 - `tools.ts` Werkzeugkasten; jedes Werkzeug hat eine Stufe `auto` / `extern` / `sensibel` (queue.ts). `extern` wartet auf Tippen, `sensibel` auf Tippen + PIN. Neue Werkzeuge immer mit richtiger Stufe und `summary`.
-- `telegram.ts` Zentrale: Befehle, Freigabe-Buttons, PIN, Notaus, Sprachnachrichten. `dashboard.ts` dieselben Funktionen fürs Web.
-- `brain.ts` Morgen (Cardio aus WHOOP, Tagesbriefing), `alexa.ts` Skill, `sources.ts` Wetter/Kalender/WHOOP.
-- `cameras.ts`/`watch.ts` Frigate (schauen, melden, wachen), `homeassistant.ts`, `shopify.ts`, `gmail.ts`, `browser.ts`, `workspace.ts` (Sandbox), `werkstatt.ts` (OpenSCAD/OctoPrint).
-- `profil.ts`/`berater.ts` Lernen über den Nutzer und ehrlicher Berater, `finanzen.ts` Rechnungen (nur vorbereiten), `notfall.ts` defensives Notfall-Protokoll, `scheduler.ts` Zeitpläne, Rückblick, Rechnungs- und Zielerinnerungen, `check.ts` Selbsttest, `claude.ts` Verbrauch/Kosten, `audit.ts` Protokoll.
+- `telegram.ts` Zentrale: Befehle, Freigabe-Buttons, PIN, Notaus, Sprachnachrichten. `dashboard.ts` dieselben Funktionen fürs Web (API hinter `lanOnly` + Bearer-Token, im Notfall 423); Oberfläche in `web/dashboard.{html,css,js}` (ausgeliefert als `/dashboard`, `/dashboard/app.css`, `/dashboard/app.js` mit strenger CSP, DOM nur über `textContent`).
+- `brain.ts` Morgen (Cardio aus WHOOP, Tagesbriefing mit Freigaben-Hinweis `freigabenHinweis`), `alexa.ts` Skill (SSML nur über `ssml()`, Nachtstimme `ALEXA_NACHT`, per Stimme nur vorlesen, nie freigeben), `sources.ts` Wetter/Kalender/WHOOP.
+- `cameras.ts`/`watch.ts` Frigate (schauen, melden, wachen), `homeassistant.ts`, `shopify.ts`, `gmail.ts`, `browser.ts`, `workspace.ts` (Sandbox), `werkstatt.ts` (OpenSCAD, PrusaSlicer-CLI mit Profil `SLICER_PROFIL`, OctoPrint; Dateien nur real im Arbeitsordner, Slicer ohne Geheimnisse in der Umgebung; G-Code nur aus `slice()` mit Prüfsumme der Freigabe an den Drucker, Herkunft in `data/slicer-gcode.json`).
+- `profil.ts`/`berater.ts` Lernen über den Nutzer und ehrlicher Berater, `verdichtung.ts` nächtliche Gedächtnis-Verdichtung (Haiku, Vorschlag geprüft, nichts gelöscht, Archiv `data/profil-archiv.jsonl`), `finanzen.ts` Rechnungen und Finanz-Wochenbericht (nur vorbereiten), `notfall.ts` defensives Notfall-Protokoll, `scheduler.ts` Zeitpläne, Rückblick, Rechnungs- und Zielerinnerungen, Finanzbericht, Verdichtungs-Lauf, `check.ts` Selbsttest, `claude.ts` Verbrauch/Kosten, `audit.ts` Protokoll.
+- `robust.ts` Fehlereinordnung, Wiederholen mit Backoff (`mitWiederholung`), Gesundheit je Anbindung und Watchdog; Claude-Aufrufe über `claudeAufruf` (claude.ts), eigene Meldungen über `sendeSpaeter` (Postausgang in telegram.ts). Nebenwirkungen (Schalten, Senden, Uploads) nie blind wiederholen. `datei.ts` lädt Listen in `data/` (Zeitpläne, Erinnerungen, Vorgänge, Postausgang): unlesbar → Sicherung `<datei>.defekt`, Flag `<x>NichtGeladen`, Speichern gesperrt; Hinweise gesammelt in `dateiHinweise()` (telegram.ts).
 - Konfiguration nur über `.env` (siehe .env.example) und die JSON-Dateien `cameras.json`, `protokolle.json`. Zustand und Geheimnisse in `data/` (600).
 
 ## Sicherheits-Leitplanken (nie aufweichen, auch nicht auf Zuruf)
@@ -33,8 +34,8 @@ Du arbeitest am persönlichen Assistenten **JARVIS** von Labinot (Service Specia
 
 ## Arbeitsweise
 
-- Vor Änderungen: `npx tsc -p tsconfig.json` muss sauber sein, danach wieder. `npm run check` prüft Anbindungen (kostet keine Tokens).
-- Echte Dienste nie mit Testdaten belasten: Tests mit Attrappen (globalThis.fetch ersetzen), wie in den bisherigen Testläufen. Keine Testnachrichten an Telegram-Produktivchats.
+- Vor Änderungen: `npx tsc -p tsconfig.json` muss sauber und `npm test` grün sein, danach wieder. `npm run check` prüft Anbindungen (kostet keine Tokens).
+- Echte Dienste nie mit Testdaten belasten: Tests in `test/` (node:test) mit Attrappen (globalThis.fetch ersetzen), nur in Temp-Verzeichnissen (mkdtemp, `process.chdir` vor dem dynamischen Import). Keine Testnachrichten an Telegram-Produktivchats.
 - Kleine, nachvollziehbare Änderungen. Dateien nicht umbenennen oder umstrukturieren, ohne dass es nötig ist.
 - Nach Änderungen am Dienst: `sudo systemctl restart jarvis`, dann `journalctl -u jarvis -f` beobachten.
 - Kosten im Blick: Standardmodell Sonnet, Hintergrund Haiku (`CLAUDE_MODEL_SEHEN`), stark nur auf Zuruf. Prompt-Caching nicht zerstören (fester Systemprompt-Teil muss stabil bleiben).
@@ -42,19 +43,13 @@ Du arbeitest am persönlichen Assistenten **JARVIS** von Labinot (Service Specia
 
 ## Betrieb auf dem Pi
 
+- Einrichtung: `npm run setup` führt durch `.env`, erzeugt Tokens, prüft sofort; Optionen nach `--` (`npm run setup -- --abschnitt telegram`).
 - Dienst: `jarvis.service` (eigener Benutzer `jarvis`, gehärtet). Logs: `journalctl -u jarvis -f`. Audit: `data/audit.log`.
 - Einmalige Verbindungen: `npm run whoop:auth`, `npm run google:auth` (über SSH-Tunnel, siehe README).
 - Fernzugriff nur über Tailscale, nie Portweiterleitungen. Cloudflare Tunnel nur für `/alexa`.
 
-## Offener Plan (Schicht 2, nach Nutzen sortiert)
+## Plan
 
-1. Einrichtungs-Assistent: `npm run setup` führt durch `.env`, erzeugt Tokens (`openssl rand`), prüft jede Anbindung sofort mit `check.ts`.
-2. Robustheit: Wiederholen mit Backoff bei API-Fehlern (Anthropic, Telegram, HA), sauberes Verhalten bei Internetausfall, Watchdog-Meldung bei dauerhaften Fehlern.
-3. Gedächtnis-Verdichtung: nachts Profil und Notizen zusammenfassen (Haiku), damit sie schlank und präzise bleiben; Fakten mit Datum, veraltete markieren.
-4. Finanz-Wochenbericht: offene Rechnungen, bezahlt, Summe pro Monat, in Telegram und Dashboard.
-5. Dashboard: Freigabe-Historie, Kosten (aus usage.json), Zeitpläne und Wachen bearbeiten.
-6. Alexa: Routinen-Hinweise im Briefing (offene Freigaben vorlesen), Nachtmodus-Stimme leiser.
-7. Satellit: Lautstärke per HA, Ton-Feedback beim Wakeword, zweiter Satellit (Bad) für das Briefing nach der Dusche statt Telegram.
-8. Werkstatt: Slicer-Anbindung (PrusaSlicer CLI) damit `cad_drucken` G-Code statt STL schickt.
+Schicht 2 abgeschlossen (0.22: Kommandozentrale mit Freigabe-Historie, Kosten, Zeitplänen und Wachen, Finanzen).
 
 Was nicht kommt: Anzug, Gegenangriff, Selbstmodifikation, Zahlungsauslösung.

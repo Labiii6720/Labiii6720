@@ -1,0 +1,14 @@
+# JARVIS Satellit Bad – zweiter Satellit, liest das Briefing nach der Dusche vor
+# Gleiche Hardware und Pins wie der erste Satellit (jarvis-satellit-basis.yaml); Home Assistant spricht ihn als
+# die Assist-Satellit-Entität dieses Geräts an (ESPHome nennt sie z. B. assist_satellite.jarvis_satellit_bad_assist_satellite;
+# die Automation «Briefing nach der Dusche» in homeassistant/jarvis.yaml findet sie über das Gerät).
+#
+#   esphome config jarvis-satellit-bad.yaml
+#   esphome run jarvis-satellit-bad.yaml
+
+substitutions:
+  name: jarvis-satellit-bad
+  friendly_name: Jarvis Satellit Bad
+
+packages:
+  basis: !include jarvis-satellit-basis.yaml

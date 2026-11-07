@@ -62,6 +62,15 @@ async function current(): Promise<PageLike> {
 
 export const hasBrowser = () => launcher !== realLauncher || Boolean(browserPath());
 
+/** Adresse der offenen Seite, ohne den Browser zu starten; undefined, wenn keine offen ist. */
+export function aktuelleUrl(): string | undefined {
+  try {
+    return page?.url();
+  } catch {
+    return undefined;
+  }
+}
+
 /** Text und Links der aktuellen Seite, gekürzt. */
 export async function describePage(p: PageLike, maxChars = 6000): Promise<string> {
   const title = await p.title().catch(() => "");

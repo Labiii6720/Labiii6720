@@ -1,6 +1,10 @@
+import { readFileSync } from "node:fs";
 import { config } from "./config.js";
-import { neueEntscheidungId, neuesMusterId, neueZielId, profil, profilFuerPrompt, saveProfil } from "./profil.js";
+import { FAKT_MAX_ZEICHEN, gleicherText, neueEntscheidungId, neueFaktId, neuesMusterId, neueZielId, profil, profilFuerAnzeige, profilFuerPrompt, saveProfil } from "./profil.js";
+import { schwaerze } from "./robust.js";
+import { todayKey } from "./time.js";
 import type { Tool } from "./tools.js";
+import { archivVergessen } from "./verdichtung.js";
 
 /**
  * Der Berater-Teil. Zwei feste Leitplanken, die auch spätere Prompts nicht aushebeln sollen:
@@ -31,6 +35,39 @@ export function beraterPrompt(): string {
   ].join("\n");
 }
 
+/** Dieselbe Datei, in die die Verdichtung (verdichtung.ts) die Details verschobener Entscheidungen schreibt */
+const ARCHIV_DATEI = "data/profil-archiv.jsonl";
+
+/** Monat (YYYY-MM) der Chronik, in die die Verdichtung eine Entscheidung verschoben hat; sonst undefined */
+function chronikMonatVon(id: number): string | undefined {
+  let zeilen: string[];
+  try {
+    zeilen = readFileSync(ARCHIV_DATEI, "utf8").split("\n");
+  } catch {
+    return undefined;
+  }
+  for (let k = zeilen.length - 1; k >= 0; k--) {
+    if (!zeilen[k]!.trim()) continue;
+    try {
+      const lauf = JSON.parse(zeilen[k]!) as { entscheidungen?: Array<{ id?: unknown; datum?: unknown }> };
+      const e = (Array.isArray(lauf.entscheidungen) ? lauf.entscheidungen : []).find((x) => x?.id === id);
+      if (!e) continue;
+      const monat = String(e.datum ?? "").slice(0, 7);
+      if (profil.chronik.some((c) => c.monat === monat)) return monat;
+    } catch {
+      // kaputte Zeile überspringen
+    }
+  }
+  return undefined;
+}
+
+/** Nur echte Kalenderdaten JJJJ-MM-TT (kein 2026-02-30) */
+function gueltigeFrist(f: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(f)) return false;
+  const d = new Date(f + "T00:00:00Z");
+  return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === f;
+}
+
 const str = (d: string) => ({ type: "string", description: d });
 const num = (d: string) => ({ type: "number", description: d });
 
@@ -41,8 +78,11 @@ export const beraterTools: Tool[] = [
     description: "Hält ein Ziel des Nutzers fest oder markiert es als erreicht/verworfen. Prägt, worauf Jarvis hin berät.",
     input_schema: { type: "object", properties: { text: str("Das Ziel in einem Satz"), frist: str("Zieldatum ISO, optional"), status: str("offen, erreicht oder verworfen; Standard offen"), id: num("vorhandenes Ziel ändern, optional") } },
     stufe: "extern",
-    summary: (i) => `Ziel ${i.id ? "ändern" : "setzen"}: ${i.text ?? "#" + i.id} (${i.status ?? "offen"})`,
+    summary: (i) =>
+      `Ziel ${i.id ? "#" + i.id + " ändern" : "setzen"}: ${i.text ?? "(Text unverändert)"} · Status ${i.status ?? (i.id ? "unverändert" : "offen")}${i.frist ? " · Frist " + i.frist : ""}`,
     run: async (i) => {
+      // Vor jeder Änderung prüfen, damit eine kaputte Frist nichts halb speichert
+      if (i.frist !== undefined && i.frist !== null && i.frist !== "" && !gueltigeFrist(String(i.frist))) throw new Error("Frist bitte als JJJJ-MM-TT, Sir.");
       if (i.id) {
         const z = profil.ziele.find((x) => x.id === Number(i.id));
         if (!z) throw new Error("Ziel nicht gefunden.");
@@ -108,12 +148,31 @@ export const beraterTools: Tool[] = [
     description: "Zeigt dem Nutzer, was Jarvis über seine Ziele, Werte, Muster und Entscheidungen gelernt hat.",
     input_schema: { type: "object", properties: {} },
     stufe: "auto",
-    run: async () => profilFuerPrompt() || "Noch nichts gelernt.",
+    run: async () => profilFuerAnzeige() || "Noch nichts gelernt.",
+  },
+  {
+    name: "fakt_merken",
+    description:
+      "Hält einen dauerhaften Fakt über den Nutzer fest (Wohnort, Familie, Arbeit, feste Vorlieben), der in jede Antwort einfliesst. Knapp, ein Satz. Für Einzelheiten und Kleinkram notiz_speichern.",
+    input_schema: { type: "object", properties: { text: str(`Der Fakt in einem knappen Satz (höchstens ${FAKT_MAX_ZEICHEN} Zeichen)`) }, required: ["text"] },
+    stufe: "auto",
+    run: async (i) => {
+      const text = String(i.text ?? "").replace(/\s+/g, " ").trim();
+      if (!text) throw new Error("Kein Fakt angegeben.");
+      if (text.length > FAKT_MAX_ZEICHEN) throw new Error(`Bitte knapper, höchstens ${FAKT_MAX_ZEICHEN} Zeichen.`);
+      const bekannt = profil.fakten.find((f) => !f.veraltet && gleicherText(f.text, text));
+      if (bekannt) return `Schon bekannt (#${bekannt.id}).`;
+      const f = { id: neueFaktId(), text, seit: todayKey(), quelle: "chat" as const };
+      profil.fakten.push(f);
+      saveProfil();
+      return `Fakt #${f.id} gemerkt.`;
+    },
   },
   {
     name: "profil_vergessen",
-    description: "Löscht einen Eintrag aus dem Profil (Ziel, Wert, Muster, Entscheidung oder Fakt).",
-    input_schema: { type: "object", properties: { art: str("ziel, wert, muster, entscheidung oder fakt"), id: num("Nummer bei ziel/muster/entscheidung"), text: str("Wortlaut bei wert/fakt") }, required: ["art"] },
+    description:
+      "Löscht einen Eintrag aus dem Profil (Ziel, Wert, Muster, Entscheidung, Fakt oder Chronik-Monat). Ältere Entscheidungen stehen nach der Verdichtung nur noch in der Chronik; diese per Monat vergessen.",
+    input_schema: { type: "object", properties: { art: str("ziel, wert, muster, entscheidung, fakt oder chronik"), id: num("Nummer bei ziel/muster/entscheidung/fakt"), text: str("Wortlaut bei wert/fakt (statt Nummer), Monat YYYY-MM bei chronik") }, required: ["art"] },
     stufe: "extern",
     summary: (i) => `Profil vergessen: ${i.art} ${i.id ?? i.text ?? ""}`,
     run: async (i) => {
@@ -125,9 +184,50 @@ export const beraterTools: Tool[] = [
       };
       if (art === "ziel") byId(profil.ziele);
       else if (art === "muster") byId(profil.muster);
-      else if (art === "entscheidung") byId(profil.entscheidungen);
+      else if (art === "entscheidung") {
+        if (!profil.entscheidungen.some((x) => x.id === Number(i.id))) {
+          const monat = chronikMonatVon(Number(i.id));
+          if (monat) throw new Error(`Nicht gefunden. Liegt in der Chronik ${monat}; mit art chronik vergessen.`);
+        }
+        byId(profil.entscheidungen);
+      }
+      else if (art === "chronik") {
+        const monat = String(i.text ?? "").trim();
+        const imProfil = profil.chronik.some((c) => c.monat === monat);
+        if (!imProfil && !/^\d{4}-(0[1-9]|1[0-2])$/.test(monat)) throw new Error("Nicht gefunden.");
+        if (imProfil) {
+          const vorher = profil.chronik;
+          profil.chronik = vorher.filter((c) => c.monat !== monat);
+          try {
+            saveProfil();
+          } catch (e) {
+            // Speicher und Datei bleiben gleich, sonst fände ein zweiter Versuch den Monat nicht mehr
+            profil.chronik = vorher;
+            throw e;
+          }
+        }
+        // Vergessen gilt auch für die Details im Archiv. Auch ohne Monat im Profil versuchen: so holt ein
+        // zweiter Aufruf ein früher gescheitertes Bereinigen des Archivs nach.
+        let imArchiv: number;
+        try {
+          imArchiv = archivVergessen(monat);
+        } catch (e) {
+          const grund = schwaerze(e instanceof Error ? e.message : String(e));
+          if (!imProfil) throw new Error(`Die Details im Archiv liessen sich nicht entfernen (${grund}). Bitte später nochmals, Sir.`);
+          return `Chronik ${monat} vergessen. Die Details im Archiv liessen sich nicht entfernen (${grund}). Ein erneuter Versuch holt das nach, Sir.`;
+        }
+        if (!imProfil && imArchiv === 0) throw new Error("Nicht gefunden.");
+        return imProfil ? "Vergessen." : "Vergessen (Archiv nachgeholt).";
+      }
       else if (art === "wert") profil.werte = profil.werte.filter((w) => w !== String(i.text));
-      else if (art === "fakt") profil.fakten = profil.fakten.filter((f) => f !== String(i.text));
+      else if (art === "fakt") {
+        if (i.id !== undefined && i.id !== null && i.id !== "") byId(profil.fakten);
+        else {
+          const vorher = profil.fakten.length;
+          profil.fakten = profil.fakten.filter((f) => !gleicherText(f.text, String(i.text ?? "")));
+          if (profil.fakten.length === vorher) throw new Error("Nicht gefunden.");
+        }
+      }
       else throw new Error("Unbekannte Art.");
       saveProfil();
       return "Vergessen.";

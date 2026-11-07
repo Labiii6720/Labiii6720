@@ -33,3 +33,16 @@ export function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
     new Promise<never>((_, reject) => setTimeout(() => reject(new Error(`Timeout nach ${ms} ms`)), ms).unref()),
   ]);
 }
+
+/**
+ * Liegt `now` im Nachholfenster [ziel, ziel + fensterMin) der Uhrzeit `zielHHMM`?
+ * Das Fenster endet spätestens am Tagesende (kein Übertrag auf den nächsten Tag); fensterMin ≤ 1 heisst: nur zur Minute.
+ */
+export function imFenster(zielHHMM: string, now: Date, fensterMin: number): boolean {
+  if (!/^\d{1,2}:\d{2}$/.test(zielHHMM.trim())) return false;
+  const ziel = hhmm(zielHHMM.trim());
+  if (ziel < 0 || ziel >= 24 * 60) return false;
+  const ende = Math.min(ziel + Math.max(1, Math.floor(fensterMin) || 0), 24 * 60);
+  const jetzt = minutesOfDay(now);
+  return ziel <= jetzt && jetzt < ende;
+}
